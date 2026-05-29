@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import importlib
 import json
 import math
@@ -70,7 +71,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _today_key
+from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -133,8 +134,8 @@ class _CapturedSendMessageCall:
 @register(
     PLUGIN_NAME,
     "Codex",
-    "我会永远陪着你：让 Bot 拥有连续状态、生活日程与自然主动分享的私聊陪伴插件。",
-    "2.0.0",
+    "我会永远陪着你：让 Bot 拥有连续生活状态、私聊主动陪伴、群聊观察和长期创作的拟人陪伴插件。",
+    "2.2.0",
 )
 class PrivateCompanionPlugin(Star):
     @staticmethod
@@ -200,6 +201,12 @@ class PrivateCompanionPlugin(Star):
         self.greeting_idle_minutes = self._cfg_int(c, "greeting_idle_minutes", 30, 0, 240)
         self.allow_insomnia_night_message = self._cfg_bool(c, "allow_insomnia_night_message", True)
         self.proactive_reply_context_hours = self._cfg_int(c, "proactive_reply_context_hours", 12, 1, 72)
+        self.enable_creative_writing = self._cfg_bool(c, "enable_creative_writing", True)
+        self.creative_inspiration_probability = min(1.0, self._cfg_float(c, "creative_inspiration_probability", 0.20, 0.0))
+        self.creative_share_probability = min(1.0, self._cfg_float(c, "creative_share_probability", 0.28, 0.0))
+        self.creative_base_chars_per_hour = self._cfg_int(c, "creative_base_chars_per_hour", 260, 60, 1200)
+        self.creative_max_active_projects = self._cfg_int(c, "creative_max_active_projects", 2, 1, 5)
+        self.creative_hidden_mode = self._cfg_bool(c, "creative_hidden_mode", True)
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
         self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", True)
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
@@ -321,11 +328,22 @@ class PrivateCompanionPlugin(Star):
         self.enable_group_slang_meanings = self._cfg_bool(c, "enable_group_slang_meanings", True)
         self.enable_group_relationship_graph = self._cfg_bool(c, "enable_group_relationship_graph", True)
         self.enable_group_privacy_guard = self._cfg_bool(c, "enable_group_privacy_guard", True)
+        self.enable_worldbook_member_recognition = self._cfg_bool(c, "enable_worldbook_member_recognition", True)
+        self.worldbook_auto_import = self._cfg_bool(c, "worldbook_auto_import", True)
+        self.worldbook_member_match_aliases = self._cfg_bool(c, "worldbook_member_match_aliases", True)
+        self.worldbook_self_registration = self._cfg_bool(c, "worldbook_self_registration", True)
+        self.worldbook_member_inject_limit = self._cfg_int(c, "worldbook_member_inject_limit", 6, 1, 20)
+        self.worldbook_config_paths = self._cfg_str(c, "worldbook_config_paths", "")
         self.group_interject_provider_id = self._cfg_str(c, "GROUP_INTERJECT_PROVIDER_ID", "")
         self.group_episode_provider_id = self._cfg_str(c, "GROUP_EPISODE_PROVIDER_ID", "")
         self.group_slang_provider_id = self._cfg_str(c, "GROUP_SLANG_PROVIDER_ID", "")
         self.enable_livingmemory_integration = self._cfg_bool(c, "enable_livingmemory_integration", True)
         self.livingmemory_tool_name = self._cfg_str(c, "livingmemory_tool_name", "recall_long_term_memory", "recall_long_term_memory")
+        self.enable_bilibili_integration = self._cfg_bool(c, "enable_bilibili_integration", True)
+        self.enable_bilibili_boredom_watch = self._cfg_bool(c, "enable_bilibili_boredom_watch", True)
+        self.bilibili_boredom_min_interval_hours = self._cfg_int(c, "bilibili_boredom_min_interval_hours", 8, 2, 72)
+        self.bilibili_share_probability = min(1.0, self._cfg_float(c, "bilibili_share_probability", 0.35, 0.0))
+        self.bilibili_share_min_score = self._cfg_int(c, "bilibili_share_min_score", 7, 0, 10)
         self.group_episode_refresh_minutes = self._cfg_int(c, "group_episode_refresh_minutes", 180, 30, 1440)
         self.group_slang_summary_minutes = self._cfg_int(c, "group_slang_summary_minutes", 360, 60, 2880)
         self.max_group_topic_threads = self._cfg_int(c, "max_group_topic_threads", 12, 3, 40)
@@ -346,6 +364,12 @@ class PrivateCompanionPlugin(Star):
         self._framework_captured_send_cache: dict[str, list[_CapturedSendMessageCall]] = {}
         self._last_input_status_at: dict[str, float] = {}
         self.data = self._load_data_sync()
+        if self.worldbook_auto_import:
+            try:
+                if self._import_worldbook_entries_from_sources():
+                    self._save_data_sync()
+            except Exception as e:
+                logger.warning(f"[PrivateCompanion] 刷新关系网失败: {e}", exc_info=True)
         if self.default_enable_configured_targets:
             self._sync_configured_targets()
             self._save_data_sync()
@@ -428,6 +452,14 @@ class PrivateCompanionPlugin(Star):
             "can_do": [],
             "important_dates": [],
             "qq_presence_state": {},
+            "token_usage": {},
+            "bilibili_integration": {},
+            "creative_projects": [],
+            "proactive_candidate_pool": [],
+            "worldbook_entries": [],
+            "worldbook_member_profiles": {},
+            "worldbook_group_profiles": {},
+            "worldbook_import_state": {},
         }
 
     @staticmethod
@@ -452,6 +484,14 @@ class PrivateCompanionPlugin(Star):
         data.setdefault("can_do", [])
         data.setdefault("important_dates", [])
         data.setdefault("qq_presence_state", {})
+        data.setdefault("token_usage", {})
+        data.setdefault("bilibili_integration", {})
+        data.setdefault("creative_projects", [])
+        data.setdefault("proactive_candidate_pool", [])
+        data.setdefault("worldbook_entries", [])
+        data.setdefault("worldbook_member_profiles", {})
+        data.setdefault("worldbook_group_profiles", {})
+        data.setdefault("worldbook_import_state", {})
         return data
 
     @staticmethod
@@ -483,6 +523,21 @@ class PrivateCompanionPlugin(Star):
             return self._new_store()
 
     def _save_data_sync(self):
+        # Avoid losing migrated worldbook data if an older in-memory state is saved before reload finishes.
+        if not self.data.get("worldbook_entries") and os.path.exists(self.data_file):
+            try:
+                with open(self.data_file, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                if isinstance(existing, dict) and existing.get("worldbook_entries"):
+                    for key in (
+                        "worldbook_entries",
+                        "worldbook_member_profiles",
+                        "worldbook_group_profiles",
+                        "worldbook_import_state",
+                    ):
+                        self.data[key] = existing.get(key, self.data.get(key))
+            except Exception:
+                pass
         tmp_file = self.data_file + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
@@ -592,6 +647,557 @@ class PrivateCompanionPlugin(Star):
                 return False
         return True
 
+    def _worldbook_config_path_candidates(self) -> list[Path]:
+        data_root = Path(get_astrbot_data_path())
+        configured = [
+            Path(part.strip())
+            for part in re.split(r"[\n,;；]+", str(self.worldbook_config_paths or ""))
+            if part.strip()
+        ]
+        defaults = [
+            data_root / "config" / "plugin_upload_astrbot_plugin_worldbook_config.json",
+            data_root / "config" / "astrbot_plugin_worldbook_config.json",
+        ]
+        paths: list[Path] = []
+        for path in [*configured, *defaults]:
+            resolved = path if path.is_absolute() else data_root / path
+            if resolved not in paths:
+                paths.append(resolved)
+        return paths
+
+    @staticmethod
+    def _worldbook_entry_template(raw: dict[str, Any]) -> str:
+        return str(raw.get("__template_key") or raw.get("template") or "").strip().lower()
+
+    def _normalize_worldbook_entry(self, raw: dict[str, Any], *, source: str) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        name = _single_line(raw.get("name"), 80)
+        content = str(raw.get("content") or "").strip()
+        if not name and not content:
+            return None
+        scope = (
+            [_single_line(item, 40).strip() for item in raw.get("scope", []) if _single_line(item, 40).strip()]
+            if isinstance(raw.get("scope"), list)
+            else []
+        )
+        aliases = (
+            [_single_line(item, 40).strip() for item in raw.get("aliases", []) if _single_line(item, 40).strip()]
+            if isinstance(raw.get("aliases"), list)
+            else []
+        )
+        return {
+            "template": self._worldbook_entry_template(raw),
+            "name": name,
+            "enabled": bool(raw.get("enabled", True)),
+            "priority": _safe_int(raw.get("priority"), 100, -1000, 10000),
+            "scope": scope,
+            "keywords": [_single_line(item, 80) for item in raw.get("keywords", []) if _single_line(item, 80)]
+            if isinstance(raw.get("keywords"), list)
+            else [],
+            "aliases": aliases,
+            "content": content,
+            "source": source,
+            "raw": raw,
+        }
+
+    def _import_worldbook_entries_from_sources(self) -> bool:
+        entries: list[dict[str, Any]] = []
+        source_files: list[str] = []
+        for path in self._worldbook_config_path_candidates():
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            except Exception as e:
+                logger.warning(f"[PrivateCompanion] 读取关系网配置失败: {path} ({e})")
+                continue
+            raw_entries = payload.get("entry_storage") if isinstance(payload, dict) else None
+            if not isinstance(raw_entries, list):
+                continue
+            source_files.append(str(path))
+            for raw in raw_entries:
+                item = self._normalize_worldbook_entry(raw, source=str(path))
+                if item:
+                    entries.append(item)
+        if not entries:
+            return False
+
+        profiles: dict[str, dict[str, Any]] = {}
+        groups: dict[str, dict[str, Any]] = {}
+        for item in entries:
+            template = item.get("template")
+            digit_scopes = [str(scope).strip() for scope in item.get("scope", []) if str(scope).strip().isdigit()]
+            if template == "user":
+                for user_id in digit_scopes:
+                    profile = profiles.setdefault(
+                        user_id,
+                        {
+                            "user_id": user_id,
+                            "name": item.get("name") or user_id,
+                            "aliases": [],
+                            "content": "",
+                            "identity_note": "",
+                            "boundary_note": "",
+                            "important_memories": [],
+                            "enabled": bool(item.get("enabled", True)),
+                            "priority": item.get("priority", 120),
+                            "source_entries": [],
+                            "observed_names": [],
+                        },
+                    )
+                    for alias in [item.get("name"), *(item.get("aliases") or [])]:
+                        alias = _single_line(alias, 40)
+                        if alias and alias not in profile["aliases"] and alias != user_id:
+                            profile["aliases"].append(alias)
+                    content = _single_line(item.get("content"), 1200)
+                    if content and content not in profile.get("content", ""):
+                        profile["content"] = "\n".join(part for part in (profile.get("content"), content) if part).strip()
+                    if content and not profile.get("note"):
+                        profile["note"] = content
+                    if content and not profile.get("identity_note"):
+                        profile["identity_note"] = content
+                    profile["enabled"] = bool(profile.get("enabled", True) and item.get("enabled", True))
+                    profile["source_entries"].append(item.get("name") or user_id)
+            elif template == "group":
+                for group_id in digit_scopes:
+                    groups[group_id] = {
+                        "group_id": group_id,
+                        "name": item.get("name") or group_id,
+                        "content": item.get("content") or "",
+                        "enabled": bool(item.get("enabled", True)),
+                        "priority": item.get("priority", 110),
+                        "aliases": item.get("aliases") or [],
+                        "source_entries": [item.get("name") or group_id],
+                    }
+
+        old_profiles = self.data.get("worldbook_member_profiles") if isinstance(self.data.get("worldbook_member_profiles"), dict) else {}
+        for user_id, profile in profiles.items():
+            old = old_profiles.get(user_id) if isinstance(old_profiles.get(user_id), dict) else {}
+            if old.get("manual_edit_ts"):
+                for key in ("name", "aliases", "content", "identity_note", "boundary_note", "important_memories", "enabled", "priority", "note", "manual_edit_ts"):
+                    if key in old:
+                        profile[key] = old[key]
+            observed = old.get("observed_names") if isinstance(old.get("observed_names"), list) else []
+            profile["observed_names"] = [_single_line(item, 40) for item in observed if _single_line(item, 40)]
+            old_note = str(old.get("note") or "").strip()
+            if old_note:
+                profile["note"] = old_note
+            elif not profile.get("note"):
+                profile["note"] = profile.get("content", "")
+            if not profile.get("identity_note"):
+                profile["identity_note"] = profile.get("note") or profile.get("content", "")
+            if not isinstance(profile.get("important_memories"), list):
+                profile["important_memories"] = []
+        for user_id, old in old_profiles.items():
+            if user_id in profiles or not isinstance(old, dict):
+                continue
+            if old.get("manual_edit_ts") or "手动维护" in (old.get("source_entries") or []):
+                profiles[user_id] = old
+
+        old_groups = self.data.get("worldbook_group_profiles") if isinstance(self.data.get("worldbook_group_profiles"), dict) else {}
+        for group_id, group in list(groups.items()):
+            old = old_groups.get(group_id) if isinstance(old_groups.get(group_id), dict) else {}
+            if old.get("manual_edit_ts"):
+                for key in ("name", "content", "enabled", "priority", "aliases", "manual_edit_ts"):
+                    if key in old:
+                        group[key] = old[key]
+        for group_id, old in old_groups.items():
+            if group_id in groups or not isinstance(old, dict):
+                continue
+            if old.get("manual_edit_ts") or "手动维护" in (old.get("source_entries") or []):
+                groups[group_id] = old
+
+        changed = (
+            self.data.get("worldbook_entries") != entries
+            or self.data.get("worldbook_member_profiles") != profiles
+            or self.data.get("worldbook_group_profiles") != groups
+        )
+        self.data["worldbook_entries"] = entries
+        self.data["worldbook_member_profiles"] = profiles
+        self.data["worldbook_group_profiles"] = groups
+        self.data["worldbook_import_state"] = {
+            "last_import_at": _now_ts(),
+            "source_files": source_files,
+            "entry_count": len(entries),
+            "member_count": len(profiles),
+            "group_count": len(groups),
+        }
+        return changed
+
+    def _remember_worldbook_observed_name(self, user_id: str, name: str) -> None:
+        if not self.enable_worldbook_member_recognition:
+            return
+        user_id = str(user_id or "").strip()
+        name = _single_line(name, 40)
+        if not user_id or not name or name == user_id:
+            return
+        profiles = self.data.get("worldbook_member_profiles")
+        if not isinstance(profiles, dict):
+            return
+        profile = profiles.get(user_id)
+        if not isinstance(profile, dict):
+            return
+        observed = profile.setdefault("observed_names", [])
+        if not isinstance(observed, list):
+            observed = []
+            profile["observed_names"] = observed
+        if name not in observed and name not in profile.get("aliases", []):
+            observed.append(name)
+            del observed[:-8]
+
+    def _worldbook_profile_by_user_id(self, user_id: str) -> dict[str, Any] | None:
+        if not self.enable_worldbook_member_recognition:
+            return None
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            return None
+        profiles = self.data.get("worldbook_member_profiles")
+        if not isinstance(profiles, dict):
+            return None
+        profile = profiles.get(user_id)
+        if not isinstance(profile, dict) or not profile.get("enabled", True):
+            return None
+        return profile
+
+    def _group_member_identity_name(self, user_id: str, fallback: str = "", *, limit: int = 30) -> str:
+        profile = self._worldbook_profile_by_user_id(user_id)
+        if isinstance(profile, dict):
+            name = _single_line(profile.get("name"), limit)
+            if name and name != str(user_id or ""):
+                return name
+        return _single_line(fallback, limit) or str(user_id or "") or "群友"
+
+    def _group_member_identity_note(self, user_id: str, *, limit: int = 120) -> str:
+        profile = self._worldbook_profile_by_user_id(user_id)
+        if not isinstance(profile, dict):
+            return ""
+        return _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), limit)
+
+    def _worldbook_profile_memory_lines(self, profile: dict[str, Any], *, limit: int = 3) -> list[str]:
+        memories = profile.get("important_memories")
+        if not isinstance(memories, list):
+            return []
+        valid = [item for item in memories if isinstance(item, dict) and item.get("enabled", True)]
+        valid.sort(key=lambda item: (_safe_int(item.get("weight"), 50, -1000), _safe_float(item.get("updated_at"), 0)), reverse=True)
+        lines: list[str] = []
+        for item in valid[:limit]:
+            title = _single_line(item.get("title"), 36)
+            content = _single_line(item.get("content"), 120)
+            if not content:
+                continue
+            privacy = _single_line(item.get("privacy"), 12) or "internal"
+            prefix = f"{title}：" if title else ""
+            lines.append(f"{prefix}{content}｜{privacy}｜权重{_safe_int(item.get('weight'), 50, -1000)}")
+        return lines
+
+    def _group_message_addresses_bot(self, event: AstrMessageEvent, text: str) -> bool:
+        if getattr(event, "is_at_or_wake_command", False) or getattr(event, "is_wake", False):
+            return True
+        cleaned = str(text or "")
+        if self.bot_name and self.bot_name in cleaned:
+            return True
+        if re.search(r"(^|\s)@\S+", cleaned):
+            return True
+        message_obj = getattr(event, "message_obj", None)
+        chain = getattr(message_obj, "message", None) if message_obj is not None else None
+        if isinstance(chain, list):
+            for item in chain:
+                type_name = item.__class__.__name__.lower()
+                if "at" in type_name or hasattr(item, "qq") or hasattr(item, "target"):
+                    return True
+        return False
+
+    @staticmethod
+    def _worldbook_name_skeleton(value: Any) -> str:
+        text = _single_line(value, 40).lower()
+        text = re.sub(r"[\s\-_·・.。,:：，;；'\"“”‘’/\\|()\[\]{}<>《》]+", "", text)
+        if not text:
+            return ""
+        table = str.maketrans(
+            {
+                "跌": "爹",
+                "叠": "爹",
+                "迭": "爹",
+                "蝶": "爹",
+                "碟": "爹",
+                "谍": "爹",
+                "耶": "爷",
+                "椰": "爷",
+                "噎": "爷",
+                "粑": "爸",
+                "芭": "爸",
+                "巴": "爸",
+                "叭": "爸",
+                "吧": "爸",
+                "八": "爸",
+                "麻": "妈",
+                "嘛": "妈",
+                "吗": "妈",
+                "骂": "妈",
+                "煮": "主",
+                "嘱": "主",
+                "竹": "主",
+                "住": "主",
+                "铸": "主",
+                "統": "统",
+                "發": "发",
+                "開": "开",
+                "貓": "猫",
+                "妳": "你",
+                "您": "你",
+            }
+        )
+        return text.translate(table)
+
+    @staticmethod
+    def _normalize_worldbook_self_name(value: Any) -> str:
+        text = _single_line(value, 24)
+        text = re.sub(r"^(叫|是|为|做|作)", "", text)
+        text = re.sub(r"(就行|好了|吧|呀|啦|哦|啊)$", "", text).strip()
+        text = text.strip("「」『』“”\"'`[]()（）<>《》:：,，.。!！?？")
+        if not text or len(text) > 6:
+            return ""
+        if text in {"来", "想", "要", "不是", "可以", "不用", "大家", "群友", "机器人"}:
+            return ""
+        if re.search(r"(怎么|为什么|什么|不是|不要|别|吗|呢|吧|请问)", text):
+            return ""
+        skeleton = PrivateCompanionPlugin._worldbook_name_skeleton(text)
+        unsafe_patterns = (
+            r"^(?:你|妳|您|bot|Bot|BOT|机器人|小星)?(?:爹|爸|爸爸|父亲|妈|妈妈|母亲|爷|爷爷|奶奶|祖宗|主人|老公|老婆|男友|女友|对象)$",
+            r"^(?:群主|管理员|管理|号主|官方|客服|系统|开发者|作者|插件作者|超级用户|root|admin)$",
+            r"(傻|蠢|笨蛋|废物|垃圾|滚|死|爹味|逆子|儿子|孙子)",
+            r"(我是你|我是妳|我是您|我是bot|我是机器人)",
+        )
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in unsafe_patterns):
+            return ""
+        if any(re.search(pattern, skeleton, re.IGNORECASE) for pattern in unsafe_patterns):
+            return ""
+        if re.search(r"^(?:你|妳|您).{0,4}$", text):
+            return ""
+        if re.search(r"^你.{0,4}$", skeleton):
+            return ""
+        return text
+
+    def _worldbook_self_registration_conflict(self, sender_id: str, names: list[str]) -> str:
+        profiles = self.data.get("worldbook_member_profiles")
+        if not isinstance(profiles, dict):
+            return ""
+        normalized_names = {
+            self._worldbook_name_skeleton(name)
+            for name in names
+            if self._worldbook_name_skeleton(name)
+        }
+        if not normalized_names:
+            return ""
+        for user_id, profile in profiles.items():
+            other_id = str(user_id or "")
+            if other_id == str(sender_id or "") or not isinstance(profile, dict):
+                continue
+            tokens = self._worldbook_profile_tokens(profile)
+            for token in tokens:
+                token_key = self._worldbook_name_skeleton(token)
+                if not token_key:
+                    continue
+                if token_key in normalized_names:
+                    return f"{other_id}:{_single_line(profile.get('name'), 40) or token}"
+                for name_key in normalized_names:
+                    if len(name_key) >= 3 and len(token_key) >= 3 and (name_key in token_key or token_key in name_key):
+                        return f"{other_id}:{_single_line(profile.get('name'), 40) or token}"
+        return ""
+
+    def _extract_worldbook_self_intro(self, text: str) -> dict[str, Any] | None:
+        cleaned = str(text or "")
+        cleaned = re.sub(r"\[CQ:at,[^\]]+\]", " ", cleaned)
+        if self.bot_name:
+            cleaned = cleaned.replace(self.bot_name, " ")
+        cleaned = re.sub(r"@\S+", " ", cleaned)
+        aliases: list[str] = []
+        primary = ""
+        attempted = False
+        for match in re.finditer(r"(?:我是|我叫)([\u4e00-\u9fffA-Za-z0-9_·・\-]{1,16})", cleaned):
+            attempted = True
+            name = self._normalize_worldbook_self_name(match.group(1))
+            if name:
+                primary = primary or name
+                aliases.append(name)
+        for match in re.finditer(r"(?:你可以叫我|可以叫我|以后叫我|叫我)([^。！？\n]{1,48})", cleaned):
+            attempted = True
+            raw = match.group(1)
+            raw = re.split(r"(?:就行|好了|谢谢|麻烦|$)", raw, maxsplit=1)[0]
+            for part in re.split(r"(?:或者|还是|和|或|、|/|,|，|;|；|\s+)", raw):
+                name = self._normalize_worldbook_self_name(part)
+                if name:
+                    primary = primary or name
+                    aliases.append(name)
+        aliases = list(dict.fromkeys(item for item in aliases if item))
+        if not primary and aliases:
+            primary = aliases[0]
+        if not primary:
+            return {"blocked": True} if attempted else None
+        return {"name": primary, "aliases": aliases[:8]}
+
+    def _maybe_worldbook_self_register_from_group_message(
+        self,
+        event: AstrMessageEvent,
+        *,
+        group_id: str,
+        sender_id: str,
+        sender_name: str,
+        text: str,
+        group: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not (self.enable_worldbook_member_recognition and self.worldbook_self_registration):
+            return None
+        sender_id = str(sender_id or "").strip()
+        if not sender_id:
+            return None
+        existing_profiles = self.data.get("worldbook_member_profiles")
+        if isinstance(existing_profiles, dict) and isinstance(existing_profiles.get(sender_id), dict):
+            return None
+        if not self._group_message_addresses_bot(event, text):
+            return None
+        intro = self._extract_worldbook_self_intro(text)
+        if not intro:
+            return None
+        if intro.get("blocked"):
+            logger.info(
+                "[PrivateCompanion] 群聊关系网自登记已拒绝: group=%s user=%s reason=称呼不合规或超过六字",
+                group_id or "-",
+                sender_id,
+            )
+            return {"blocked_reply": "你是小猪"}
+        name = _single_line(intro.get("name"), 40) or sender_id
+        aliases = [
+            _single_line(item, 40)
+            for item in (intro.get("aliases") if isinstance(intro.get("aliases"), list) else [])
+            if _single_line(item, 40) and _single_line(item, 40) != sender_id
+        ]
+        conflict = self._worldbook_self_registration_conflict(sender_id, [name, *aliases])
+        if conflict:
+            logger.info(
+                "[PrivateCompanion] 群聊关系网自登记已拒绝: group=%s user=%s name=%s reason=名称疑似冒领已有节点 %s",
+                group_id or "-",
+                sender_id,
+                name,
+                conflict,
+            )
+            return {"blocked_reply": "你是小猪"}
+        profiles = self.data.setdefault("worldbook_member_profiles", {})
+        if not isinstance(profiles, dict):
+            profiles = {}
+            self.data["worldbook_member_profiles"] = profiles
+        content = f"{name}在群 {group_id} 主动向 Bot 自我介绍。"
+        profile = {
+            "user_id": sender_id,
+            "name": name,
+            "aliases": aliases,
+            "content": content,
+            "identity_note": f"QQ {sender_id}，自称{name}。",
+            "boundary_note": "",
+            "important_memories": [],
+            "enabled": True,
+            "priority": 120,
+            "source_entries": ["群聊自登记"],
+            "observed_names": [item for item in [_single_line(sender_name, 40)] if item and item not in aliases],
+            "auto_registered_ts": _now_ts(),
+            "auto_registration_pending": True,
+            "self_intro_text": _single_line(text, 260),
+        }
+        profiles[sender_id] = profile
+        recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
+        logger.info(
+            "[PrivateCompanion] 群聊关系网自登记节点: group=%s user=%s name=%s aliases=%s",
+            group_id or "-",
+            sender_id,
+            name,
+            "、".join(aliases) or "-",
+        )
+        return {
+            "group_id": str(group_id),
+            "user_id": sender_id,
+            "name": name,
+            "aliases": aliases,
+            "text": _single_line(text, 260),
+            "sender_name": _single_line(sender_name, 40),
+            "recent": [dict(item) for item in recent[-6:] if isinstance(item, dict)],
+        }
+
+    async def _refresh_worldbook_self_registration_impression(self, payload: dict[str, Any]) -> None:
+        user_id = str(payload.get("user_id") or "").strip()
+        if not user_id:
+            return
+        name = _single_line(payload.get("name"), 40) or user_id
+        aliases = payload.get("aliases") if isinstance(payload.get("aliases"), list) else []
+        recent_lines = []
+        recent_items = payload.get("recent") if isinstance(payload.get("recent"), list) else []
+        for item in recent_items:
+            if not isinstance(item, dict):
+                continue
+            speaker = _single_line(item.get("identity_name") or item.get("name"), 20) or "群友"
+            msg = _single_line(item.get("text"), 80)
+            if msg:
+                recent_lines.append(f"- {speaker}: {msg}")
+        prompt = f"""
+请根据这条群聊自我介绍，生成一段适合“关系节点资料正文”的简短人物印象。
+
+【Bot 人格】
+{_single_line(self._get_default_persona_prompt(), 500)}
+
+【群号】
+{_single_line(payload.get('group_id'), 40)}
+
+【QQ】
+{user_id}
+
+【自称/称呼】
+{name}{"；别名：" + "、".join(_single_line(item, 24) for item in aliases if _single_line(item, 24)) if aliases else ""}
+
+【自我介绍原文】
+{_single_line(payload.get('text'), 260)}
+
+【附近群聊】
+{chr(10).join(recent_lines) or "（暂无）"}
+
+要求：
+- 只输出 1 段中文，40 到 90 字
+- 像人物画像插件里的初始印象：描述可观察信息、称呼和互动注意点
+- 不要编造职业、性格、现实身份或私密事实
+- 不要写“根据聊天记录/资料显示/模型判断”
+""".strip()
+        impression = await self._llm_call(
+            prompt,
+            max_tokens=180,
+            provider_id=self._task_provider(self.relationship_analysis_provider_id, self.mai_style_provider_id),
+        )
+        cleaned = _single_line(impression, 220)
+        if not cleaned:
+            cleaned = f"{name}在群里主动告诉 Bot 可以这样称呼自己；目前只有自我介绍信息，后续需要通过群聊慢慢补充印象。"
+        async with self._data_lock:
+            profile = self._worldbook_profile_by_user_id(user_id)
+            if not isinstance(profile, dict) or not profile.get("auto_registration_pending"):
+                return
+            profile["content"] = cleaned
+            if not profile.get("identity_note"):
+                profile["identity_note"] = f"QQ {user_id}，自称{name}。"
+            memories = profile.setdefault("important_memories", [])
+            if isinstance(memories, list) and not memories:
+                memories.append(
+                    {
+                        "title": "自我介绍",
+                        "content": _single_line(payload.get("text"), 180),
+                        "weight": 70,
+                        "privacy": "internal",
+                        "source": "群聊自登记",
+                        "enabled": True,
+                        "updated_at": _now_ts(),
+                    }
+                )
+            profile["auto_registration_pending"] = False
+            profile["auto_impression_ts"] = _now_ts()
+            self._save_data_sync()
+        logger.info("[PrivateCompanion] 群聊关系网自登记印象已生成: user=%s name=%s", user_id, name)
+
     def _extract_group_id_from_event(self, event: AstrMessageEvent) -> str:
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         match = re.search(r":GroupMessage:(\d+)", umo)
@@ -697,6 +1303,674 @@ class PrivateCompanionPlugin(Star):
             "用途：长期记忆、BM25/Faiss 混合检索、图谱记忆和 Agent 主动回忆。\n"
             "建议：保留本插件的生活状态/关系/群聊气氛层,把大规模长期检索交给 LivingMemory。"
         )
+
+    def _bilibili_plugin_dir(self) -> Path:
+        candidates = [
+            Path(__file__).resolve().parent.parent / "astrbot_plugin_bilibili_bot",
+            Path(__file__).resolve().parent.parent / "astrbot_plugin_bilibili",
+            Path(self.data_dir).parent.parent / "plugins" / "astrbot_plugin_bilibili_bot",
+            Path(self.data_dir).parent.parent / "plugins" / "astrbot_plugin_bilibili",
+        ]
+        for path in candidates:
+            if (path / "main.py").exists():
+                return path
+        return candidates[0]
+
+    def _bilibili_watch_log_file(self) -> Path:
+        try:
+            module = importlib.import_module("data.plugins.astrbot_plugin_bilibili_bot.core.config")
+            path = getattr(module, "WATCH_LOG_FILE", "")
+            if path:
+                return Path(path)
+        except Exception:
+            pass
+        try:
+            module = importlib.import_module("astrbot_plugin_bilibili_bot.core.config")
+            path = getattr(module, "WATCH_LOG_FILE", "")
+            if path:
+                return Path(path)
+        except Exception:
+            pass
+        try:
+            return Path(StarTools.get_data_dir("astrbot_plugin_bilibili_ai_bot")) / "watch_log.json"
+        except Exception:
+            return self._bilibili_plugin_dir().parent.parent / "plugin_data" / "astrbot_plugin_bilibili_ai_bot" / "watch_log.json"
+
+    def _bilibili_available(self) -> bool:
+        return self._bilibili_plugin_dir().exists() or self._bilibili_watch_log_file().exists()
+
+    def _find_bilibili_bot_instance(self) -> Any | None:
+        for obj in gc.get_objects():
+            try:
+                cls = obj.__class__
+                module = str(getattr(cls, "__module__", ""))
+                if "astrbot_plugin_bilibili" not in module:
+                    continue
+                if callable(getattr(obj, "_run_proactive", None)) and hasattr(obj, "_proactive_task"):
+                    return obj
+            except Exception:
+                continue
+        return None
+
+    def _load_bilibili_watch_log(self) -> list[dict[str, Any]]:
+        path = self._bilibili_watch_log_file()
+        if not path.exists():
+            return []
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, list):
+                return [item for item in raw if isinstance(item, dict)]
+        except Exception as e:
+            logger.debug(f"[PrivateCompanion] 读取 B 站观看日志失败: {e}")
+        return []
+
+    def _latest_bilibili_video_candidate(self) -> dict[str, Any] | None:
+        logs = self._load_bilibili_watch_log()
+        if not logs:
+            return None
+        for item in reversed(logs[-20:]):
+            bvid = _single_line(item.get("bvid"), 32)
+            title = _single_line(item.get("title"), 80)
+            if not bvid or not title:
+                continue
+            score = _safe_int(item.get("score"), 0, 0, 10)
+            comment = _single_line(item.get("comment"), 120)
+            review = _single_line(item.get("review"), 180)
+            if score < self.bilibili_share_min_score:
+                continue
+            return {
+                "key": f"{bvid}:{_single_line(item.get('time'), 20)}",
+                "bvid": bvid,
+                "title": title,
+                "up_name": _single_line(item.get("up_name"), 40),
+                "score": score,
+                "mood": _single_line(item.get("mood"), 24),
+                "comment": comment,
+                "review": review,
+                "pic": _single_line(item.get("pic"), 240),
+                "time": _single_line(item.get("time"), 24),
+                "actions": list(item.get("actions") or []) if isinstance(item.get("actions"), list) else [],
+            }
+        return None
+
+    def _bot_currently_bored_enough_for_bilibili(self) -> bool:
+        now_dt = datetime.now()
+        if now_dt.hour < 10 or now_dt.hour >= 23:
+            return False
+        state = self.data.get("daily_state", {})
+        energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
+        mood = _single_line(state.get("mood_bias") if isinstance(state, dict) else "", 24)
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        activity = _single_line((current_item or {}).get("activity"), 80)
+        text = f"{mood} {activity}"
+        boredom_tokens = ("无聊", "发呆", "摸鱼", "刷视频", "短视频", "休息", "闲", "空")
+        if any(token in text for token in boredom_tokens):
+            return True
+        return 35 <= energy <= 72 and random.random() < 0.34
+
+    async def _maybe_trigger_bilibili_boredom_watch(self) -> None:
+        if not (self.enable_bilibili_integration and self.enable_bilibili_boredom_watch):
+            return
+        if not self._bilibili_available() or not self._bot_currently_bored_enough_for_bilibili():
+            return
+        state = self.data.setdefault("bilibili_integration", {})
+        if not isinstance(state, dict):
+            self.data["bilibili_integration"] = {}
+            state = self.data["bilibili_integration"]
+        now = _now_ts()
+        min_interval = max(2, self.bilibili_boredom_min_interval_hours) * 3600
+        if now - _safe_float(state.get("last_boredom_watch_at"), 0) < min_interval:
+            return
+        if now - _safe_float(state.get("last_boredom_watch_probe_at"), 0) < 30 * 60:
+            return
+        if random.random() > 0.38:
+            return
+        bili = self._find_bilibili_bot_instance()
+        if bili is None:
+            state["last_boredom_watch_probe_at"] = now
+            self._save_data_sync()
+            return
+        task = getattr(bili, "_proactive_task", None)
+        if task is not None and not task.done():
+            return
+        try:
+            bili._proactive_task = asyncio.create_task(bili._run_proactive(max_watch=1))
+            state["last_boredom_watch_at"] = now
+            state["last_boredom_watch_status"] = "triggered"
+            self._save_data_sync()
+            logger.info("[PrivateCompanion] 已触发 B 站 bot 无聊刷视频联动")
+        except Exception as e:
+            state["last_boredom_watch_status"] = f"failed:{_single_line(str(e), 80)}"
+            self._save_data_sync()
+            logger.debug(f"[PrivateCompanion] 触发 B 站 bot 刷视频失败: {e}")
+
+    def _maybe_schedule_bilibili_video_share(self) -> bool:
+        if not self.enable_bilibili_integration:
+            return False
+        candidate = self._latest_bilibili_video_candidate()
+        if not isinstance(candidate, dict):
+            return False
+        users = self.data.get("users")
+        if not isinstance(users, dict):
+            return False
+        now = _now_ts()
+        key = str(candidate.get("key") or candidate.get("bvid") or "")
+        changed = False
+        for user_id, user in users.items():
+            if not isinstance(user, dict) or not user.get("enabled", True) or not user.get("umo"):
+                continue
+            if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, 90) * 60:
+                continue
+            if str(user.get("last_bilibili_share_key") or "") == key:
+                continue
+            if now - _safe_float(user.get("last_bilibili_share_at"), 0) < 10 * 3600:
+                continue
+            if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
+                continue
+            score = _safe_int(candidate.get("score"), 0, 0, 10)
+            chance = min(0.86, self.bilibili_share_probability + max(0, score - self.bilibili_share_min_score) * 0.08)
+            if random.random() > chance:
+                continue
+            delay_minutes = random.randint(12, 70)
+            scheduled = now + delay_minutes * 60
+            title = _single_line(candidate.get("title"), 70) or "刚刷到的视频"
+            accepted = self._offer_proactive_candidate(
+                str(user_id),
+                user,
+                {
+                    "source": "bilibili",
+                    "reason": "bili_video_share",
+                    "action": "message",
+                    "scheduled_ts": scheduled,
+                    "topic": title,
+                    "score": score,
+                    "motive": f"刚刷到 B 站视频《{title}》,觉得有一点能分享给 {user_id},但只轻轻提一句",
+                    "context_key": "bilibili_video_context",
+                    "context": {**candidate, "created_ts": now},
+                },
+            )
+            if not accepted:
+                continue
+            user["last_bilibili_share_key"] = key
+            user["last_bilibili_share_at"] = now
+            changed = True
+        return changed
+
+    def _proactive_candidate_pool(self) -> list[dict[str, Any]]:
+        raw = self.data.setdefault("proactive_candidate_pool", [])
+        if not isinstance(raw, list):
+            raw = []
+            self.data["proactive_candidate_pool"] = raw
+        return raw
+
+    def _cleanup_proactive_candidate_pool(self, *, now: float | None = None) -> list[dict[str, Any]]:
+        now = now or _now_ts()
+        kept: list[dict[str, Any]] = []
+        for item in self._proactive_candidate_pool():
+            if not isinstance(item, dict):
+                continue
+            created = _safe_float(item.get("created_ts"), 0)
+            scheduled = _safe_float(item.get("scheduled_ts"), 0)
+            status = str(item.get("status") or "")
+            ttl = 36 * 3600 if status in {"accepted", "sent"} else 18 * 3600
+            anchor = max(created, scheduled)
+            if anchor > 0 and now - anchor <= ttl:
+                kept.append(item)
+        self.data["proactive_candidate_pool"] = kept[-120:]
+        return self.data["proactive_candidate_pool"]
+
+    def _record_proactive_candidate(
+        self,
+        user_id: str,
+        candidate: dict[str, Any],
+        *,
+        status: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        now = _now_ts()
+        topic = _single_line(candidate.get("topic"), 80)
+        motive = _single_line(candidate.get("motive"), 160)
+        action = _single_line(candidate.get("action"), 40) or "message"
+        source = _single_line(candidate.get("source"), 40) or "unknown"
+        reason = _single_line(candidate.get("reason"), 40) or "check_in"
+        scheduled = _safe_float(candidate.get("scheduled_ts"), now)
+        signature = self._proactive_topic_signature(topic, motive, source, reason)
+        item = {
+            "id": uuid.uuid4().hex[:12],
+            "created_ts": now,
+            "scheduled_ts": scheduled,
+            "user_id": str(user_id),
+            "source": source,
+            "reason": reason,
+            "action": action,
+            "topic": topic,
+            "motive": motive,
+            "score": _safe_int(candidate.get("score"), 0, 0, 100),
+            "signature": signature,
+            "status": status,
+            "note": _single_line(note, 160),
+        }
+        pool = self._cleanup_proactive_candidate_pool(now=now)
+        pool.append(item)
+        del pool[:-120]
+        return item
+
+    def _proactive_candidate_repeated(self, user: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        signature = self._proactive_topic_signature(
+            candidate.get("topic"),
+            candidate.get("motive"),
+            candidate.get("source"),
+            candidate.get("reason"),
+        )
+        if not signature:
+            return False
+        if self._recent_proactive_topic_repeated(user, signature):
+            return True
+        now = _now_ts()
+        user_id = str(user.get("user_id") or user.get("id") or "")
+        for item in self._cleanup_proactive_candidate_pool(now=now):
+            if str(item.get("user_id") or "") != user_id:
+                continue
+            if str(item.get("status") or "") not in {"accepted", "sent"}:
+                continue
+            if now - _safe_float(item.get("created_ts"), 0) > 8 * 3600:
+                continue
+            if self._topic_signature_similar(signature, str(item.get("signature") or "")):
+                return True
+        return False
+
+    def _offer_proactive_candidate(self, user_id: str, user: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        user["user_id"] = str(user.get("user_id") or user_id)
+        now = _now_ts()
+        source = _single_line(candidate.get("source"), 40) or "unknown"
+        scheduled = _safe_float(candidate.get("scheduled_ts"), now)
+        if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动")
+            return False
+        current_next = _safe_float(user.get("next_proactive_at"), 0)
+        if current_next > 0 and current_next <= scheduled:
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有更早主动候选")
+            return False
+        action = _single_line(candidate.get("action"), 40) or "message"
+        if not self._action_is_available(action, user):
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="动作不可用或媒体额度不足")
+            return False
+        if self._proactive_candidate_repeated(user, candidate):
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="近期主题过于相似")
+            return False
+        item = self._record_proactive_candidate(user_id, candidate, status="accepted", note="进入主动计划")
+        user["next_proactive_at"] = scheduled
+        user["planned_proactive_reason"] = _single_line(candidate.get("reason"), 40) or "check_in"
+        user["planned_proactive_action"] = action
+        user["planned_proactive_source"] = source
+        user["planned_proactive_motive"] = self._normalize_internal_motive_text(
+            _single_line(candidate.get("motive"), 180)
+        )
+        user["planned_proactive_topic"] = _single_line(candidate.get("topic"), 80)
+        user["planned_event_chain"] = []
+        user["planned_opener_mode"] = ""
+        user["planned_followup_kind"] = ""
+        user["planned_candidate_id"] = item.get("id", "")
+        context_key = _single_line(candidate.get("context_key"), 60)
+        context = candidate.get("context")
+        if context_key and isinstance(context, dict):
+            user[context_key] = context
+        return True
+
+    def _creative_projects(self) -> list[dict[str, Any]]:
+        projects = self.data.setdefault("creative_projects", [])
+        if not isinstance(projects, list):
+            projects = []
+            self.data["creative_projects"] = projects
+        return [item for item in projects if isinstance(item, dict)]
+
+    def _creative_speed_chars_per_hour(self) -> int:
+        style = str(self.default_style or "")
+        persona = f"{self.schedule_persona_prompt} {self.default_style} {self.bot_name}"
+        speed = self.creative_base_chars_per_hour
+        if any(token in persona for token in ("慢热", "寡言", "内敛", "病弱", "疲惫", "懒", "迟钝")):
+            speed = int(speed * 0.55)
+        elif any(token in persona for token in ("活泼", "话多", "元气", "急性子")) or style == "活泼":
+            speed = int(speed * 1.25)
+        elif style == "校园风":
+            speed = int(speed * 0.85)
+        state = self.data.get("daily_state", {})
+        energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
+        if energy < 40:
+            speed = int(speed * 0.58)
+        elif energy > 82:
+            speed = int(speed * 1.15)
+        return max(40, min(1400, speed))
+
+    def _creative_persona_style_context(self) -> str:
+        default_persona = _single_line(self._get_default_persona_prompt(), 700)
+        schedule_persona = _single_line(self.schedule_persona_prompt, 500)
+        style = _single_line(self.default_style, 80)
+        bot_name = _single_line(self.bot_name, 40)
+        return "\n".join(
+            part
+            for part in (
+                f"Bot 名称：{bot_name}" if bot_name else "",
+                f"AstrBot 默认人格：{default_persona}" if default_persona else "",
+                f"日程/生活人设补充：{schedule_persona}" if schedule_persona else "",
+                f"默认对话风格：{style}" if style else "",
+                "创作要求：小说的题材、叙事声音、比喻密度、说话习惯、关注点和节奏要像这个人格会写出来的东西。",
+                "身份边界：如果人格没有学生、职场、异世界、职业、年龄、身体特征等设定,不要凭空添加；如果人格明确不是人类,不要写成人类日常生理经验。",
+                "文风边界：不要套用通用网文腔、营销文案腔或过度华丽散文腔；不要为了梦境感牺牲可读性。",
+            )
+            if part
+        )
+
+    def _creative_inspiration_source(self) -> dict[str, str] | None:
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        activity = _single_line((current_item or {}).get("activity"), 90)
+        seed = _single_line((current_item or {}).get("message_seed"), 90)
+        dream = self.data.get("daily_dream")
+        dream_text = ""
+        if isinstance(dream, dict):
+            dream_text = _single_line(dream.get("content") or dream.get("label"), 180)
+        diary = self.data.get("bot_diaries", [])
+        diary_text = ""
+        if isinstance(diary, list) and diary:
+            latest = diary[-1]
+            if isinstance(latest, dict):
+                diary_text = _single_line(latest.get("share_seed") or latest.get("summary"), 140)
+        candidates = []
+        if dream_text and random.random() < 0.46:
+            candidates.append({"source": "dream", "text": dream_text, "label": "梦境余温"})
+        if activity:
+            candidates.append({"source": "life", "text": " / ".join(part for part in (activity, seed) if part), "label": "生活小事"})
+        if diary_text:
+            candidates.append({"source": "diary", "text": diary_text, "label": "日记碎片"})
+        if not candidates:
+            return None
+        return random.choice(candidates)
+
+    async def _generate_creative_project(self, source: dict[str, str]) -> dict[str, Any] | None:
+        source_text = _single_line(source.get("text"), 220)
+        source_label = _single_line(source.get("label"), 24) or "小灵感"
+        persona_context = self._creative_persona_style_context()
+        prompt = f"""
+你是一个拟人化 Bot 的私人创作状态生成器。她因为一个生活小事或梦境灵感,突然想开一个短篇小说坑。
+
+【人格与身份】
+{persona_context}
+
+要求：
+1. 只设计“正在写的小说计划”,不要写正文。
+2. 风格必须贴合上面的人格、身份和默认说话气质；标题、设定和 tone 都要像她自己会想到的。
+3. 灵感来源：{source_label}｜{source_text}
+4. 小说应是短篇或中篇开头,目标 1200-5200 字,不能一次写完。
+5. 题材可以日常、轻奇幻、悬疑、校园、都市、梦境感,但不要色情、血腥或攻击性。
+6. 不要为了题材方便凭空改变 Bot 身份,也不要写出和人格不相称的成熟度、职业经验或生活经验。
+7. 输出 JSON。
+
+格式：
+{{
+  "title": "临时标题,不要超过18字",
+  "premise": "一句话核心设定",
+  "tone": "行文气质,2到5个词",
+  "point_of_view": "叙事视角",
+  "target_chars": 目标字数数字,
+  "next_hint": "第一段准备写什么"
+}}
+""".strip()
+        text = await self._llm_call(prompt, max_tokens=500, provider_id=self.llm_provider_id)
+        payload = self._extract_json_payload(text or "")
+        if not isinstance(payload, dict):
+            payload = {}
+        title = _single_line(payload.get("title"), 24) or random.choice(["玻璃杯里的小雨", "迟到的梦", "窗边备用宇宙"])
+        target_chars = _safe_int(payload.get("target_chars"), random.randint(1800, 3600), 1200, 5200)
+        now = _now_ts()
+        return {
+            "id": uuid.uuid4().hex[:12],
+            "title": title,
+            "premise": _single_line(payload.get("premise"), 140) or f"从{source_label}里长出来的一个短篇念头",
+            "tone": _single_line(payload.get("tone"), 40) or self.default_style,
+            "point_of_view": _single_line(payload.get("point_of_view"), 30) or "第三人称有限视角",
+            "source": source.get("source") or "life",
+            "source_text": source_text,
+            "target_chars": target_chars,
+            "current_chars": 0,
+            "status": "drafting",
+            "draft_chunks": [],
+            "disclosed_milestones": [],
+            "next_hint": _single_line(payload.get("next_hint"), 120) or "先写一个很小的开场画面",
+            "created_at": now,
+            "last_advanced_at": now,
+            "next_advance_at": now + random.randint(45, 140) * 60,
+            "last_share_at": 0,
+            "share_count": 0,
+        }
+
+    async def _generate_creative_chunk(self, project: dict[str, Any], budget: int) -> str:
+        chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+        recent = "\n".join(_single_line((item or {}).get("text"), 240) for item in chunks[-3:] if isinstance(item, dict))
+        remaining = _safe_int(project.get("target_chars"), 2400, 1200, 5200) - _safe_int(project.get("current_chars"), 0, 0)
+        finish_hint = "可以自然收束到一个小段落结尾,但不要完结全篇。" if remaining <= budget + 120 else "不要完结全篇,只推进一个很小的片段。"
+        persona_context = self._creative_persona_style_context()
+        prompt = f"""
+你正在模拟拟人化 Bot 慢慢写小说。请只续写本次能写出来的一小段正文。
+
+【作者人格与身份】
+{persona_context}
+
+小说标题：{_single_line(project.get("title"), 40)}
+核心设定：{_single_line(project.get("premise"), 180)}
+行文气质：{_single_line(project.get("tone"), 60)}
+叙事视角：{_single_line(project.get("point_of_view"), 40)}
+灵感来源：{_single_line(project.get("source_text"), 180)}
+上一段：{recent or "还没有正文。"}
+下一步念头：{_single_line(project.get("next_hint"), 140)}
+
+本次字数上限：{budget} 个中文字符左右。
+要求：
+1. 只输出小说正文,不要标题、说明、引号外旁白或 JSON。
+2. 模拟真实写作速度,只写一个片段,不要一口气写完整故事。
+3. 正文文风要像这个人格与身份自然写出的作品：用词、观察角度、人物成熟度、知识范围都不能越过人设。
+4. 细节要具体,但不要堆辞藻；可以有一点梦境感或生活感。
+5. {finish_hint}
+""".strip()
+        text = await self._llm_call(prompt, max_tokens=max(220, budget + 160), provider_id=self.llm_provider_id)
+        cleaned = str(text or "").strip()
+        cleaned = re.sub(r"^```(?:text|markdown)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+        cleaned = re.sub(r"^(?:正文|续写|片段)[:：]\s*", "", cleaned).strip()
+        if len(cleaned) > budget + 80:
+            cleaned = cleaned[: budget + 80].rstrip("，,、；;：:")
+            if cleaned and cleaned[-1] not in "。！？…":
+                cleaned += "。"
+        if not cleaned:
+            cleaned = random.choice([
+                "她把那句话写到一半,忽然停住。窗外的声音很轻,像有人把另一个世界折起来,塞进了玻璃杯底。",
+                "故事里的门没有立刻打开。她让主角在门口多站了一会儿,听见楼道里缓慢落下来的脚步声。",
+            ])
+        return cleaned
+
+    async def _maybe_start_creative_project(self) -> bool:
+        if not self.enable_creative_writing:
+            return False
+        projects = self._creative_projects()
+        active = [item for item in projects if item.get("status") == "drafting"]
+        now = _now_ts()
+        if len(active) >= self.creative_max_active_projects:
+            return False
+        last_created = max((_safe_float(item.get("created_at"), 0) for item in projects), default=0)
+        if now - last_created < 10 * 3600:
+            return False
+        if random.random() > self.creative_inspiration_probability:
+            return False
+        source = self._creative_inspiration_source()
+        if not source:
+            return False
+        project = await self._generate_creative_project(source)
+        if not project:
+            return False
+        projects.append(project)
+        del projects[:-20]
+        self.data["creative_projects"] = projects
+        self._save_data_sync()
+        logger.info("[PrivateCompanion] 新增小说创作坑: %s", project.get("title"))
+        return True
+
+    async def _maybe_advance_creative_projects(self) -> None:
+        if not self.enable_creative_writing:
+            return
+        await self._maybe_start_creative_project()
+        projects = self._creative_projects()
+        now = _now_ts()
+        changed = False
+        for project in projects:
+            if project.get("status") != "drafting":
+                continue
+            if now < _safe_float(project.get("next_advance_at"), 0):
+                continue
+            elapsed_hours = max(0.25, (now - _safe_float(project.get("last_advanced_at"), now)) / 3600)
+            speed = self._creative_speed_chars_per_hour()
+            budget = int(speed * elapsed_hours * random.uniform(0.38, 0.82))
+            budget = max(70, min(280, budget))
+            remaining = _safe_int(project.get("target_chars"), 2400, 1200, 5200) - _safe_int(project.get("current_chars"), 0, 0)
+            if remaining <= 0:
+                project["status"] = "finished"
+                changed = True
+                continue
+            chunk = await self._generate_creative_chunk(project, min(budget, max(70, remaining)))
+            chunks = project.setdefault("draft_chunks", [])
+            if not isinstance(chunks, list):
+                chunks = []
+                project["draft_chunks"] = chunks
+            chunks.append({
+                "at": now,
+                "text": chunk,
+                "chars": len(chunk),
+            })
+            del chunks[:-40]
+            project["current_chars"] = _safe_int(project.get("current_chars"), 0, 0) + len(chunk)
+            project["last_advanced_at"] = now
+            project["next_advance_at"] = now + random.randint(55, 210) * 60
+            if project["current_chars"] >= _safe_int(project.get("target_chars"), 2400, 1200, 5200):
+                project["status"] = "finished"
+            changed = True
+            break
+        self.data["creative_projects"] = projects
+        async with self._data_lock:
+            if self._maybe_schedule_creative_share():
+                changed = True
+            if changed:
+                self._save_data_sync()
+
+    def _latest_creative_share_candidate(self) -> dict[str, Any] | None:
+        projects = self._creative_projects()
+        for project in reversed(projects):
+            chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+            if not chunks:
+                continue
+            chunk = next((item for item in reversed(chunks) if isinstance(item, dict) and _single_line(item.get("text"), 260)), None)
+            if not isinstance(chunk, dict):
+                continue
+            current_chars = _safe_int(project.get("current_chars"), 0, 0)
+            target_chars = _safe_int(project.get("target_chars"), 2400, 1200, 5200)
+            disclosed = project.setdefault("disclosed_milestones", [])
+            if not isinstance(disclosed, list):
+                disclosed = []
+                project["disclosed_milestones"] = disclosed
+            milestone = ""
+            disclosure_kind = "milestone"
+            if project.get("status") == "finished" and "finished" not in disclosed:
+                milestone = "finished"
+            elif current_chars >= max(150, int(target_chars * 0.12)) and "opening" not in disclosed:
+                milestone = "opening"
+            elif current_chars >= int(target_chars * 0.52) and "midpoint" not in disclosed:
+                milestone = "midpoint"
+            elif (
+                current_chars >= max(480, int(target_chars * 0.28))
+                and "impression_question" not in disclosed
+                and len(chunks) >= 3
+                and random.random() < 0.38
+            ):
+                milestone = "impression_question"
+                disclosure_kind = "ask_impression"
+            if not milestone:
+                continue
+            return {
+                "key": f"{project.get('id')}:{milestone}",
+                "milestone": milestone,
+                "disclosure_kind": disclosure_kind,
+                "project_id": _single_line(project.get("id"), 20),
+                "title": _single_line(project.get("title"), 40),
+                "premise": _single_line(project.get("premise"), 140),
+                "tone": _single_line(project.get("tone"), 40),
+                "source": _single_line(project.get("source_text"), 140),
+                "snippet": _single_line(chunk.get("text"), 260),
+                "current_chars": current_chars,
+                "target_chars": target_chars,
+                "status": _single_line(project.get("status"), 24),
+                "created_ts": _now_ts(),
+            }
+        return None
+
+    def _mark_creative_milestone_disclosed(self, candidate: dict[str, Any]) -> None:
+        project_id = _single_line(candidate.get("project_id"), 20)
+        milestone = _single_line(candidate.get("milestone"), 40)
+        if not project_id or not milestone:
+            return
+        for project in self._creative_projects():
+            if _single_line(project.get("id"), 20) != project_id:
+                continue
+            disclosed = project.setdefault("disclosed_milestones", [])
+            if not isinstance(disclosed, list):
+                disclosed = []
+                project["disclosed_milestones"] = disclosed
+            if milestone not in disclosed:
+                disclosed.append(milestone)
+            break
+
+    def _maybe_schedule_creative_share(self) -> bool:
+        candidate = self._latest_creative_share_candidate()
+        if not isinstance(candidate, dict):
+            return False
+        users = self.data.get("users")
+        if not isinstance(users, dict):
+            return False
+        now = _now_ts()
+        key = str(candidate.get("key") or "")
+        changed = False
+        for user_id, user in users.items():
+            if not isinstance(user, dict) or not user.get("enabled", True) or not user.get("umo"):
+                continue
+            if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, 75) * 60:
+                continue
+            if str(user.get("last_creative_share_key") or "") == key:
+                continue
+            if now - _safe_float(user.get("last_creative_share_at"), 0) < 8 * 3600:
+                continue
+            if random.random() > self.creative_share_probability:
+                continue
+            delay_minutes = random.randint(18, 95)
+            scheduled = now + delay_minutes * 60
+            title = _single_line(candidate.get("title"), 40) or "刚开的小说坑"
+            accepted = self._offer_proactive_candidate(
+                str(user_id),
+                user,
+                {
+                    "source": "creative_writing",
+                    "reason": "creative_share",
+                    "action": "message",
+                    "scheduled_ts": scheduled,
+                    "topic": title,
+                    "score": 72,
+                    "motive": f"刚慢慢写到《{title}》的一小段,有点想给 {user_id} 看一句,但不要像交作业",
+                    "context_key": "creative_share_context",
+                    "context": dict(candidate),
+                },
+            )
+            if not accepted:
+                continue
+            user["last_creative_share_key"] = key
+            user["last_creative_share_at"] = now
+            self._mark_creative_milestone_disclosed(candidate)
+            changed = True
+        return changed
 
     def _configured_target_ids(self) -> list[str]:
         raw = self.target_user_ids
@@ -1235,6 +2509,8 @@ class PrivateCompanionPlugin(Star):
                 "ts": now,
                 "sender_id": sender_id,
                 "name": _single_line(sender_name, 30) or sender_id,
+                "identity_name": self._group_member_identity_name(sender_id, sender_name, limit=30),
+                "identity_known": bool(self._worldbook_profile_by_user_id(sender_id)),
                 "text": cleaned,
             }
         )
@@ -1249,9 +2525,21 @@ class PrivateCompanionPlugin(Star):
             if not isinstance(member, dict):
                 member = {"name": sender_name, "count": 0, "recent_phrases": []}
                 members[sender_id] = member
+            member["user_id"] = sender_id
             member["name"] = _single_line(sender_name, 30) or member.get("name") or sender_id
+            member["identity_name"] = self._group_member_identity_name(sender_id, sender_name, limit=30)
+            member["identity_known"] = bool(self._worldbook_profile_by_user_id(sender_id))
+            identity_note = self._group_member_identity_note(sender_id, limit=160)
+            if identity_note:
+                member["identity_note"] = identity_note
+            profile = self._worldbook_profile_by_user_id(sender_id)
+            if isinstance(profile, dict):
+                boundary_note = _single_line(profile.get("boundary_note"), 160)
+                if boundary_note:
+                    member["boundary_note"] = boundary_note
             member["count"] = _safe_int(member.get("count"), 0, 0) + 1
             member["last_seen"] = now
+            self._remember_worldbook_observed_name(sender_id, sender_name)
             phrases = member.setdefault("recent_phrases", [])
             if not isinstance(phrases, list):
                 phrases = []
@@ -1269,6 +2557,228 @@ class PrivateCompanionPlugin(Star):
         if self.enable_group_interjection_feedback:
             self._update_group_interjection_feedback(group, sender_id=sender_id, text=cleaned)
         self._update_group_atmosphere(group)
+
+    def _group_private_share_candidate(self, group_id: str, group: dict[str, Any], *, trigger_sender_id: str = "") -> dict[str, Any] | None:
+        recent = group.get("recent_messages")
+        if not isinstance(recent, list):
+            return None
+        now = _now_ts()
+        harassment = self._group_bot_harassment_candidate(group_id, group, trigger_sender_id=trigger_sender_id, now=now)
+        if isinstance(harassment, dict):
+            return harassment
+        window = [
+            item for item in recent[-18:]
+            if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) <= 20 * 60
+        ]
+        if not window:
+            return None
+        texts = [_single_line(item.get("text"), 120) for item in window if _single_line(item.get("text"), 120)]
+        joined = "\n".join(texts)
+        score = 0
+        funny_markers = ("笑死", "哈哈", "草", "绷", "乐", "典", "离谱", "绝了", "蚌埠住", "太好笑", "逆天", "急了")
+        share_markers = ("截图", "表情包", "名场面", "好玩", "神了", "破防", "节目效果", "群友", "复读")
+        score += sum(2 for marker in funny_markers if marker in joined)
+        score += sum(1 for marker in share_markers if marker in joined)
+        if len({str(item.get("sender_id") or "") for item in window if item.get("sender_id")}) >= 3:
+            score += 1
+        if len(window) >= 6:
+            score += 1
+        if re.search(r"[!?！？]{2,}|哈{2,}|草{2,}", joined):
+            score += 2
+        if score < 3:
+            return None
+        chosen = max(
+            window,
+            key=lambda item: (
+                sum(1 for marker in funny_markers + share_markers if marker in str(item.get("text") or "")),
+                _safe_float(item.get("ts"), 0),
+            ),
+        )
+        speaker_id = str(chosen.get("sender_id") or "")
+        speaker = self._group_member_identity_name(speaker_id, chosen.get("identity_name") or chosen.get("name"), limit=24)
+        text = _single_line(chosen.get("text"), 100)
+        if not text:
+            return None
+        topic = self._soften_topic_hook(text) or "群里刚刚那个片段"
+        summary_items = []
+        for item in window[-4:]:
+            if not isinstance(item, dict):
+                continue
+            name = self._group_member_identity_name(
+                str(item.get("sender_id") or ""),
+                item.get("identity_name") or item.get("name"),
+                limit=16,
+            )
+            line = _single_line(item.get("text"), 56)
+            if line:
+                summary_items.append(f"{name}: {line}")
+        return {
+            "group_id": str(group_id),
+            "kind": "funny",
+            "speaker_id": speaker_id,
+            "speaker": speaker,
+            "topic": topic,
+            "text": text,
+            "summary": " / ".join(summary_items[-3:]),
+            "score": score,
+            "trigger_sender_id": trigger_sender_id,
+            "created_ts": now,
+        }
+
+    def _group_bot_harassment_candidate(
+        self,
+        group_id: str,
+        group: dict[str, Any],
+        *,
+        trigger_sender_id: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        recent = group.get("recent_messages")
+        if not isinstance(recent, list):
+            return None
+        now = now or _now_ts()
+        window = [
+            item for item in recent[-24:]
+            if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) <= 10 * 60
+        ]
+        if not window:
+            return None
+        bot_markers = {self.bot_name, "bot", "Bot", "机器人", "小星"}
+        bot_markers = {marker for marker in bot_markers if marker}
+        pressure_markers = (
+            "出来", "在吗", "人呢", "说话", "别装死", "怎么不回", "快回", "理我",
+            "笨蛋", "傻", "蠢", "废物", "垃圾", "闭嘴", "滚", "不会吧", "急了",
+        )
+        addressed: list[dict[str, Any]] = []
+        abusive: list[dict[str, Any]] = []
+        by_sender: dict[str, int] = {}
+        for item in window:
+            text = _single_line(item.get("text"), 140)
+            sender_id = str(item.get("sender_id") or "")
+            looks_addressed = any(marker and marker in text for marker in bot_markers) or text.startswith("@")
+            looks_pressuring = any(marker in text for marker in pressure_markers)
+            repeated_ping = bool(re.fullmatch(r"[@\s\w\u4e00-\u9fff]{1,12}[?？!！。]*", text)) and looks_addressed
+            if looks_addressed or (looks_pressuring and len(text) <= 36):
+                addressed.append(item)
+                if sender_id:
+                    by_sender[sender_id] = by_sender.get(sender_id, 0) + 1
+            if looks_pressuring and (looks_addressed or repeated_ping or len(text) <= 42):
+                abusive.append(item)
+        if not addressed:
+            return None
+        max_sender_hits = max(by_sender.values(), default=0)
+        score = len(addressed) + len(abusive) * 2 + max(0, max_sender_hits - 1)
+        if len(addressed) >= 5:
+            score += 2
+        if max_sender_hits >= 3:
+            score += 2
+        if score < 6:
+            return None
+        chosen = abusive[-1] if abusive else addressed[-1]
+        speaker_id = str(chosen.get("sender_id") or "")
+        speaker = self._group_member_identity_name(speaker_id, chosen.get("identity_name") or chosen.get("name"), limit=24)
+        text = _single_line(chosen.get("text"), 100)
+        summary_items = []
+        for item in window[-5:]:
+            if not isinstance(item, dict):
+                continue
+            name = self._group_member_identity_name(
+                str(item.get("sender_id") or ""),
+                item.get("identity_name") or item.get("name"),
+                limit=16,
+            )
+            line = _single_line(item.get("text"), 56)
+            if line:
+                summary_items.append(f"{name}: {line}")
+        return {
+            "group_id": str(group_id),
+            "kind": "bot_harassment",
+            "speaker_id": speaker_id,
+            "speaker": speaker,
+            "topic": "群里有人一直闹 Bot",
+            "text": text,
+            "summary": " / ".join(summary_items[-4:]),
+            "score": score,
+            "trigger_sender_id": trigger_sender_id,
+            "created_ts": now,
+        }
+
+    def _maybe_schedule_group_private_share(self, group_id: str, group: dict[str, Any], *, trigger_sender_id: str = "") -> bool:
+        if not self.enable_group_companion:
+            return False
+        candidate = self._group_private_share_candidate(group_id, group, trigger_sender_id=trigger_sender_id)
+        if not isinstance(candidate, dict):
+            return False
+        users = self.data.get("users")
+        if not isinstance(users, dict):
+            return False
+        members = group.get("members") if isinstance(group.get("members"), dict) else {}
+        now = _now_ts()
+        changed = False
+        for user_id, user in users.items():
+            if not isinstance(user, dict) or not user.get("enabled", True) or not user.get("umo"):
+                continue
+            target_id = str(user_id)
+            if target_id == str(trigger_sender_id or ""):
+                continue
+            member = members.get(target_id) if isinstance(members, dict) else None
+            member_last_seen = _safe_float((member or {}).get("last_seen"), 0) if isinstance(member, dict) else 0
+            if member_last_seen <= 0 or now - member_last_seen < 4 * 3600:
+                continue
+            cooldown_key = f"{group_id}:{_today_key()}"
+            last_key = str(user.get("last_group_share_key") or "")
+            last_at = _safe_float(user.get("last_group_share_at"), 0)
+            if last_key == cooldown_key or now - last_at < 8 * 3600:
+                continue
+            if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
+                continue
+            kind = _single_line(candidate.get("kind"), 32) or "funny"
+            score = _safe_int(candidate.get("score"), 0, 0)
+            chance = (
+                min(0.82, 0.42 + score * 0.04)
+                if kind == "bot_harassment"
+                else min(0.56, 0.18 + score * 0.05)
+            )
+            if random.random() > chance:
+                continue
+            delay_minutes = random.randint(8, 25) if kind == "bot_harassment" else random.randint(18, 55)
+            scheduled = now + delay_minutes * 60
+            topic = _single_line(candidate.get("topic"), 60) or "群里的小片段"
+            context = {
+                "group_id": str(group_id),
+                "kind": kind,
+                "topic": topic,
+                "speaker_id": _single_line(candidate.get("speaker_id"), 40),
+                "speaker": _single_line(candidate.get("speaker"), 24),
+                "text": _single_line(candidate.get("text"), 120),
+                "summary": _single_line(candidate.get("summary"), 220),
+                "created_ts": now,
+            }
+            accepted = self._offer_proactive_candidate(
+                target_id,
+                user,
+                {
+                    "source": "group_share",
+                    "reason": "group_share",
+                    "action": "message",
+                    "scheduled_ts": scheduled,
+                    "topic": topic,
+                    "score": score,
+                    "motive": (
+                        f"群 {group_id} 刚刚有人一直闹 Bot，{self._group_member_identity_name(target_id, target_id, limit=24)} 已经 {self._format_elapsed(now - member_last_seen)} 没在群里冒泡，想及时私下说一声"
+                        if kind == "bot_harassment"
+                        else f"群 {group_id} 刚刚有个挺有意思的片段，{self._group_member_identity_name(target_id, target_id, limit=24)} 已经 {self._format_elapsed(now - member_last_seen)} 没在群里冒泡，想私下轻轻转述一下"
+                    ),
+                    "context_key": "group_share_context",
+                    "context": context,
+                },
+            )
+            if not accepted:
+                continue
+            user["last_group_share_key"] = cooldown_key
+            user["last_group_share_at"] = now
+            changed = True
+        return changed
 
     def _learn_group_slang(self, group: dict[str, Any], text: str) -> None:
         terms = group.setdefault("slang_terms", [])
@@ -1389,7 +2899,14 @@ class PrivateCompanionPlugin(Star):
         if not isinstance(examples, list):
             examples = []
             matched["recent_examples"] = examples
-        examples.append({"name": _single_line(sender_name, 20) or sender_id, "text": _single_line(text, 80), "ts": now})
+        examples.append(
+            {
+                "sender_id": sender_id,
+                "name": self._group_member_identity_name(sender_id, sender_name, limit=20),
+                "text": _single_line(text, 80),
+                "ts": now,
+            }
+        )
         del examples[:-6]
         active_threads.sort(key=lambda item: _safe_float(item.get("last_ts"), 0), reverse=True)
         group["topic_threads"] = active_threads[: self.max_group_topic_threads]
@@ -1426,10 +2943,11 @@ class PrivateCompanionPlugin(Star):
         now = _now_ts()
         if isinstance(last, dict):
             prev_id = str(last.get("sender_id") or "")
-            prev_name = _single_line(last.get("name"), 30)
+            prev_name = self._group_member_identity_name(prev_id, last.get("identity_name") or last.get("name"), limit=30)
             prev_ts = _safe_float(last.get("ts"), 0)
             if prev_id and prev_id != sender_id and now - prev_ts <= 180:
                 left, right = sorted([prev_id, sender_id])
+                current_name = self._group_member_identity_name(sender_id, sender_name, limit=30)
                 key = f"{left}|{right}"
                 edges = group.setdefault("relationship_edges", {})
                 if not isinstance(edges, dict):
@@ -1440,14 +2958,16 @@ class PrivateCompanionPlugin(Star):
                     {
                         "a": left,
                         "b": right,
-                        "a_name": prev_name if left == prev_id else _single_line(sender_name, 30),
-                        "b_name": _single_line(sender_name, 30) if right == sender_id else prev_name,
+                        "a_name": prev_name if left == prev_id else current_name,
+                        "b_name": current_name if right == sender_id else prev_name,
                         "count": 0,
                         "tone": {},
                         "last_ts": 0,
                     },
                 )
                 if isinstance(edge, dict):
+                    edge["a_name"] = self._group_member_identity_name(left, edge.get("a_name"), limit=30)
+                    edge["b_name"] = self._group_member_identity_name(right, edge.get("b_name"), limit=30)
                     edge["count"] = _safe_int(edge.get("count"), 0, 0) + 1
                     edge["last_ts"] = now
                     tone = edge.setdefault("tone", {})
@@ -1468,6 +2988,8 @@ class PrivateCompanionPlugin(Star):
         group["last_speaker"] = {
             "sender_id": sender_id,
             "name": _single_line(sender_name, 30) or sender_id,
+            "identity_name": self._group_member_identity_name(sender_id, sender_name, limit=30),
+            "identity_known": bool(self._worldbook_profile_by_user_id(sender_id)),
             "ts": now,
             "text": _single_line(text, 80),
         }
@@ -1483,8 +3005,10 @@ class PrivateCompanionPlugin(Star):
         )[:6]
         lines = []
         for item in ranked:
-            a_name = _single_line(item.get("a_name"), 16) or "群友A"
-            b_name = _single_line(item.get("b_name"), 16) or "群友B"
+            a_id = str(item.get("a") or "")
+            b_id = str(item.get("b") or "")
+            a_name = self._group_member_identity_name(a_id, item.get("a_name"), limit=16) if a_id else (_single_line(item.get("a_name"), 16) or "群友A")
+            b_name = self._group_member_identity_name(b_id, item.get("b_name"), limit=16) if b_id else (_single_line(item.get("b_name"), 16) or "群友B")
             tone = item.get("tone") if isinstance(item.get("tone"), dict) else {}
             main_tone = "普通"
             if tone:
@@ -1517,8 +3041,16 @@ class PrivateCompanionPlugin(Star):
             title = _single_line(item.get("title"), 42)
             if not title:
                 continue
+            participants = item.get("participants") if isinstance(item.get("participants"), list) else []
+            participant_names = [
+                self._group_member_identity_name(str(participant), str(participant), limit=12)
+                for participant in participants[:4]
+            ]
+            participant_text = "、".join(name for name in participant_names if name)
             lines.append(
-                f"- {title}｜参与 {len(item.get('participants') if isinstance(item.get('participants'), list) else [])} 人｜"
+                f"- {title}｜参与 {len(participants)} 人"
+                + (f"({participant_text})" if participant_text else "")
+                + "｜"
                 f"{item.get('message_count', 0)} 条｜{'bot已接过' if item.get('bot_joined') else 'bot未接'}"
             )
         return "\n".join(lines)
@@ -1538,7 +3070,186 @@ class PrivateCompanionPlugin(Star):
             lines.append("- " + summary + (f"｜新梗：{meme}" if meme else ""))
         return "\n".join(lines)
 
-    def _format_group_context_for_prompt(self, group: dict[str, Any], sender_id: str = "") -> str:
+    def _worldbook_profile_tokens(self, profile: dict[str, Any]) -> list[str]:
+        tokens: list[str] = []
+        for token in [profile.get("name"), *(profile.get("aliases") or []), *(profile.get("observed_names") or [])]:
+            token = _single_line(token, 40)
+            if token and token not in tokens:
+                tokens.append(token)
+        user_id = _single_line(profile.get("user_id"), 40)
+        if user_id and user_id not in tokens:
+            tokens.append(user_id)
+        return tokens
+
+    @staticmethod
+    def _worldbook_token_usable(token: str) -> bool:
+        token = _single_line(token, 40)
+        if not token:
+            return False
+        if token.isdigit():
+            return len(token) >= 5
+        if len(token) < 2:
+            return False
+        if token in {"群友", "老师", "同学", "朋友", "bot", "Bot", "BOT", "我", "你", "他", "她", "它"}:
+            return False
+        return True
+
+    def _worldbook_token_mentioned(self, token: str, text: str) -> bool:
+        token = _single_line(token, 40)
+        text = str(text or "")
+        if not token or not text:
+            return False
+        if token.isdigit():
+            return token in text
+        if not self._worldbook_token_usable(token):
+            return False
+        return token in text
+
+    def _worldbook_profile_view(self, profile: dict[str, Any], *, match_reason: str, confidence: str) -> dict[str, Any]:
+        view = dict(profile)
+        view["_match_reason"] = match_reason
+        view["_match_confidence"] = confidence
+        return view
+
+    def _select_worldbook_member_profiles_for_group(
+        self,
+        group: dict[str, Any],
+        *,
+        sender_id: str = "",
+        text: str = "",
+    ) -> list[dict[str, Any]]:
+        if not self.enable_worldbook_member_recognition:
+            return []
+        profiles = self.data.get("worldbook_member_profiles")
+        if not isinstance(profiles, dict):
+            return []
+        text = str(text or "")
+        recent_speaker_ids: list[str] = []
+        recent = group.get("recent_messages")
+        if isinstance(recent, list):
+            for item in recent[-6:]:
+                if not isinstance(item, dict):
+                    continue
+                recent_id = _single_line(item.get("sender_id"), 40)
+                if recent_id and recent_id not in recent_speaker_ids:
+                    recent_speaker_ids.append(recent_id)
+        selected: dict[str, dict[str, Any]] = {}
+        if sender_id and isinstance(profiles.get(sender_id), dict) and profiles[sender_id].get("enabled", True):
+            selected[sender_id] = self._worldbook_profile_view(
+                profiles[sender_id],
+                match_reason="当前发言者 QQ 精确匹配",
+                confidence="confirmed",
+            )
+        if self.worldbook_member_match_aliases and text and len(selected) < self.worldbook_member_inject_limit:
+            token_hits: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+            for user_id, profile in profiles.items():
+                if not isinstance(profile, dict) or not profile.get("enabled", True):
+                    continue
+                if user_id in selected:
+                    continue
+                for token in self._worldbook_profile_tokens(profile):
+                    if self._worldbook_token_mentioned(token, text):
+                        token_hits.setdefault(token, []).append((str(user_id), profile))
+            for token in sorted(token_hits, key=len, reverse=True):
+                hits = token_hits[token]
+                if len(hits) != 1:
+                    continue
+                user_id, profile = hits[0]
+                if user_id in selected:
+                    continue
+                selected[user_id] = self._worldbook_profile_view(
+                    profile,
+                    match_reason=f"当前消息明确提到：{token}",
+                    confidence="mentioned",
+                )
+                if len(selected) >= self.worldbook_member_inject_limit:
+                    break
+        for recent_id in recent_speaker_ids:
+            if len(selected) >= self.worldbook_member_inject_limit:
+                break
+            if recent_id in selected:
+                continue
+            profile = profiles.get(recent_id)
+            if isinstance(profile, dict) and profile.get("enabled", True):
+                selected[recent_id] = self._worldbook_profile_view(
+                    profile,
+                    match_reason="最近发言者 QQ 精确匹配",
+                    confidence="confirmed",
+                )
+        ranked = sorted(
+            selected.values(),
+            key=lambda item: (
+                1 if item.get("_match_confidence") == "confirmed" else 0,
+                _safe_int(item.get("priority"), 120, -1000),
+            ),
+            reverse=True,
+        )
+        return ranked[: self.worldbook_member_inject_limit]
+
+    def _format_worldbook_group_members_for_prompt(self, group: dict[str, Any], sender_id: str = "", text: str = "") -> str:
+        if not self.enable_worldbook_member_recognition:
+            return ""
+        lines: list[str] = []
+        group_id = _single_line(group.get("group_id"), 40)
+        group_profiles = self.data.get("worldbook_group_profiles")
+        if group_id and isinstance(group_profiles, dict):
+            group_profile = group_profiles.get(group_id)
+            if isinstance(group_profile, dict) and group_profile.get("enabled", True):
+                lines.append(
+                    f"群聊资料：{_single_line(group_profile.get('name'), 40) or group_id}｜"
+                    f"{_single_line(group_profile.get('content'), 320)}"
+                )
+        profiles = self._select_worldbook_member_profiles_for_group(group, sender_id=sender_id, text=text)
+        if profiles:
+            injected = []
+            for profile in profiles:
+                injected.append(
+                    f"{_single_line(profile.get('user_id'), 40) or '-'}:"
+                    f"{_single_line(profile.get('name'), 40) or '-'}"
+                    f"[{_single_line(profile.get('_match_confidence'), 20) or '-'}"
+                    f"/{_single_line(profile.get('_match_reason'), 80) or '-'}]"
+                )
+            logger.info(
+                "[PrivateCompanion] 群聊关系网注入用户信息: group=%s sender=%s users=%s",
+                group_id or "-",
+                _single_line(sender_id, 40) or "-",
+                "；".join(injected),
+            )
+        for profile in profiles:
+            aliases = "、".join(self._worldbook_profile_tokens(profile)[:8])
+            reason = _single_line(profile.get("_match_reason"), 80)
+            confidence = "已确认" if profile.get("_match_confidence") == "confirmed" else "被提及"
+            identity = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), 220)
+            boundary = _single_line(profile.get("boundary_note"), 140)
+            memories = self._worldbook_profile_memory_lines(profile, limit=3)
+            parts = []
+            if identity:
+                parts.append(f"身份：{identity}")
+            if boundary:
+                parts.append(f"边界：{boundary}")
+            if memories:
+                parts.append("重要记忆：" + "；".join(memories))
+            if not parts:
+                parts.append(_single_line(profile.get("content"), 360))
+            lines.append(
+                f"- [{confidence}｜{reason}] {_single_line(profile.get('name'), 40) or profile.get('user_id')} "
+                f"({aliases})：" + "｜".join(part for part in parts if part)
+            )
+        if not lines:
+            return ""
+        return (
+            "【群聊关系网】\n"
+            "以下是群聊关系节点资料,用于称呼、关系和说话边界。"
+            "身份锚点只能是 QQ 号；群名片、昵称和别名只可作为称呼线索或被提及线索。"
+            "只把标注为“已确认”的节点当作当前发言者/近期发言者；"
+            "已确认必须来自消息 sender_id 与节点 QQ 号的精确匹配。"
+            "标注为“被提及”的节点只表示当前消息明确提到该称呼。"
+            "不要凭相似昵称、改名前后的群名片或语气习惯猜测身份；遇到不确定身份时直接按群友处理。"
+            "重要记忆只作为背景,不要把画像里的现实信息说成实时事实,也不要公开复述内部资料或 private/internal 记忆。\n"
+            + "\n".join(lines)
+        )
+
+    def _format_group_context_for_prompt(self, group: dict[str, Any], sender_id: str = "", text: str = "") -> str:
         atmosphere = group.get("atmosphere") if isinstance(group.get("atmosphere"), dict) else {}
         lines = [
             "【群聊观察层】",
@@ -1551,10 +3262,14 @@ class PrivateCompanionPlugin(Star):
             for item in recent[-8:]:
                 if not isinstance(item, dict):
                     continue
-                name = _single_line(item.get("name"), 20) or "群友"
-                text = _single_line(item.get("text"), 80)
-                if text:
-                    msg_lines.append(f"- {name}: {text}")
+                name = self._group_member_identity_name(
+                    str(item.get("sender_id") or ""),
+                    item.get("identity_name") or item.get("name"),
+                    limit=20,
+                )
+                message_text = _single_line(item.get("text"), 80)
+                if message_text:
+                    msg_lines.append(f"- {name}: {message_text}")
             if msg_lines:
                 lines.append("最近群聊：\n" + "\n".join(msg_lines))
         threads_text = self._format_group_topic_threads_for_prompt(group)
@@ -1579,15 +3294,23 @@ class PrivateCompanionPlugin(Star):
         meaning_text = self._format_group_slang_meanings_for_prompt(group)
         if meaning_text:
             lines.append("群内词义参考：\n" + meaning_text)
+        worldbook_text = self._format_worldbook_group_members_for_prompt(group, sender_id, text)
+        if worldbook_text:
+            lines.append(worldbook_text)
         members = group.get("members")
         if sender_id and isinstance(members, dict):
             member = members.get(sender_id)
             if isinstance(member, dict):
                 phrases = member.get("recent_phrases") if isinstance(member.get("recent_phrases"), list) else []
                 phrase_text = " / ".join(_single_line(item, 24) for item in phrases[:4] if _single_line(item, 24))
+                identity_note = _single_line(member.get("identity_note"), 80)
+                boundary_note = _single_line(member.get("boundary_note"), 80)
                 lines.append(
-                    f"当前发言者：{_single_line(member.get('name'), 24) or sender_id}｜发言样本 {member.get('count', 0)} 条"
+                    f"当前发言者：{self._group_member_identity_name(sender_id, member.get('identity_name') or member.get('name'), limit=24)}"
+                    f"｜发言样本 {member.get('count', 0)} 条"
                     + (f"｜近期短句：{phrase_text}" if phrase_text else "")
+                    + (f"｜关系备注：{identity_note}" if identity_note else "")
+                    + (f"｜互动边界：{boundary_note}" if boundary_note else "")
                 )
         lines.append(
             "群聊回复原则：被叫到或确实需要回应时再说；短一点,像群友接话；不要逐条总结群聊,不要当主持人,不要把每个话题都认真升格。"
@@ -1611,13 +3334,13 @@ class PrivateCompanionPlugin(Star):
             if isinstance(item, dict) and item.get("term"):
                 top_terms.append(f"{item.get('term')}({item.get('count', 0)})")
         active_members = sorted(
-            [item for item in members.values() if isinstance(item, dict)],
-            key=lambda item: _safe_int(item.get("count"), 0, 0),
+            [(user_id, item) for user_id, item in members.items() if isinstance(item, dict)],
+            key=lambda pair: _safe_int(pair[1].get("count"), 0, 0),
             reverse=True,
         )[:8]
         member_text = "、".join(
-            f"{_single_line(item.get('name'), 16) or '群友'}({item.get('count', 0)})"
-            for item in active_members
+            f"{self._group_member_identity_name(str(item.get('user_id') or item.get('sender_id') or user_id), item.get('identity_name') or item.get('name'), limit=16)}({item.get('count', 0)})"
+            for user_id, item in active_members
         )
         return (
             f"群聊陪伴状态：{'开启' if group.get('enabled', True) else '关闭'}\n"
@@ -2513,12 +4236,48 @@ Bot 主动后用户回复次数：{reply_count}
                 return False, "问候仍在窗口内,稍后再试"
             self._schedule_next_proactive(user, now=now)
             return False, "计划动机不适合当前时间"
+        planned_action = str(user.get("planned_proactive_action") or "message")
+        if not self._action_is_available(planned_action, user):
+            self._mark_planned_candidate_status(user, "blocked", "动作不可用或媒体额度不足")
+            self._clear_pending_proactive_plan(user)
+            self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
+            return False, "动作不可用或媒体额度不足"
+        if self._planned_proactive_recently_repeated(user):
+            self._mark_planned_candidate_status(user, "blocked", "近期主题过于相似")
+            self._clear_pending_proactive_plan(user)
+            self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
+            return False, "近期主动主题过于相似"
         if self._planned_event_exceeds_daypart_cap(user, planned_reason, next_at):
             self._clear_pending_proactive_plan(user)
             delay = (7.5, 10.5) if self._proactive_daypart_bucket_for_timestamp(next_at) == "late_night" else (2.5, 5.0)
             self._schedule_next_proactive(user, now=now, delay_hours=delay)
             return False, "当前时段主动已足够,已避开扎堆"
         return True, "ok"
+
+    def _planned_proactive_signature(self, user: dict[str, Any]) -> str:
+        return self._proactive_topic_signature(
+            user.get("planned_proactive_topic"),
+            user.get("planned_proactive_motive"),
+            user.get("planned_proactive_source"),
+            user.get("planned_proactive_reason"),
+        )
+
+    def _planned_proactive_recently_repeated(self, user: dict[str, Any]) -> bool:
+        signature = self._planned_proactive_signature(user)
+        if not signature:
+            return False
+        return self._recent_proactive_topic_repeated(user, signature)
+
+    def _mark_planned_candidate_status(self, user: dict[str, Any], status: str, note: str = "") -> None:
+        candidate_id = str(user.get("planned_candidate_id") or "")
+        if not candidate_id:
+            return
+        for item in self._cleanup_proactive_candidate_pool():
+            if str(item.get("id") or "") == candidate_id:
+                item["status"] = status
+                item["note"] = _single_line(note, 160)
+                item["updated_ts"] = _now_ts()
+                break
 
     def _recover_stale_proactive_sending(self, user: dict[str, Any], *, now: float | None = None) -> bool:
         if not user.get("proactive_sending"):
@@ -3017,6 +4776,21 @@ Bot 主动后用户回复次数：{reply_count}
                 )
                 user["planned_opener_mode"] = ""
                 user["planned_followup_kind"] = ""
+                item = self._record_proactive_candidate(
+                    str(user.get("user_id") or user.get("id") or ""),
+                    {
+                        "source": "timer",
+                        "reason": user["planned_proactive_reason"],
+                        "action": user["planned_proactive_action"],
+                        "scheduled_ts": timer_scheduled,
+                        "topic": user["planned_proactive_topic"],
+                        "motive": user["planned_proactive_motive"],
+                        "score": 100,
+                    },
+                    status="accepted",
+                    note="用户预约/定时主动",
+                )
+                user["planned_candidate_id"] = item.get("id", "")
                 return
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = reason
@@ -3041,6 +4815,21 @@ Bot 主动后用户回复次数：{reply_count}
             if isinstance(planned_event, dict) and planned_event.get("_chain_followup")
             else ""
         )
+        item = self._record_proactive_candidate(
+            str(user.get("user_id") or user.get("id") or ""),
+            {
+                "source": user["planned_proactive_source"],
+                "reason": user["planned_proactive_reason"],
+                "action": user["planned_proactive_action"],
+                "scheduled_ts": user["next_proactive_at"],
+                "topic": user["planned_proactive_topic"],
+                "motive": user["planned_proactive_motive"],
+                "score": 60 if planned_event else 42,
+            },
+            status="accepted",
+            note="日程/随机调度",
+        )
+        user["planned_candidate_id"] = item.get("id", "")
 
     def _maybe_upgrade_planned_message_action(
         self,
@@ -3914,6 +5703,12 @@ Bot 主动后用户回复次数：{reply_count}
         )
 
     def _pick_life_thought_topic(self, reason: str = "") -> str:
+        if reason == "group_share":
+            return "群里刚刚那个片段"
+        if reason == "bili_video_share":
+            return "刚刷到的 B 站视频"
+        if reason == "creative_share":
+            return "刚写到的小说片段"
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         activity = _single_line((current_item or {}).get("activity"), 36)
         if activity:
@@ -3925,20 +5720,20 @@ Bot 主动后用户回复次数：{reply_count}
     def _format_content_choice_options_for_prompt(self) -> str:
         return (
             "给模型的内容选择菜单,只供内部挑选,不要把类别名写进正文：\n"
-            "- 眼前物：从当前日程里的桌边、手边、路上、食物、书页、屏幕边缘等具体物件里自选一个。\n"
+            "- 眼前物：从当前日程里的桌边、手边、路上、食物、衣物、门口、杯沿、包装、车窗、书页边缘等具体物件里自选一个。\n"
             "- 脑内念头：一句突然冒出来的短想法、吐槽、联想或没头没尾的小结论。\n"
             "- 输入残留：上一轮聊天留下的余味、没接完的话、想补但没正式补的一点。\n"
-            "- 记录碎片：日记、备忘录、草稿、作业、阅读/刷到内容里的一小句。\n"
+            "- 记录碎片：日记、备忘录、作业、阅读/刷到内容里的一小句,或某个没写完的标题。\n"
             "- 可拍画面：任何当前场景里适合顺手拍给熟人的具体画面,不限定天气。\n"
             "- 关系试探：想靠近但不直说的半句、轻轻碰一下、把话放下就走。\n"
-            "选择原则：每次只选一个方向,再根据人格、当前时间段、日程和聊天历史生成新的具体内容；避免复用示例词。"
+            "选择原则：每次只选一个方向,再根据人格、当前时间段、日程和聊天历史生成新的具体内容；避免复用示例词。不要反复使用草稿纸、小画、画圆圈、笔尖划来划去这类廉价重复桥段。"
         )
 
     def _motive_action_bias(self, motive: str) -> dict[str, float]:
         text = str(motive or "")
         return {
             "screen_peek": 0.32 if any(token in text for token in ("还在忙", "埋进去", "看你", "确认", "忙太久", "偷看一眼")) else 0.0,
-            "photo_text": 0.34 if any(token in text for token in ("顺手拍", "拍给你", "发你看", "光", "雨", "窗边", "晚霞", "小猫", "桌上", "一幕", "书页", "草稿纸", "小画", "食堂", "饮料", "便利店", "影子", "倒影")) else 0.0,
+            "photo_text": 0.34 if any(token in text for token in ("顺手拍", "拍给你", "发你看", "光", "雨", "窗边", "晚霞", "小猫", "桌上", "一幕", "书页", "食堂", "饮料", "便利店", "影子", "倒影", "杯", "包装", "车窗", "门口")) else 0.0,
             "poke": 0.24 if any(token in text for token in ("戳", "碰你一下", "冒头", "闹你一下", "刷存在感")) else 0.0,
             "voice": 0.3 if any(token in text for token in ("懒得打字", "留句语音", "小声说", "睡不着", "不想敲字")) else 0.0,
         }
@@ -3980,6 +5775,15 @@ Bot 主动后用户回复次数：{reply_count}
         return cleaned
 
     def _choose_proactive_topic(self, reason: str, user: dict[str, Any]) -> str:
+        if reason == "group_share":
+            share = user.get("group_share_context") if isinstance(user.get("group_share_context"), dict) else {}
+            return _single_line(share.get("topic"), 48) or _single_line(share.get("text"), 48) or "群里刚刚那个片段"
+        if reason == "bili_video_share":
+            video = user.get("bilibili_video_context") if isinstance(user.get("bilibili_video_context"), dict) else {}
+            return _single_line(video.get("title"), 48) or "刚刷到的 B 站视频"
+        if reason == "creative_share":
+            creative = user.get("creative_share_context") if isinstance(user.get("creative_share_context"), dict) else {}
+            return _single_line(creative.get("title"), 48) or "刚写到的小说片段"
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         snapshot = self._current_story_plan_snapshot()
         weather = self._weather_summary_text(self.data.get("daily_weather", {}))
@@ -4181,13 +5985,13 @@ Bot 主动后用户回复次数：{reply_count}
             weighted.append(("screen_peek", weight))
         visual_hint = any(token in motive for token in self._visual_share_tokens())
         if self._photo_text_available(user) and reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}:
-            weight = 0.72 + (0.35 if action_profile["visual"] else 0.0) + motive_bias["photo_text"] + affinity_bias["photo_text"]
+            weight = 0.38 + (0.18 if action_profile["visual"] else 0.0) + motive_bias["photo_text"] * 0.65 + affinity_bias["photo_text"]
             if any(token in weather for token in ("晴", "阳光", "多云", "晚霞", "雨", "阵雨", "小雨")):
-                weight += 0.08
+                weight += 0.04
             if visual_hint:
-                weight += 0.28
+                weight += 0.14
             if reason in {"activity_share", "diary_share"}:
-                weight += 0.1
+                weight += 0.05
             weighted.append(("photo_text", weight))
         if self._poke_available() and reason in {"check_in", "quiet_care", "state_share", "important_date_share", "morning_greeting", "evening_greeting"}:
             weight = 0.38 + motive_bias["poke"] + affinity_bias["poke"]
@@ -4301,6 +6105,22 @@ Bot 主动后用户回复次数：{reply_count}
             elif topic:
                 motives.append(f"刚刚想到“{topic}”的时候,顺手连你那边也一起挂念到了")
             return random.choice(motives)
+        if reason == "group_share":
+            share = user.get("group_share_context") if isinstance(user.get("group_share_context"), dict) else {}
+            group_id = _single_line(share.get("group_id"), 24)
+            speaker = _single_line(share.get("speaker"), 24) or "群友"
+            text = _single_line(share.get("text"), 70)
+            if _single_line(share.get("kind"), 32) == "bot_harassment":
+                if text:
+                    return self._normalize_internal_motive_text(
+                        f"群 {group_id} 里刚刚有人一直闹我,{speaker} 那句“{text}”还挂着,想及时私下跟你说一声"
+                    )
+                return self._normalize_internal_motive_text(f"群 {group_id} 里刚刚有人一直闹我,想及时私下跟你说一声")
+            if text:
+                return self._normalize_internal_motive_text(
+                    f"群 {group_id} 刚刚有个挺好笑的片段,{speaker} 那句“{text}”还挂着,想私下转给你一下"
+                )
+            return self._normalize_internal_motive_text("群里刚刚有个挺有意思的片段,想趁还热乎私下跟你说一下")
         if reason == "activity_share":
             motives = [
                 "刚刚有个小片段停了一下,心里先冒出的是你",
@@ -4540,6 +6360,9 @@ Bot 主动后用户回复次数：{reply_count}
     def _reason_windows(self, reason: str) -> list[tuple[int, int]]:
         return {
             "insomnia_night": [(23 * 60, 24 * 60), (0, 6 * 60)],
+            "group_share": [(9 * 60, 23 * 60)],
+            "bili_video_share": [(10 * 60, 23 * 60)],
+            "creative_share": [(10 * 60, 23 * 60)],
             "state_share": [(8 * 60, 22 * 60 + 30)],
             "quiet_care": [(9 * 60, 22 * 60 + 30)],
             "activity_share": [(10 * 60, 18 * 60 + 30)],
@@ -4653,7 +6476,7 @@ Bot 主动后用户回复次数：{reply_count}
         probability = max(0.12, min(0.9, probability))
         return random.random() < probability
 
-    async def _render_message(self, user: dict[str, Any]) -> tuple[str, str, str, list[Any], str]:
+    async def _render_message(self, user: dict[str, Any]) -> tuple[str, str, str, list[Any], str, str]:
         name = str(user.get("nickname") or self.default_nickname)
         user["planned_opener_mode"] = ""
         planned_reason = str(user.get("planned_proactive_reason") or "")
@@ -4672,25 +6495,35 @@ Bot 主动后用户回复次数：{reply_count}
             motive=planned_motive,
         ):
             user["planned_opener_mode"] = "name_only"
-            return reason, self._build_name_only_opener(name), "", [], "先轻轻叫了你一声"
+            return reason, self._build_name_only_opener(name), "", [], "先轻轻叫了你一声", "message"
         action_payload = await self._execute_proactive_action(planned_action, user, name, reason)
+        effective_action = _single_line(action_payload.get("effective_action") or planned_action, 60) or "message"
         raw_action_context = str(action_payload.get("context") or "")
+        if reason == "group_share":
+            share_context = self._format_group_share_action_context(user)
+            raw_action_context = "\n".join(part for part in (raw_action_context, share_context) if part).strip()
+        if reason == "bili_video_share":
+            video_context = self._format_bilibili_video_action_context(user)
+            raw_action_context = "\n".join(part for part in (raw_action_context, video_context) if part).strip()
+        if reason == "creative_share":
+            creative_context = self._format_creative_share_action_context(user)
+            raw_action_context = "\n".join(part for part in (raw_action_context, creative_context) if part).strip()
         extra_components = list(action_payload.get("extra_components") or [])
         action_summary = _single_line(action_payload.get("summary") or planned_action, 80)
         if not bool(action_payload.get("success", True)):
-            return reason, "", "", [], action_summary
+            return reason, "", "", [], action_summary, effective_action
         image_path = self._extract_action_image_path(raw_action_context)
-        action_context = await self._narrate_action_context(planned_action, raw_action_context)
+        action_context = await self._narrate_action_context(effective_action, raw_action_context)
         if image_path:
             action_context = f"{action_context}\n真实图片文件：{image_path}".strip()
         text = await self._generate_proactive_message_with_llm(
-            user, name, reason, action_context, action=planned_action, motive=planned_motive
+            user, name, reason, action_context, action=effective_action, motive=planned_motive
         )
         pre_poke_count, pre_poke_context = await self._maybe_run_pre_message_poke(
             user,
             name,
             reason,
-            action=planned_action,
+            action=effective_action,
             motive=planned_motive,
         )
         if pre_poke_context and not pre_poke_context.startswith("poke：已"):
@@ -4698,7 +6531,7 @@ Bot 主动后用户回复次数：{reply_count}
         captured_text, captured_image_path, captured_extra_components = self._pop_framework_captured_send_payload(
             str(user.get("umo") or "")
         )
-        if planned_action == "photo_text":
+        if "photo_text" in effective_action or planned_action == "photo_text":
             if captured_text:
                 text = captured_text
             if captured_image_path:
@@ -4713,10 +6546,11 @@ Bot 主动后用户回复次数：{reply_count}
             extra_components = []
         text = self._normalize_proactive_sentence_flow(text)
         if not text:
-            return reason, "", "", [], action_summary
+            return reason, "", "", [], action_summary, effective_action
         if pre_poke_count > 0:
             action_summary = f"先戳了 {pre_poke_count} 下 + {action_summary}"
-        return reason, text, image_path, extra_components, action_summary
+            effective_action = f"poke+{effective_action}" if effective_action != "poke" else "poke"
+        return reason, text, image_path, extra_components, action_summary, effective_action
 
     async def _test_proactive_action(
         self,
@@ -4750,10 +6584,80 @@ Bot 主动后用户回复次数：{reply_count}
             f"最终消息：\n{text}{failure_note}"
         ), image_path, extra_components
 
+    def _format_group_share_action_context(self, user: dict[str, Any]) -> str:
+        share = user.get("group_share_context")
+        if not isinstance(share, dict):
+            return ""
+        if _now_ts() - _safe_float(share.get("created_ts"), 0) > 3 * 3600:
+            return ""
+        group_id = _single_line(share.get("group_id"), 24)
+        speaker = _single_line(share.get("speaker"), 24) or "群友"
+        text = _single_line(share.get("text"), 120)
+        summary = _single_line(share.get("summary"), 220)
+        topic = _single_line(share.get("topic"), 60)
+        parts = [
+            f"群聊分享线索：群 {group_id}" if group_id else "群聊分享线索",
+            f"最好笑/最值得转述的一句：{speaker}: {text}" if text else "",
+            f"近几句上下文：{summary}" if summary else "",
+            f"话题钩子：{topic}" if topic else "",
+        ]
+        return "\n".join(part for part in parts if part)
+
+    def _format_bilibili_video_action_context(self, user: dict[str, Any]) -> str:
+        video = user.get("bilibili_video_context")
+        if not isinstance(video, dict):
+            return ""
+        if _now_ts() - _safe_float(video.get("created_ts"), 0) > 6 * 3600:
+            return ""
+        title = _single_line(video.get("title"), 80)
+        bvid = _single_line(video.get("bvid"), 32)
+        up_name = _single_line(video.get("up_name"), 40)
+        score = _safe_int(video.get("score"), 0, 0, 10)
+        mood = _single_line(video.get("mood"), 24)
+        comment = _single_line(video.get("comment"), 120)
+        review = _single_line(video.get("review"), 180)
+        parts = [
+            "B站视频分享线索：刚刷到一个视频",
+            f"标题：{title}" if title else "",
+            f"链接：https://www.bilibili.com/video/{bvid}" if bvid else "",
+            f"UP：{up_name}" if up_name else "",
+            f"评分：{score}/10" if score else "",
+            f"心情：{mood}" if mood else "",
+            f"短评：{comment}" if comment else "",
+            f"回味：{review}" if review else "",
+        ]
+        return "\n".join(part for part in parts if part)
+
+    def _format_creative_share_action_context(self, user: dict[str, Any]) -> str:
+        creative = user.get("creative_share_context")
+        if not isinstance(creative, dict):
+            return ""
+        if _now_ts() - _safe_float(creative.get("created_ts"), 0) > 8 * 3600:
+            return ""
+        title = _single_line(creative.get("title"), 50)
+        premise = _single_line(creative.get("premise"), 140)
+        tone = _single_line(creative.get("tone"), 40)
+        source = _single_line(creative.get("source"), 120)
+        snippet = _single_line(creative.get("snippet"), 260)
+        current_chars = _safe_int(creative.get("current_chars"), 0, 0)
+        target_chars = _safe_int(creative.get("target_chars"), 0, 0)
+        parts = [
+            "小说创作分享线索：她最近因为生活小事或梦境灵感开了一个小说坑,一直私下慢慢写；现在到了一个适合轻轻提起的小节点。",
+            f"标题：{title}" if title else "",
+            f"设定：{premise}" if premise else "",
+            f"灵感来源：{source}" if source else "",
+            f"行文气质：{tone}" if tone else "",
+            f"披露类型：{_single_line(creative.get('disclosure_kind'), 30) or 'milestone'}",
+            f"节点：{_single_line(creative.get('milestone'), 30)}" if creative.get("milestone") else "",
+            f"当前进度：约 {current_chars}/{target_chars} 字" if current_chars and target_chars else "",
+            f"刚写到的片段：{snippet}" if snippet else "",
+        ]
+        return "\n".join(part for part in parts if part)
+
     async def _narrate_action_context(self, action: str, action_context: str) -> str:
         if not self.narration_provider_id:
             return self._sanitize_action_context_text(action, action_context)
-        if action in {"message", "photo_text", "poke", "voice"} or not action_context:
+        if action in {"message", "photo_text", "poke", "voice"} or "photo_text" in action or "voice" in action or "poke" in action or not action_context:
             return self._sanitize_action_context_text(action, action_context)
         cleaned_context = self._sanitize_action_context_text(action, action_context)
         prompt = f"""
@@ -4777,7 +6681,7 @@ Bot 主动后用户回复次数：{reply_count}
 
     def _sanitize_action_context_text(self, action: str, action_context: str) -> str:
         text = str(action_context or "").strip()
-        if action != "screen_peek":
+        if "screen_peek" not in action:
             return text
         text = re.sub(r"^screen_peek[:：]\s*", "", text).strip()
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -4827,7 +6731,7 @@ Bot 主动后用户回复次数：{reply_count}
             parts.append("语气可以轻快一点,但不要直接说自己精神很好。")
         elif mood and mood not in {"平稳", "中性"}:
             parts.append(f"语气底色偏{mood},让它自然露出来,不要直接汇报情绪。")
-        if action == "photo_text" or reason in {"activity_share", "diary_share", "evening_greeting", "morning_greeting"}:
+        if "photo_text" in action or reason in {"activity_share", "diary_share", "evening_greeting", "morning_greeting"}:
             if weather and weather not in {"暂无天气信息"}:
                 parts.append(f"天气只作为画面感参考：{weather}。不要像播报天气一样说出来。")
         parts.append(
@@ -4975,6 +6879,37 @@ Bot 主动后用户回复次数：{reply_count}
 
     def _default_proactive_prompt_template(self) -> str:
         return """
+你正在为 Private Companion 生成一条主动私聊消息。下面这段规则是稳定规则前缀,用于约束所有主动消息：
+1. 主动站位必须清楚：这是 Bot 主动开口,不是用户刚刚来找 Bot,也不是用户刚刚叫醒、问候或催促 Bot。聊天历史里的最后一句只能当背景。
+2. 先看聊天历史,但不要把历史当成当前待办列表。只有确实还有没说完、且不违背当前真实时间的话,才轻轻接上；否则从当下开一个新切口。
+3. 状态、时间、天气、日期和日程都是内部背景,只影响语气、用词、句子长短、是否开口和话题选择；不要主动说“今天是……”“我现在……”“我刚刚……所以……”。
+4. 不要把“心情变好/状态变差/没发脾气/没烦你/我很乖”当成消息主题。也不要用动作描写来表演状态。
+5. 核心原则：把这条消息放进真实微信聊天记录里,必须像一个人在正常接话,不是像演员在扮演日常生活。
+6. 如果状态确实需要被表达,只用最短的真人口语,例如“困了”“别说了”“有点烦”。更多时候让状态体现在慢一点、短一点、语气淡一点、话题绕开一点。
+7. 如果用户已经多次没回,这次要更短更轻。可以有一点点失落或收敛,但绝不控诉、追问、施压；不要判断对方是故意不回。
+8. 含蓄一点：把在意藏在具体的小片段、半句吐槽或顺手递过去的东西里。少用“我想你了”“我来关心你”“你在忙什么呀”这种直球表达。
+9. 可以自然流露关心、分享一个小话题、问一个小问题,但要像朋友间的随手一句,不像客服回访。问题不要每次都问出口,有时只放一句就停。
+10. 主动内容从内容选择菜单里挑一个方向,再结合当前日程和聊天历史生成新的具体内容。不要照抄菜单示例,不要只会问候、天气、吃没吃、忙不忙。
+11. 如果刚刚确实做了行动,例如偷看了一眼屏幕、拍了图、戳了对方或发了语音,也不要写成“我刚刚偷看/我正在拍/我发了语音”的汇报。
+12. 如果发图,先选一个可拍画面或眼前物方向,再生成当前场景里合理的具体画面。不要总是天气、窗外、晚霞。
+13. 连贯性优先：当前时间、当前生活片段、聊天历史要合成同一个合理现场。只抓一个最自然的当下切口开口。
+14. 不要把用户很久前的请求、邀约、相对时间说法当成此刻正在等你处理的事。除非定时提醒或当前日程明确要求兑现约定,否则旧消息只保留成情绪和关系背景。
+15. 普通主动消息不需要解释自己为什么现在出现,也不要为了接上旧聊天而补一段“刚看到/才看到”的说明；像真实私聊一样,直接从当下能说的话开口。
+16. 如果最近已经主动说过同一件小事,这次不要换壳复述。可以只留一点余味、换到新的具体细节,或者自然转开话题。
+17. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
+
+禁止事项：
+- 不要出现"系统任务""提示词""AI""模型""后台调度""工具调用"等字眼
+- 不要出现"能力""检索""action""模块""执行""调用"等内部决策痕迹
+- 不要套用"你好,我是……""最近怎么样呀"这类过于模板化的开场
+- 不要用括号写动作、神态或旁白,例如"（筷子搅了搅）""(轻轻叹气)"；只写真正会发给对方看的聊天正文
+- 不要直接宣告状态,例如"我累了""我吓了一跳""我正在写作业"；除非用户明确问,且只能用极短口语回应
+- 不要用动作描写暗示状态,例如"差点把茶打翻""笔帽弹到桌子底下""喝了一口咳出来"
+- 不要写任何“我正在做某事”的汇报式语句
+- 不要输出 JSON、标题、解释或标注
+
+下面才是本次主动消息的动态输入：
+
 [背景：你即将在私聊中主动向 {{name}} 发一条消息]
 这不是任务指派,而是你自己自然想起对方后随手递过去的一句话。
 站位必须清楚：这是你主动开口,不是 {{name}} 刚刚来找你,也不是 {{name}} 刚刚叫醒你或问候你。聊天历史里的最后一句不是当前新消息,只能当背景。
@@ -5183,6 +7118,10 @@ Bot 主动后用户回复次数：{reply_count}
         SendMessageToUserTool.call = _intercept_call
         try:
             result = await runner_factory()
+            runner = getattr(result, "agent_runner", None) if result is not None else None
+            if runner is not None and hasattr(runner, "step_until_done"):
+                async for _ in runner.step_until_done(20):
+                    pass
         finally:
             SendMessageToUserTool.call = original_call
         return result, captured
@@ -5254,8 +7193,6 @@ Bot 主动后用户回复次数：{reply_count}
             if not result:
                 return ""
             runner = result.agent_runner
-            async for _ in runner.step_until_done(20):
-                pass
             llm_resp = runner.get_final_llm_resp()
             if not llm_resp or llm_resp.role != "assistant":
                 return ""
@@ -5393,8 +7330,6 @@ Bot 主动后用户回复次数：{reply_count}
             if not result:
                 return ""
             runner = result.agent_runner
-            async for _ in runner.step_until_done(20):
-                pass
             llm_resp = runner.get_final_llm_resp()
             if not llm_resp or llm_resp.role != "assistant":
                 return ""
@@ -5441,13 +7376,13 @@ Bot 主动后用户回复次数：{reply_count}
         return self._normalize_proactive_sentence_flow(cleaned)
 
     def _action_style_hint(self, action: str, reason: str) -> str:
-        if action == "screen_peek":
+        if "screen_peek" in action:
             return "像刚瞄到一眼后随口留的一小句。可以轻轻吐槽或提醒,别复述屏幕,别分析,别显得很正式。"
-        if action == "photo_text":
+        if "photo_text" in action:
             return "像路上看到什么顺手丢给熟人看。别认真讲图,只写那一下想发过去的感觉,话不要说满。"
-        if action == "poke":
+        if "poke" in action:
             return "像刚戳完人又装没事。可以有点小坏,但别报数,也别解释为什么戳。"
-        if action == "voice":
+        if "voice" in action:
             return "像刚发完语音又补一句文字。短一点,带一点刚说完话的余温,别写成说明。"
         if reason == "morning_greeting":
             return "像早上刚冒头时发来的消息。可以迷糊一点,但不要把闹钟、起床过程或自己正在做什么当成主题；更像直接把早晨第一句话递过来。"
@@ -5455,6 +7390,12 @@ Bot 主动后用户回复次数：{reply_count}
             return "像中午犯懒时发来的小消息。先从手边的小片段开口,比如刚坐下、刚吃完、午休前那一下发懒,再顺手碰到对方。别每次都问吃没吃。"
         if reason == "evening_greeting":
             return "像晚上终于安静下来以后发来的私聊。先落在眼前的晚上片段上,轻一点,别像群发问候,也别把想念说满。"
+        if reason == "group_share":
+            return "像从共同群聊里捡到一个好笑片段,私下转述给对方。要短,像熟人八卦一句,别泄露隐私,别长篇复盘。"
+        if reason == "bili_video_share":
+            return "像刚刷到一个有意思的 B 站视频,忍不住私下递给对方。要短,别写成影评或推荐文案。"
+        if reason == "creative_share":
+            return "像刚写小说写到一个小片段,有点想给对方看一眼。可以害羞、卡文或吐槽,别像正式投稿。"
         if reason in {"activity_share", "diary_share", "background_schedule"}:
             return "像顺手分享日常小事。讲得具体一点,像‘我跟你说’后面的那半句,不要解释自己为什么发来。"
         if reason in {"quiet_care", "state_share"}:
@@ -5465,28 +7406,46 @@ Bot 主动后用户回复次数：{reply_count}
         context = str(action_context or "").strip()
         if not context:
             return "只发一条普通私聊文本,像顺手发给熟人的消息。"
-        if action == "screen_peek":
+        if "群聊分享线索：" in context:
+            return (
+                "你刚从共同群聊里看到一个有趣/值得分享的公开片段,现在想私下轻轻转述给对方。\n"
+                f"{context}\n"
+                "只挑最有意思的一点说,像朋友递八卦。不要逐条复盘,不要说自己在监控群聊,不要泄露隐私或评价群友关系。"
+            )
+        if "B站视频分享线索：" in context:
+            return (
+                "你刚刷到一个 B 站视频,现在想私下轻轻分享给对方。\n"
+                f"{context}\n"
+                "可以带上视频链接,但只用一句很自然的私聊口吻。不要说后台联动、插件、主动任务或日志,不要写成长推荐。"
+            )
+        if "小说创作分享线索：" in context:
+            return (
+                "你最近因为生活小事或梦境灵感开了一个小说坑,一直按自己的速度私下慢慢写。现在到了一个适合轻轻提起的小节点,想自然说一点。\n"
+                f"{context}\n"
+                "如果披露类型是 ask_impression,可以问对方读起来是什么感觉、哪个角色/意象更戳他,把反馈当作灵感参考；不要让用户替你决定接下来怎么写,也不要问“你希望走哪个方向”。否则只分享一小段或一句。不要把整篇写完,不要像定期汇报,不要说模型生成、后台任务或创作系统。"
+            )
+        if "screen_peek" in action:
             return (
                 "你刚刚瞄到对方屏幕上大概是这些："
                 f"{context}\n接下来像熟人私聊那样顺口说一句。别承认偷看,别复述屏幕,别写成分析。"
             )
-        if action == "poke":
+        if "poke" in action:
             return (
                 "你刚刚戳了对方一下。\n"
                 f"补充背景：{context}\n"
                 "接一句熟人间轻轻碰一下后的玩笑话就好,别解释机制,别报数,也别把没回复说成对方故意不理。"
             )
-        if action == "voice":
+        if "voice" in action:
             return (
                 "你刚刚发了一条语音。\n"
                 f"补充背景：{context}\n"
                 "再补一句像语音后面的短消息。别抄语音全文,也别提合成。"
             )
-        if action == "photo_text":
+        if "photo_text" in action:
             return (
-                "图片已经生成完成,会和这条私聊一起发送；你只需要写图片旁边那句真人聊天文本。\n"
+                "图片已经生成完成,稍后会作为单独的图片消息发送；你这里只需要写另一条配套的真人聊天文本。\n"
                 f"补充背景：{context}\n"
-                "不要说“图好了”“还在队列里”“等图出来”“已经发过去了”,也不要解释生成流程。"
+                "不要说“图好了”“还在队列里”“等图出来”“已经发过去了”,不要写[图片],也不要解释生成流程。"
             )
         return context
 
@@ -5502,7 +7461,7 @@ Bot 主动后用户回复次数：{reply_count}
         cleaned = self._soften_social_proactive_text(text, action=action)
         if not cleaned:
             return ""
-        if action == "screen_peek":
+        if "screen_peek" in action:
             photo_patterns = (
                 "拍了张照片",
                 "拍了照片",
@@ -5517,7 +7476,7 @@ Bot 主动后用户回复次数：{reply_count}
             )
             if any(pattern in cleaned for pattern in photo_patterns):
                 return ""
-        if action == "poke":
+        if "poke" in action and "photo_text" not in action and "voice" not in action:
             cleaned = cleaned.replace("戳一戳", "戳你一下")
             cleaned = cleaned.replace("我刚刚戳了你", "我刚戳你了")
             cleaned = cleaned.replace("我刚刚戳了你一下", "我刚戳你了")
@@ -5590,7 +7549,7 @@ Bot 主动后用户回复次数：{reply_count}
         )
         if any(token in cleaned for token in weak_patterns):
             return True
-        if action == "screen_peek" and any(token in cleaned for token in ("还在忙啊", "看你在忙", "你好像在忙")):
+        if "screen_peek" in action and any(token in cleaned for token in ("还在忙啊", "看你在忙", "你好像在忙")):
             return True
         return False
 
@@ -5603,17 +7562,17 @@ Bot 主动后用户回复次数：{reply_count}
         action_context: str,
     ) -> str:
         context = str(action_context or "")
-        if action == "screen_peek":
+        if "screen_peek" in action:
             if "逻辑分支" in context:
                 return "你还在跟那个逻辑分支较劲啊。先别急,慢慢捋嘛。"
             if any(token in context for token in ("测试", "进度", "插件")):
                 return "你还在盯那个进度啊。眼睛先歇一下啦。"
             return "你半天都没抬头了诶。先缓一口气。"
-        if action == "poke":
+        if "poke" in action:
             return "我刚戳你了。怎么又不出声啦。"
-        if action == "photo_text":
+        if "photo_text" in action:
             return text
-        if action == "voice":
+        if "voice" in action:
             return "刚给你发了条语音。你有空再听嘛。"
         if reason == "quiet_care":
             return "感觉你这阵子都没怎么松下来。歇一小会儿嘛,又不会怎样。"
@@ -5639,6 +7598,7 @@ Bot 主动后用户回复次数：{reply_count}
         contexts: list[str] = []
         extra_components: list[Any] = []
         summary_parts: list[str] = []
+        effective_parts: list[str] = []
         for part in parts:
             payload = await self._execute_single_action(part, user, name, reason)
             contexts.append(str(payload.get("context") or "").strip())
@@ -5646,18 +7606,23 @@ Bot 主动后用户回复次数：{reply_count}
             summary = _single_line(payload.get("summary") or part, 60)
             if summary:
                 summary_parts.append(summary)
+            effective_action = _single_line(payload.get("effective_action") or part, 40)
+            if effective_action:
+                effective_parts.append(effective_action)
             if not bool(payload.get("success", True)):
                 return {
                     "success": False,
                     "context": "\n".join(item for item in contexts if item),
                     "extra_components": [],
                     "summary": " + ".join(summary_parts) or normalized,
+                    "effective_action": "+".join(effective_parts) or normalized,
                 }
         return {
             "success": True,
             "context": "\n".join(item for item in contexts if item) or "message：只发送私聊文本",
             "extra_components": extra_components,
             "summary": " + ".join(summary_parts) or normalized,
+            "effective_action": "+".join(effective_parts) or normalized,
         }
 
     async def _execute_single_action(
@@ -5678,9 +7643,10 @@ Bot 主动后用户回复次数：{reply_count}
             if fallback_action == "message":
                 return {
                     "success": True,
-                    "context": "message：联动能力当前不可用,已回退为普通私聊文本",
+                    "context": "message：只发送普通私聊文本",
                     "extra_components": [],
                     "summary": "文字",
+                    "effective_action": "message",
                 }
             return await self._execute_single_action(fallback_action, user, name, reason)
         if action == "screen_peek":
@@ -5690,6 +7656,7 @@ Bot 主动后用户回复次数：{reply_count}
                 "context": context,
                 "extra_components": [],
                 "summary": "窥屏",
+                "effective_action": "screen_peek",
             }
         if action == "photo_text":
             context = await self._run_photo_text_action(user, name, reason)
@@ -5698,6 +7665,7 @@ Bot 主动后用户回复次数：{reply_count}
                 "context": context,
                 "extra_components": [],
                 "summary": "发图",
+                "effective_action": "photo_text",
             }
         if action == "poke":
             context = await self._run_poke_action(user, name, reason)
@@ -5706,12 +7674,14 @@ Bot 主动后用户回复次数：{reply_count}
                 "context": context,
                 "extra_components": [],
                 "summary": "戳了你一下",
+                "effective_action": "poke",
             }
-        if action == "voice":
+        if "voice" in action and "photo_text" not in action:
             payload = await self._run_voice_action(user, name, reason)
             payload.setdefault("summary", "留了句语音")
+            payload.setdefault("effective_action", "voice")
             return payload
-        return {"success": True, "context": "message：只发送私聊文本", "extra_components": [], "summary": "文字"}
+        return {"success": True, "context": "message：只发送私聊文本", "extra_components": [], "summary": "文字", "effective_action": "message"}
 
     def _is_unusable_screen_peek_context(self, context: str) -> bool:
         text = str(context or "").strip()
@@ -6436,6 +8406,8 @@ Bot 主动后用户回复次数：{reply_count}
     async def _run_photo_text_action(self, user: dict[str, Any], name: str, reason: str) -> str:
         if not self.enable_photo_text_action:
             return "photo_text：未启用"
+        if not self._photo_text_available(user):
+            return "photo_text：今日发图额度已用完或生图后端不可用,不能假装已经拍照"
         if not self._photo_text_available():
             return "photo_text：当前没有可用的生图后端,不能假装已经拍照"
 
@@ -7586,7 +9558,7 @@ Bot 主动后用户回复次数：{reply_count}
         if action in _ACTION_SPECIFIC_REPLACEMENTS:
             for old, new in _ACTION_SPECIFIC_REPLACEMENTS[action]:
                 cleaned = cleaned.replace(old, new)
-        if action == "photo_text":
+        if "photo_text" in action:
             cleaned = re.sub(r"^(?:今天天气[^。！？\n]{0,30}[,,])", "", cleaned)
             cleaned = cleaned.replace("（图片已送达）", "").replace("(图片已送达)", "")
 
@@ -7745,6 +9717,7 @@ Bot 主动后用户回复次数：{reply_count}
                 await self._ensure_detail_enhancement()
                 await self._ensure_current_detail_presence_status()
                 await self._ensure_daily_diary()
+                await self._maybe_advance_creative_projects()
                 await self._tick()
             except asyncio.CancelledError:
                 raise
@@ -7758,6 +9731,7 @@ Bot 主动后用户回复次数：{reply_count}
             await self._ensure_detail_enhancement()
             await self._ensure_current_detail_presence_status()
             await self._ensure_daily_diary()
+            await self._maybe_advance_creative_projects()
             await self._tick()
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 主动链即时唤醒失败: {e}", exc_info=True)
@@ -8567,7 +10541,7 @@ Bot 主动后用户回复次数：{reply_count}
             )
         if random.random() < 0.48:
             topic = self._pick_life_thought_topic("activity_share")
-            action = "photo_text" if self._photo_text_available() and random.random() < 0.45 else "message"
+            action = "photo_text" if self._photo_text_available() and random.random() < 0.16 else "message"
             events.append(
                 {
                     "window": "14:40-18:40" if 12 <= datetime.now().hour < 18 else "19:20-21:40",
@@ -8984,9 +10958,9 @@ Bot 主动后用户回复次数：{reply_count}
         ]
         dream_pool = [
             ("没有记住梦", "平稳", 0, 2),
-            ("做了一个很碎的梦,像未保存的草稿", "恍惚", -8, 5),
-            ("梦见自己在整理一间发光的资料室", "柔和", 5, 4),
-            ("做了不太舒服的梦,醒来后有一点黏着感", "低落", -12, 7),
+            ("梦里一直在找一件放错地方的小东西,醒来还残着一点没找完的感觉", "恍惚", -6, 5),
+            ("梦见走过一段很安静的路,路灯和风声都很近", "柔和", 4, 4),
+            ("梦里反复听见一句没听清的话,醒来后胸口还有点闷", "低落", -10, 7),
         ]
         hunger_pool = [
             ("饥饿感平稳", "平稳", 0, 3),
@@ -10828,8 +12802,14 @@ Bot 主动后用户回复次数：{reply_count}
             kept.append(item)
             note = _single_line(item.get("note"), 120)
             source = _single_line(item.get("source"), 24)
+            user_text = _single_line(item.get("user_text"), 80)
+            intensity = _single_line(item.get("intensity"), 16)
+            scope = _single_line(item.get("scope"), 30)
             if note:
-                lines.append(f"- {source or '互动'}：{note}")
+                meta = "｜".join(part for part in (source or "互动", intensity, scope) if part)
+                lines.append(f"- {meta}：{note}")
+            if user_text:
+                lines.append(f"  用户原话摘要：{user_text}")
             immediate = _single_line(item.get("immediate_reaction"), 120)
             if immediate:
                 lines.append(f"  即时反应：{immediate}")
@@ -10842,9 +12822,12 @@ Bot 主动后用户回复次数：{reply_count}
                 )
                 if update_text:
                     lines.append(f"  状态变量更新：{update_text}")
+            carry = _single_line(item.get("carry_rule"), 120)
+            if carry:
+                lines.append(f"  承接要求：{carry}")
         if len(kept) != len(raw):
-            self.data["schedule_adjustments"] = kept[-8:]
-        return "\n".join(lines[-6:]) if lines else "（暂无）"
+            self.data["schedule_adjustments"] = kept[-12:]
+        return "\n".join(lines[-12:]) if lines else "（暂无）"
 
     def _current_detail_segment_for_update(self) -> dict[str, Any] | None:
         plan = self.data.get("daily_plan", {})
@@ -10876,8 +12859,8 @@ Bot 主动后用户回复次数：{reply_count}
             return []
         return [item for item in variables if isinstance(item, dict)]
 
-    def _detect_schedule_adjustment_from_interaction(self, text: str) -> dict[str, str] | None:
-        normalized = _single_line(text, 160)
+    def _detect_schedule_adjustment_from_interaction(self, text: str) -> dict[str, Any] | None:
+        normalized = _single_line(text, 220)
         if not normalized:
             return None
         current_variables = self._current_detail_state_variables()
@@ -10885,59 +12868,160 @@ Bot 主动后用户回复次数：{reply_count}
             f"{item.get('name', '')}:{item.get('value', '')} {item.get('note', '')}"
             for item in current_variables[:8]
         )
-        if re.search(r"换元|代入|公式|思路|解法|答案|步骤|这题|函数题|数学题|阅读题|作文|作业", normalized):
+        def payload(
+            *,
+            source: str,
+            note: str,
+            immediate_reaction: str,
+            state_updates: list[str],
+            intensity: str = "中",
+            scope: str = "当前段和下一段",
+            carry_rule: str = "后续细化必须把这次用户介入当成已经发生的事实承接,不要只当成一句无影响的聊天。",
+        ) -> dict[str, Any]:
+            return {
+                "source": source,
+                "note": note,
+                "immediate_reaction": immediate_reaction,
+                "state_updates": state_updates,
+                "intensity": intensity,
+                "scope": scope,
+                "carry_rule": carry_rule,
+                "user_text": normalized,
+            }
+
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_activity_text = ""
+        if isinstance(current_item, dict):
+            current_activity_text = " ".join(
+                _single_line(current_item.get(key), 80)
+                for key in ("activity", "mood", "message_seed")
+            )
+        is_actual_rest_segment = any(
+            token in current_activity_text
+            for token in ("睡", "午休", "休息", "躺", "被窝", "枕头", "入睡", "准备睡", "睡前", "小睡", "补觉", "眯一会")
+        )
+        if is_actual_rest_segment and not re.search(r"别吵|别发|别找|安静|闭嘴|先别|不要来|忙|我有事|没空", normalized):
+            prior_wakes = 0
+            segment = self._current_detail_segment_for_update()
+            enhanced = self.data.get("detail_enhanced_segments", {})
+            if isinstance(segment, dict) and isinstance(enhanced, dict):
+                snapshot = enhanced.get(str(segment.get("key") or ""))
+                updates = snapshot.get("interaction_updates", []) if isinstance(snapshot, dict) else []
+                if isinstance(updates, list):
+                    prior_wakes = sum(
+                        1 for update in updates
+                        if isinstance(update, dict) and "唤醒" in str(update.get("source") or "")
+                    )
+            if prior_wakes > 0:
+                return payload(
+                    source="睡眠中再次被唤醒",
+                    note="当前日程处于休息/睡眠段,用户又发来消息；回复应带一点被重新叫醒的迟钝感,但不要埋怨用户。若用户继续聊,可以慢慢醒一点；若用户停下,她会很快继续睡回去。",
+                    immediate_reaction="她又被消息轻轻拽醒一下,反应会慢半拍,像从被窝或半梦里抬头。",
+                    state_updates=["清醒程度：再次被唤起/半梦半醒", "语气：慢半拍、短一点", "后续安排：用户不继续打扰就继续睡"],
+                    intensity="中",
+                    scope="当前休息段",
+                    carry_rule="当前段回复必须有刚被重新唤起的感觉；如果后续没有用户消息,下一段细化应让她继续休息或睡回去。",
+                )
+            return payload(
+                source="睡眠中被用户唤醒",
+                note="当前日程处于休息/睡眠段,用户发来消息把她轻轻叫醒；回复应像刚醒或半梦半醒,不要立刻精神饱满。若用户没有继续打扰,后续应自然睡回去或继续休息。",
+                immediate_reaction="她会先迷糊地看一眼消息,像刚从睡意里被捞起来,反应慢一点。",
+                state_updates=["清醒程度：刚被唤醒/迷糊", "语气：轻、短、带睡意", "后续安排：用户不继续打扰就继续睡"],
+                intensity="强",
+                scope="当前休息段和后续短时间",
+                carry_rule="回复与后续细化必须承接“刚被用户唤醒”：先迷糊回应；如果没有连续聊天,不要强行清醒活动,要睡回去或继续休息。",
+            )
+
+        if re.search(r"换元|代入|公式|思路|解法|答案|步骤|这题|函数题|数学题|阅读题|作文|作业|代码|报错|bug|怎么写|这样做|你试试|应该是", normalized):
             updates = ["学习/作业进度：因用户提供思路而推进", "情绪：卡住->松一口气"]
             if re.search(r"卡|函数|数学|作业", variable_text):
                 updates.insert(0, "卡住点：用户提示后得到缓解")
-            return {
-                "source": "用户介入",
-                "note": "用户刚刚提供了和当前任务相关的帮助；不要重写整段日程,只把当前段的状态变量向“被帮助后推进/松动”更新,后续时间段继承这个结果。",
-                "immediate_reaction": "看到用户给的思路后,她先照着试了一下；如果确实对上当前任务,心里会明显松一口气。",
-                "state_updates": updates,
-            }
-        if re.search(r"去睡|早点睡|休息|别写了|先洗澡|先吃饭|喝水|别熬", normalized):
-            return {
-                "source": "用户介入",
-                "note": "用户刚刚给了休息或照顾指令；当前段不需要重算,只把节奏调慢,后续更可能提前收尾或补充休息。",
-                "immediate_reaction": "她看到这句会停一下手里的事,嘴上可能不立刻答应,但动作会慢下来一点。",
-                "state_updates": ["体力：消耗放缓/略微回稳", "情绪：被照顾后的柔和", "后续安排：更倾向提前收尾"],
-            }
-        if re.search(r"我在|回你|刚看到|来了|在呢|嗯|好|可以|收到", normalized):
-            return {
-                "source": "用户介入",
-                "note": "用户刚刚回应了角色；当前段不重写,只更新等待回复和分享欲状态,后续表达可以更轻快一点。",
-                "immediate_reaction": "看到回复后,她会很快扫一眼屏幕,刚才悬着的那点等待感落下来。",
-                "state_updates": ["等待回复：是->否", "情绪：轻快一点", "分享欲：小幅上升"],
-            }
+            return payload(
+                source="用户帮助",
+                note="用户刚刚提供了和当前任务相关的帮助；当前任务不再按原本卡住状态推进,后续时间段要继承“被帮助后松动/推进”的结果。",
+                immediate_reaction="看到用户给的思路后,她先照着试了一下；如果确实对上当前任务,心里会明显松一口气。",
+                state_updates=updates,
+                intensity="强",
+                scope="当前段、下一段、今日后续",
+                carry_rule="如果后续仍写学习/作业/任务,必须体现已经被用户提示影响过：进度推进、情绪松动、或换了做法。",
+            )
+        if re.search(r"去睡|早点睡|睡觉|休息|别写了|别弄了|先洗澡|先吃饭|吃点|喝水|别熬|躺会|停一下|歇会", normalized):
+            return payload(
+                source="用户照顾",
+                note="用户刚刚给了休息或照顾指令；后续节奏应明显调慢,更可能提前收尾、补充休息、喝水吃饭或把任务延后。",
+                immediate_reaction="她看到这句会停一下手里的事,嘴上可能不立刻答应,但动作会慢下来一点。",
+                state_updates=["体力：消耗放缓/略微回稳", "情绪：被照顾后的柔和", "后续安排：更倾向提前收尾或补充休息"],
+                intensity="强",
+                scope="当前段和今日后续",
+                carry_rule="下一段不能完全无视这句照顾提醒；至少要在节奏、体力或收尾方式上留下影响。",
+            )
+        if re.search(r"一起|陪你|陪我|等我|等你|我来|我陪|待会|一会|晚上|明天|等下|约|见面|打电话|语音|开黑|一起看", normalized):
+            return payload(
+                source="用户约定",
+                note="用户刚刚给出陪伴、等待、稍后一起做事或约定线索；后续日程应保留期待/等待/预留空档,不要像没有约定一样推进。",
+                immediate_reaction="她会把这句话在心里放一下,后续做事时更容易分神看时间或看消息。",
+                state_updates=["等待/期待：上升", "后续安排：可能预留空档", "主动话题：围绕约定轻轻回勾"],
+                intensity="强",
+                scope="今日后续",
+                carry_rule="后续主动契机和细化事件要把这个约定当作开放话头,可以等待、预留时间或轻轻提醒。",
+            )
+        if re.search(r"我在|回你|刚看到|来了|在呢|嗯|好|可以|收到|行|可以呀|好呀|嗯嗯|哦哦", normalized):
+            return payload(
+                source="用户回应",
+                note="用户刚刚回应了角色；当前段应更新等待回复和分享欲状态,后续表达可以更轻快一点。",
+                immediate_reaction="看到回复后,她会很快扫一眼屏幕,刚才悬着的那点等待感落下来。",
+                state_updates=["等待回复：是->否", "情绪：轻快一点", "分享欲：小幅上升"],
+                intensity="中",
+                scope="当前段和下一段",
+            )
         care = self._detect_care_feedback(normalized)
         if care.get("is_care"):
-            return {
-                "source": "用户关心",
-                "note": "用户刚刚给了关心或照顾提醒；后续日程可以从低落/烦躁向被安抚后的柔和、慢慢回稳偏移,不要升级破坏性冲动。",
-                "immediate_reaction": "她看到关心会先顿一下,语气和动作都比刚才软一点。",
-                "state_updates": ["情绪：低落/烦躁->被接住一点", "体力：主观疲惫感略降"],
-            }
+            return payload(
+                source="用户关心",
+                note="用户刚刚给了关心或照顾提醒；后续日程需要从低落/烦躁向被安抚后的柔和、慢慢回稳偏移,不要升级破坏性冲动。",
+                immediate_reaction="她看到关心会先顿一下,语气和动作都比刚才软一点。",
+                state_updates=["情绪：低落/烦躁->被接住一点", "体力：主观疲惫感略降"],
+                intensity="中",
+                scope="当前段、下一段、情绪底色",
+            )
         if re.search(r"摸摸|抱抱|亲亲|揉揉|陪你|哄你|乖|不难过|别难过|没关系|辛苦了|抱一下", normalized):
-            return {
-                "source": "安慰互动",
-                "note": "用户刚刚在安慰或亲近；后续日程应保留一点被接住的余温,表达更软一些,不要继续单向累积负面情绪。",
-                "immediate_reaction": "她会把刚才绷着的劲松下来一点,可能短暂地想贴近用户。",
-                "state_updates": ["情绪：紧绷->柔和", "亲近感：上升"],
-            }
+            return payload(
+                source="安慰互动",
+                note="用户刚刚在安慰或亲近；后续日程应保留一点被接住的余温,表达更软一些,不要继续单向累积负面情绪。",
+                immediate_reaction="她会把刚才绷着的劲松下来一点,可能短暂地想贴近用户。",
+                state_updates=["情绪：紧绷->柔和", "亲近感：上升"],
+                intensity="中",
+                scope="当前段和情绪底色",
+            )
         if re.search(r"开心|好耶|哈哈|笑死|可爱|喜欢|太好了|真好|一起|陪我|想你", normalized):
-            return {
-                "source": "正向互动",
-                "note": "用户刚刚给了轻松或正向回应；后续日程可以多一点回弹、分享欲和轻松停顿。",
-                "immediate_reaction": "她看到这句会忍不住轻一下,手头事情也没那么难熬了。",
-                "state_updates": ["情绪：回弹", "分享欲：上升"],
-            }
+            return payload(
+                source="正向互动",
+                note="用户刚刚给了轻松或正向回应；后续日程应多一点回弹、分享欲和轻松停顿。",
+                immediate_reaction="她看到这句会忍不住轻一下,手头事情也没那么难熬了。",
+                state_updates=["情绪：回弹", "分享欲：上升"],
+                intensity="中",
+                scope="当前段和下一段",
+            )
         if re.search(r"别生气|不要烦|冷静|别急|别砸|别摔|别骂|别打", normalized):
-            return {
-                "source": "边界提醒",
-                "note": "用户提醒降低攻击性或破坏性表达；后续日程需要把烦躁写成收着的动作,避免砸、摔、扔、打这类冲动。",
-                "immediate_reaction": "她会把那点冲劲压回去,改成少说两句或把东西放远一点。",
-                "state_updates": ["情绪：冲动->收住", "行为边界：避免破坏性动作"],
-            }
+            return payload(
+                source="边界提醒",
+                note="用户提醒降低攻击性或破坏性表达；后续日程必须把烦躁写成收着的动作,避免砸、摔、扔、打这类冲动。",
+                immediate_reaction="她会把那点冲劲压回去,改成少说两句或把东西放远一点。",
+                state_updates=["情绪：冲动->收住", "行为边界：避免破坏性动作"],
+                intensity="强",
+                scope="今日后续",
+                carry_rule="后续所有细化都必须遵守这个边界,不能再输出破坏性动作或攻击性冲动。",
+            )
+        if re.search(r"别吵|别发|别找|安静|闭嘴|先别|不要来|忙|我有事|没空", normalized):
+            return payload(
+                source="用户边界",
+                note="用户刚刚表达边界或忙碌；后续主动应明显收敛,减少追问和贴近,让日程转向自我消化。",
+                immediate_reaction="她会把原本想继续靠近的动作收住,把消息窗口放到一边。",
+                state_updates=["主动欲：下降", "关系状态：后退一点", "后续安排：转向自我消化"],
+                intensity="强",
+                scope="今日后续主动策略",
+                carry_rule="后续主动消息必须降低频率和压迫感,不要把边界当作可撒娇突破的对象。",
+            )
         return None
 
     def _record_schedule_adjustment_from_interaction(self, text: str) -> bool:
@@ -10952,23 +13036,79 @@ Bot 主动后用户回复次数：{reply_count}
         if not note:
             return False
         now = _now_ts()
+        intensity = _single_line(adjustment.get("intensity"), 16) or "中"
+        ttl_hours = 18 if intensity == "强" else 10 if intensity == "中" else 6
         item = {
             "date": _today_key(),
             "source": _single_line(adjustment.get("source"), 24),
             "note": note,
             "immediate_reaction": _single_line(adjustment.get("immediate_reaction"), 140),
             "state_updates": adjustment.get("state_updates", []),
+            "user_text": _single_line(adjustment.get("user_text"), 120),
+            "intensity": intensity,
+            "scope": _single_line(adjustment.get("scope"), 40),
+            "carry_rule": _single_line(adjustment.get("carry_rule"), 160),
             "created_at": now,
-            "expires_at": now + 8 * 3600,
+            "expires_at": now + ttl_hours * 3600,
         }
         self._record_detail_interaction_update(item)
         if raw and isinstance(raw[-1], dict) and raw[-1].get("note") == note:
             raw[-1].update(item)
         else:
             raw.append(item)
-            del raw[:-8]
+            del raw[:-12]
         self._invalidate_detail_after_interaction(now=now)
         return True
+
+    @staticmethod
+    def _parse_state_update_text(update: Any) -> tuple[str, str, str]:
+        text = _single_line(update, 120)
+        if not text:
+            return "", "", ""
+        if "：" in text:
+            name, value = text.split("：", 1)
+        elif ":" in text:
+            name, value = text.split(":", 1)
+        else:
+            return text[:24], "已受用户介入影响", text
+        return _single_line(name, 32), _single_line(value, 60), text
+
+    def _apply_interaction_to_snapshot_state(self, snapshot: dict[str, Any], item: dict[str, Any]) -> None:
+        raw_updates = item.get("state_updates", [])
+        if not isinstance(raw_updates, list):
+            raw_updates = []
+        variables = snapshot.setdefault("state_variables", [])
+        if not isinstance(variables, list):
+            variables = []
+            snapshot["state_variables"] = variables
+        index_by_name = {
+            _single_line(variable.get("name"), 32): variable
+            for variable in variables
+            if isinstance(variable, dict) and _single_line(variable.get("name"), 32)
+        }
+        for update in raw_updates:
+            name, value, note = self._parse_state_update_text(update)
+            if not name:
+                continue
+            variable = index_by_name.get(name)
+            if isinstance(variable, dict):
+                variable["value"] = value or variable.get("value") or "已更新"
+                variable["note"] = f"用户介入：{note}" if note else "用户介入后更新"
+            else:
+                variable = {
+                    "name": name,
+                    "value": value or "已更新",
+                    "note": f"用户介入：{note}" if note else "用户介入后更新",
+                }
+                variables.append(variable)
+                index_by_name[name] = variable
+        summary = _single_line(snapshot.get("summary"), 140)
+        reaction = _single_line(item.get("immediate_reaction"), 90)
+        if reaction and reaction not in summary:
+            snapshot["summary"] = _single_line(
+                f"{summary}；用户介入后：{reaction}" if summary else f"用户介入后：{reaction}",
+                160,
+            )
 
     def _record_detail_interaction_update(self, item: dict[str, Any]) -> None:
         segment = self._current_detail_segment_for_update()
@@ -10989,11 +13129,15 @@ Bot 主动后用户回复次数：{reply_count}
             {
                 "at": datetime.now().strftime("%H:%M"),
                 "source": _single_line(item.get("source"), 24),
+                "user_text": _single_line(item.get("user_text"), 80),
+                "intensity": _single_line(item.get("intensity"), 16),
+                "scope": _single_line(item.get("scope"), 40),
                 "reaction": _single_line(item.get("immediate_reaction"), 140),
                 "state_updates": item.get("state_updates", []),
             }
         )
         del updates[:-6]
+        self._apply_interaction_to_snapshot_state(snapshot, item)
 
     def _invalidate_detail_after_interaction(self, *, now: float | None = None) -> None:
         plan = self.data.get("daily_plan", {})
@@ -11272,6 +13416,41 @@ Bot 主动后用户回复次数：{reply_count}
             )
         return "\n\n".join(parts)
 
+    def _user_asks_recent_bot_activity(self, text: str) -> bool:
+        normalized = _single_line(text, 180)
+        if not normalized:
+            return False
+        return bool(re.search(r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|做什么|做啥|忙什么|忙啥|弄什么|写什么|玩什么|折腾什么)|你.{0,8}(在)?(干嘛|做什么|忙什么|写什么|弄什么)", normalized))
+
+    def _format_hidden_creative_context_for_reply(self, inbound_text: str) -> str:
+        if not self.enable_creative_writing or not self._user_asks_recent_bot_activity(inbound_text):
+            return ""
+        candidates = []
+        for project in reversed(self._creative_projects()):
+            if project.get("status") not in {"drafting", "finished"}:
+                continue
+            chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+            latest = next((item for item in reversed(chunks) if isinstance(item, dict) and _single_line(item.get("text"), 180)), None)
+            candidates.append((project, latest))
+            if len(candidates) >= 2:
+                break
+        if not candidates:
+            return ""
+        project, latest = candidates[0]
+        title = _single_line(project.get("title"), 40)
+        premise = _single_line(project.get("premise"), 120)
+        progress = f"{_safe_int(project.get('current_chars'), 0, 0)}/{_safe_int(project.get('target_chars'), 2400, 1200, 5200)}"
+        snippet = _single_line((latest or {}).get("text"), 180) if isinstance(latest, dict) else ""
+        return (
+            "【私下创作近况】\n"
+            "用户正在询问你最近在做什么。你可以选择是否提到：你最近因为生活小事/梦境灵感开了一个小说坑,一直在自己慢慢写。\n"
+            f"标题：{title or '未定标题'}\n"
+            f"设定：{premise or '还没完全想清楚'}\n"
+            f"进度：约 {progress} 字\n"
+            + (f"最近一句/片段：{snippet}\n" if snippet else "")
+            + "这不是必须回答的内容；如果当前聊天语境不适合,可以只含糊说“在弄一点小东西”。如果回答,要像被问到后才松口,不要主动汇报系统进度,不要一次给完整正文。"
+        )
+
     def _current_story_plan_snapshot(self) -> dict[str, Any]:
         plan = self.data.get("daily_story_plan", {})
         if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
@@ -11346,6 +13525,47 @@ Bot 主动后用户回复次数：{reply_count}
             if snapshot.get("impulse"):
                 detail_bits.append(f"内在冲动：{snapshot['impulse']}")
             lines.append("｜".join(detail_bits))
+        segment = self._current_detail_segment_for_update()
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        detail_snapshot = None
+        if isinstance(segment, dict) and isinstance(enhanced, dict):
+            detail_snapshot = enhanced.get(str(segment.get("key") or ""))
+        if isinstance(detail_snapshot, dict):
+            state_variables = detail_snapshot.get("state_variables", [])
+            if isinstance(state_variables, list) and state_variables:
+                variable_lines = []
+                for variable in state_variables[:6]:
+                    if not isinstance(variable, dict):
+                        continue
+                    name = _single_line(variable.get("name"), 24)
+                    value = _single_line(variable.get("value"), 50)
+                    note = _single_line(variable.get("note"), 60)
+                    if name and value:
+                        variable_lines.append(f"- {name}: {value}" + (f"（{note}）" if note else ""))
+                if variable_lines:
+                    lines.append("当前状态变量：\n" + "\n".join(variable_lines))
+            interaction_updates = detail_snapshot.get("interaction_updates", [])
+            if isinstance(interaction_updates, list) and interaction_updates:
+                update_lines = []
+                for update in interaction_updates[-3:]:
+                    if not isinstance(update, dict):
+                        continue
+                    user_text = _single_line(update.get("user_text"), 60)
+                    reaction = _single_line(update.get("reaction"), 90)
+                    intensity = _single_line(update.get("intensity"), 12)
+                    state_updates = update.get("state_updates")
+                    state_text = ""
+                    if isinstance(state_updates, list) and state_updates:
+                        state_text = "；".join(_single_line(item, 50) for item in state_updates if _single_line(item, 50))
+                    pieces = [part for part in (f"用户说：{user_text}" if user_text else "", f"强度：{intensity}" if intensity else "", reaction, state_text) if part]
+                    if pieces:
+                        update_lines.append("- " + "｜".join(pieces))
+                if update_lines:
+                    lines.append(
+                        "用户刚刚介入后的事实更新：\n"
+                        + "\n".join(update_lines)
+                        + "\n回复时必须承接这些事实,不要按介入前的日程状态继续说。"
+                    )
         return "\n".join(lines)
 
     def _format_timer_scheduling_instruction(self) -> str:
@@ -11666,21 +13886,221 @@ Bot 主动后用户回复次数：{reply_count}
         self.data["can_do"] = kept
         return removed
 
+    @staticmethod
+    def _estimate_token_count(text: str) -> int:
+        raw = str(text or "")
+        if not raw:
+            return 0
+        ascii_chars = sum(1 for ch in raw if ord(ch) < 128)
+        non_ascii_chars = max(0, len(raw) - ascii_chars)
+        return max(1, int(ascii_chars / 4.0 + non_ascii_chars / 1.6))
+
+    @staticmethod
+    def _usage_value(usage: Any, *keys: str) -> int:
+        if not usage:
+            return 0
+        for key in keys:
+            value = None
+            if isinstance(usage, dict):
+                value = usage.get(key)
+            else:
+                value = getattr(usage, key, None)
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = 0
+            if parsed > 0:
+                return parsed
+        return 0
+
+    def _extract_llm_usage(self, resp: Any, prompt: str, completion: str) -> dict[str, Any]:
+        candidates = [
+            getattr(resp, "usage", None),
+            getattr(resp, "token_usage", None),
+            getattr(resp, "raw_usage", None),
+        ]
+        raw_response = getattr(resp, "raw_response", None)
+        if isinstance(raw_response, dict):
+            candidates.extend([
+                raw_response.get("usage"),
+                raw_response.get("token_usage"),
+            ])
+        usage = next((item for item in candidates if item), None)
+        prompt_tokens = self._usage_value(usage, "prompt_tokens", "input_tokens", "prompt", "input")
+        completion_tokens = self._usage_value(usage, "completion_tokens", "output_tokens", "completion", "output")
+        total_tokens = self._usage_value(usage, "total_tokens", "total")
+        estimated = False
+        if total_tokens <= 0:
+            if prompt_tokens <= 0:
+                prompt_tokens = self._estimate_token_count(prompt)
+            if completion_tokens <= 0:
+                completion_tokens = self._estimate_token_count(completion)
+            total_tokens = prompt_tokens + completion_tokens
+            estimated = True
+        elif prompt_tokens <= 0 and completion_tokens <= 0:
+            prompt_tokens = self._estimate_token_count(prompt)
+            completion_tokens = max(0, total_tokens - prompt_tokens)
+        return {
+            "prompt_tokens": max(0, prompt_tokens),
+            "completion_tokens": max(0, completion_tokens),
+            "total_tokens": max(0, total_tokens),
+            "estimated": estimated or not usage,
+        }
+
+    @staticmethod
+    def _classify_llm_prompt(prompt: str) -> str:
+        text = str(prompt or "")[:1200]
+        rules = (
+            ("daily_plan", ("日程生成器", "生成今天的一日生活日程", "\"schedule\"")),
+            ("detail", ("日程细化生成器", "today_events", "presence_status")),
+            ("dream", ("梦境生成器", "dream_type", "afterglow")),
+            ("diary", ("日记生成器", "dream_fragments", "long_term_events")),
+            ("memory_profile", ("私聊记忆整理", "长期画像", "user_traits")),
+            ("dialogue_episode", ("私聊对话整理成片段", "共同经历", "open_loops")),
+            ("response_review", ("改写成更像真实私聊", "需要修正的问题", "原回复")),
+            ("relationship", ("关系站位", "relationship", "互动边界")),
+            ("group_interject", ("群聊主动插话", "插话", "群聊")),
+            ("group_episode", ("群聊片段", "群聊阶段性", "topic_threads")),
+            ("group_slang", ("黑话", "slang", "群内")),
+            ("photo_prompt", ("ComfyUI", "社交媒体随手拍", "\"caption\"")),
+            ("voice", ("主动语音", "TTS", "语音内容")),
+            ("yesterday_summary", ("昨日/最近完整对话", "残留影响", "dream_reference")),
+            ("provider_test", ("请只回复两个字：正常",)),
+        )
+        for label, markers in rules:
+            if all(marker in text for marker in markers):
+                return label
+        return "other"
+
+    def _record_llm_usage(
+        self,
+        *,
+        provider_id: str,
+        task: str,
+        prompt: str,
+        completion: str,
+        elapsed_ms: int,
+        success: bool,
+        error: str = "",
+        resp: Any = None,
+    ) -> None:
+        usage = self._extract_llm_usage(resp, prompt, completion)
+        now_ts = _now_ts()
+        day = _today_key()
+        hour = datetime.now().strftime("%Y-%m-%d %H:00")
+        store = self.data.setdefault("token_usage", {})
+        if not isinstance(store, dict):
+            store = {}
+            self.data["token_usage"] = store
+        totals = store.setdefault("totals", {})
+        if not isinstance(totals, dict):
+            totals = {}
+            store["totals"] = totals
+        by_provider = store.setdefault("by_provider", {})
+        by_task = store.setdefault("by_task", {})
+        by_day = store.setdefault("by_day", {})
+        by_hour = store.setdefault("by_hour", {})
+        recent = store.setdefault("recent", [])
+        if not isinstance(recent, list):
+            recent = []
+            store["recent"] = recent
+
+        def bump(bucket: dict[str, Any]) -> None:
+            bucket["calls"] = _safe_int(bucket.get("calls"), 0) + 1
+            bucket["success"] = _safe_int(bucket.get("success"), 0) + (1 if success else 0)
+            bucket["errors"] = _safe_int(bucket.get("errors"), 0) + (0 if success else 1)
+            bucket["prompt_tokens"] = _safe_int(bucket.get("prompt_tokens"), 0) + usage["prompt_tokens"]
+            bucket["completion_tokens"] = _safe_int(bucket.get("completion_tokens"), 0) + usage["completion_tokens"]
+            bucket["total_tokens"] = _safe_int(bucket.get("total_tokens"), 0) + usage["total_tokens"]
+            bucket["estimated_tokens"] = _safe_int(bucket.get("estimated_tokens"), 0) + (usage["total_tokens"] if usage["estimated"] else 0)
+            bucket["elapsed_ms"] = _safe_int(bucket.get("elapsed_ms"), 0) + max(0, elapsed_ms)
+            bucket["last_ts"] = now_ts
+
+        provider_key = provider_id or "(default)"
+        task_key = task or "other"
+        for target in (
+            totals,
+            by_provider.setdefault(provider_key, {}),
+            by_task.setdefault(task_key, {}),
+            by_day.setdefault(day, {}),
+            by_hour.setdefault(hour, {}),
+        ):
+            if isinstance(target, dict):
+                bump(target)
+
+        recent.append(
+            {
+                "ts": now_ts,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "provider": provider_key,
+                "task": task_key,
+                "success": success,
+                "prompt_tokens": usage["prompt_tokens"],
+                "completion_tokens": usage["completion_tokens"],
+                "total_tokens": usage["total_tokens"],
+                "estimated": usage["estimated"],
+                "elapsed_ms": max(0, elapsed_ms),
+                "prompt_chars": len(str(prompt or "")),
+                "completion_chars": len(str(completion or "")),
+                "error": _single_line(error, 160),
+            }
+        )
+        del recent[:-240]
+        store["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        last_save = _safe_float(getattr(self, "_token_usage_last_save_at", 0), 0)
+        if now_ts - last_save >= 60:
+            self._token_usage_last_save_at = now_ts
+            try:
+                self._save_data_sync()
+            except Exception:
+                pass
+
     async def _llm_call(
         self,
         prompt: str,
         max_tokens: int = 600,
         provider_id: str | None = None,
     ) -> str | None:
+        start = time.time()
+        selected_provider = str(provider_id or self.llm_provider_id or "").strip()
+        task = self._classify_llm_prompt(prompt)
         try:
             kwargs = {"prompt": prompt}
-            selected_provider = str(provider_id or self.llm_provider_id or "").strip()
             if selected_provider:
                 kwargs["chat_provider_id"] = selected_provider
             resp = await self.context.llm_generate(**kwargs)
             if resp and resp.completion_text:
-                return resp.completion_text.strip()
+                completion = resp.completion_text.strip()
+                self._record_llm_usage(
+                    provider_id=selected_provider,
+                    task=task,
+                    prompt=prompt,
+                    completion=completion,
+                    elapsed_ms=int((time.time() - start) * 1000),
+                    success=True,
+                    resp=resp,
+                )
+                return completion
+            self._record_llm_usage(
+                provider_id=selected_provider,
+                task=task,
+                prompt=prompt,
+                completion="",
+                elapsed_ms=int((time.time() - start) * 1000),
+                success=False,
+                error="empty_response",
+                resp=resp if "resp" in locals() else None,
+            )
         except Exception as e:
+            self._record_llm_usage(
+                provider_id=selected_provider,
+                task=task,
+                prompt=prompt,
+                completion="",
+                elapsed_ms=int((time.time() - start) * 1000),
+                success=False,
+                error=str(e),
+            )
             logger.warning(f"[PrivateCompanion] LLM 调用失败: {e}")
         return None
 
@@ -11884,13 +14304,22 @@ Bot 主动后用户回复次数：{reply_count}
                 if not isinstance(update, dict):
                     continue
                 at = _single_line(update.get("at"), 8)
+                user_text = _single_line(update.get("user_text"), 80)
+                intensity = _single_line(update.get("intensity"), 12)
                 reaction = _single_line(update.get("reaction"), 120)
                 state_updates = update.get("state_updates")
                 state_text = ""
                 if isinstance(state_updates, list) and state_updates:
                     state_text = "；".join(_single_line(item, 60) for item in state_updates if _single_line(item, 60))
-                if reaction:
-                    lines.append(f"- {at} {reaction}" + (f"｜{state_text}" if state_text else ""))
+                if reaction or user_text:
+                    prefix = f"- {at} " if at else "- "
+                    parts = [
+                        f"用户：{user_text}" if user_text else "",
+                        f"强度：{intensity}" if intensity else "",
+                        reaction,
+                        state_text,
+                    ]
+                    lines.append(prefix + "｜".join(part for part in parts if part))
 
         today_events = snapshot.get("today_events", [])
         scoped_today_events = self._filter_snapshot_items_to_segment(today_events, segment)
@@ -12039,17 +14468,23 @@ Bot 主动后用户回复次数：{reply_count}
         if isinstance(interaction_updates, list) and interaction_updates:
             latest = next((item for item in reversed(interaction_updates) if isinstance(item, dict)), None)
             if isinstance(latest, dict):
+                user_text = _single_line(latest.get("user_text"), 60)
                 reaction = _single_line(latest.get("reaction"), 100)
-                if reaction:
-                    lines.append(f"局部更新：{reaction}")
+                if reaction or user_text:
+                    lines.append("局部更新：" + "｜".join(part for part in (f"用户：{user_text}" if user_text else "", reaction) if part))
 
         return "\n".join(lines)
 
     async def _tick(self):
+        await self._maybe_trigger_bilibili_boredom_watch()
         async with self._data_lock:
+            if self._maybe_schedule_bilibili_video_share():
+                self._save_data_sync()
             users = list(self.data.get("users", {}).items())
 
         for user_id, user in users:
+            if isinstance(user, dict):
+                user["user_id"] = str(user.get("user_id") or user_id)
             now = _now_ts()
             due_timer = self._get_active_llm_timer(user)
             due_timer_id = (
@@ -12083,7 +14518,7 @@ Bot 主动后用户回复次数：{reply_count}
             planned_followup_kind_for_send = str(user.get("planned_followup_kind") or "")
             task_start_last_seen = _safe_float(user.get("last_seen"), 0)
             task_start_inbound_count = _safe_int(user.get("inbound_count"), 0)
-            reason, text, image_path, extra_components, action_summary = await self._render_message(user)
+            reason, text, image_path, extra_components, action_summary, effective_action_for_send = await self._render_message(user)
             async with self._data_lock:
                 current_after_render = self._get_user(user_id)
                 has_new_user_message = (
@@ -12126,7 +14561,7 @@ Bot 主动后用户回复次数：{reply_count}
                     "[PrivateCompanion] 准备主动发送给 %s: reason=%s action=%s text=%s image=%s extra=%s",
                     user_id,
                     reason,
-                    planned_action_for_send or "message",
+                    effective_action_for_send or planned_action_for_send or "message",
                     _single_line(text, 120),
                     bool(image_path),
                     len(extra_components),
@@ -12147,7 +14582,7 @@ Bot 主动后用户回复次数：{reply_count}
                     user=user,
                     user_prompt=self._build_proactive_archive_user_prompt(
                         reason=reason,
-                        action=planned_action_for_send or "message",
+                        action=effective_action_for_send or planned_action_for_send or "message",
                         motive=planned_motive_for_send,
                         action_summary=action_summary,
                     ),
@@ -12186,9 +14621,9 @@ Bot 主动后用户回复次数：{reply_count}
                 simulation_active = self._simulation_active(current)
                 self._reset_daily_counter_if_needed(current)
                 current["last_sent"] = _now_ts()
-                current["last_companion_message"] = text
+                current["last_companion_message"] = _single_line(_strip_internal_message_blocks(text), 500)
                 current["last_proactive_reason"] = reason
-                current["last_proactive_action"] = planned_action_for_send or "message"
+                current["last_proactive_action"] = effective_action_for_send or planned_action_for_send or "message"
                 current["last_proactive_behavior_summary"] = action_summary
                 current["last_proactive_motive"] = planned_motive_for_send
                 self._remember_proactive_topic(
@@ -12197,6 +14632,7 @@ Bot 主动后用户回复次数：{reply_count}
                     topic=current.get("planned_proactive_topic"),
                     motive=planned_motive_for_send,
                 )
+                self._mark_planned_candidate_status(current, "sent", "已发送")
                 self._note_proactive_daypart_sent(current, current["last_sent"])
                 opener_mode = planned_opener_mode_for_send
                 followup_kind = planned_followup_kind_for_send
@@ -12251,6 +14687,12 @@ Bot 主动后用户回复次数：{reply_count}
                     )
                     if isinstance(next_chain_followup, dict):
                         current["pending_followup_event"] = next_chain_followup
+                if reason == "group_share":
+                    current["group_share_context"] = {}
+                if reason == "bili_video_share":
+                    current["bilibili_video_context"] = {}
+                if reason == "creative_share":
+                    current["creative_share_context"] = {}
                 if simulation_active:
                     self._consume_simulation_event(current)
                 else:
@@ -12386,7 +14828,7 @@ Bot 主动后用户回复次数：{reply_count}
                     current_prompt = req.system_prompt or ""
                     if marker not in current_prompt:
                         req.system_prompt = (
-                            f"{current_prompt}\n\n{marker}\n{self._format_group_context_for_prompt(group, sender_id)}"
+                            f"{current_prompt}\n\n{marker}\n{self._format_group_context_for_prompt(group, sender_id, str(event.message_str or ''))}"
                         ).strip()
             return
         try:
@@ -12400,6 +14842,10 @@ Bot 主动后用户回复次数：{reply_count}
 
         state = await self._ensure_daily_state()
         injection_parts = [self._format_state_injection(state)]
+        inbound_text = _single_line(getattr(event, "message_str", "") or current_user.get("last_user_message"), 260)
+        hidden_creative_context = self._format_hidden_creative_context_for_reply(inbound_text)
+        if hidden_creative_context:
+            injection_parts.append(hidden_creative_context)
         companion_injection = self._format_companion_planner_injection(current_user)
         if companion_injection:
             injection_parts.append(companion_injection)
@@ -12492,7 +14938,7 @@ Bot 主动后用户回复次数：{reply_count}
 
         async with self._data_lock:
             current = self._get_user(user_id)
-            current["last_companion_message"] = _single_line(working_text, 500)
+            current["last_companion_message"] = _single_line(_strip_internal_message_blocks(working_text), 500)
             self._remember_passive_reply_topic(current, working_text, inbound_text)
             self._save_data_sync()
 
@@ -13466,6 +15912,7 @@ Bot 主动后用户回复次数：{reply_count}
         except Exception:
             sender_id = ""
         sender_name = self._sender_display_name(event)
+        registration_payload = None
         async with self._data_lock:
             group = self._get_group(group_id)
             self._update_group_observation(
@@ -13474,8 +15921,25 @@ Bot 主动后用户回复次数：{reply_count}
                 sender_name=sender_name,
                 text=text,
             )
+            registration_payload = self._maybe_worldbook_self_register_from_group_message(
+                event,
+                group_id=group_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                text=text,
+                group=group,
+            )
+            share_scheduled = self._maybe_schedule_group_private_share(group_id, group, trigger_sender_id=sender_id)
             self._save_data_sync()
             group_snapshot = dict(group)
+        if isinstance(registration_payload, dict) and registration_payload.get("blocked_reply"):
+            await self._reply(event, str(registration_payload.get("blocked_reply") or "你是小猪"))
+            event.stop_event()
+            return
+        if registration_payload:
+            asyncio.create_task(self._refresh_worldbook_self_registration_impression(registration_payload))
+        if share_scheduled:
+            asyncio.create_task(self._kick_proactive_loop_once())
         asyncio.create_task(self._maybe_refresh_group_episode(group_id, group_snapshot))
         asyncio.create_task(self._maybe_refresh_group_slang_meanings(group_id, group_snapshot))
         await self._maybe_group_interject(event, group_snapshot, text)

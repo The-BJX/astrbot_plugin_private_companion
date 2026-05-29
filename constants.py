@@ -87,6 +87,12 @@ _DATA_STORE_KEYS = (
     "can_do",
     "important_dates",
     "qq_presence_state",
+    "creative_projects",
+    "proactive_candidate_pool",
+    "worldbook_entries",
+    "worldbook_member_profiles",
+    "worldbook_group_profiles",
+    "worldbook_import_state",
 )
 
 # 触发原因 - 真人化表达
@@ -102,6 +108,9 @@ _REASON_TEXT = {
     "important_date_share": "提醒你重要的日子",
     "background_schedule": "看看现在该做什么啦",
     "insomnia_night": "睡不着，想跟你说说话",
+    "group_share": "跟你分享群里的有趣片段",
+    "bili_video_share": "跟你分享刚刷到的 B 站视频",
+    "creative_share": "跟你分享刚写到的小说片段",
 }
 
 # 动作描述 - 生活化
@@ -236,9 +245,19 @@ _DEFAULT_USER_TEMPLATE = {
     "planned_proactive_motive": "",
     "planned_proactive_topic": "",
     "planned_proactive_source": "",
+    "planned_candidate_id": "",
     "planned_event_chain": [],
     "planned_opener_mode": "",
     "planned_followup_kind": "",
+    "group_share_context": {},
+    "last_group_share_key": "",
+    "last_group_share_at": 0,
+    "bilibili_video_context": {},
+    "last_bilibili_share_key": "",
+    "last_bilibili_share_at": 0,
+    "creative_share_context": {},
+    "last_creative_share_key": "",
+    "last_creative_share_at": 0,
     "poke_echo_suppress_until": 0,
     "llm_timer_event": {},
     "greeting_sent_day": "",

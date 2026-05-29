@@ -23,7 +23,11 @@
         <button class="tab is-active" data-tab="dashboard">总览</button>
         <button class="tab" data-tab="private">私聊</button>
         <button class="tab" data-tab="group">群聊</button>
-        <button class="tab" data-tab="memory">记忆</button>
+        <button class="tab" data-tab="worldbook">关系网</button>
+        <button class="tab" data-tab="memory">观察</button>
+        <button class="tab" data-tab="proactive">主动</button>
+        <button class="tab" data-tab="creative">创作</button>
+        <button class="tab" data-tab="tokens">Token</button>
         <button class="tab" data-tab="modules">模块配置</button>
         <button class="tab" data-tab="config">配置</button>
         <button class="tab" data-tab="models">模型</button>
@@ -122,15 +126,104 @@
         <article class="detail" id="groupDetail"></article>
       </section>
 
-      <section class="panel" id="panel-memory">
-        <div class="memory-grid">
-          <article>
-            <h2>LivingMemory</h2>
-            <pre id="livingMemoryBox">加载中...</pre>
+      <section class="panel" id="panel-worldbook">
+        <div class="section-head">
+          <div>
+            <h2>群聊关系网</h2>
+          </div>
+          <div class="actions compact">
+            <button id="worldbookImportBtn" type="button">刷新关系网</button>
+          </div>
+        </div>
+        <div id="worldbookSummary" class="worldbook-summary"></div>
+        <div class="worldbook-toolbar">
+          <input id="worldbookMemberFilter" type="search" placeholder="筛选 QQ / 名字 / 别名" />
+          <span id="worldbookSourceFiles" class="muted"></span>
+        </div>
+        <div class="worldbook-layout">
+          <article class="wide">
+            <div class="section-head compact-head">
+              <h2>关系节点</h2>
+              <span id="worldbookMemberCount" class="muted"></span>
+            </div>
+            <form id="worldbookAddMemberForm" class="inline-form manage-form">
+              <label>身份 QQ <input name="user_id" placeholder="例如 123456789" required inputmode="numeric" /></label>
+              <label>名称 <input name="name" placeholder="成员显示名" /></label>
+              <label>优先级 <input name="priority" type="number" value="120" /></label>
+              <button type="submit">新增节点</button>
+            </form>
+            <div id="worldbookMembers" class="worldbook-members"></div>
           </article>
           <article>
-            <h2>今日状态</h2>
+            <h2>群资料</h2>
+            <form id="worldbookAddGroupForm" class="stack-form compact-manage-form">
+              <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
+              <label>名称 <input name="name" placeholder="群资料名称" /></label>
+              <button type="submit">新增群资料</button>
+            </form>
+            <div id="worldbookGroups" class="worldbook-groups"></div>
+          </article>
+          <article>
+            <h2>导入状态</h2>
+            <dl id="worldbookImportState"></dl>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-memory">
+        <div class="section-head">
+          <h2>生活观察</h2>
+          <span class="muted">状态、梦境、日记碎片与当天生活线索</span>
+        </div>
+        <div class="life-hero">
+          <article class="life-card energy">
+            <span>心理能量</span>
+            <b id="lifeEnergy">--</b>
+            <div class="meter"><i id="lifeEnergyBar"></i></div>
+          </article>
+          <article class="life-card">
+            <span>情绪底色</span>
+            <b id="lifeMood">--</b>
+            <small id="lifeNote">--</small>
+          </article>
+          <article class="life-card">
+            <span>位置与天气</span>
+            <b id="lifeLocation">--</b>
+            <small id="lifeWeather">--</small>
+          </article>
+        </div>
+        <div class="current-life-strip">
+          <span>当前片段</span>
+          <b id="lifeCurrentActivity">--</b>
+          <small id="lifeCurrentSeed">--</small>
+        </div>
+        <div class="observation-grid">
+          <article class="dream-card wide">
+            <div class="dream-card-head">
+              <div>
+                <h2>梦境</h2>
+                <span id="dreamMeta" class="muted">暂无梦境记录</span>
+              </div>
+              <b id="dreamAfterglow">--</b>
+            </div>
+            <p id="dreamContent">加载中...</p>
+            <div id="dreamFactors" class="fragment-cloud"></div>
+          </article>
+          <article>
+            <h2>身体与生活感</h2>
+            <div id="statePillBoard" class="state-pill-board"></div>
+          </article>
+          <article>
+            <h2>今日状态原始值</h2>
             <dl id="dailyState"></dl>
+          </article>
+          <article class="wide">
+            <h2>日记碎片</h2>
+            <div id="diaryCards" class="diary-grid"></div>
+          </article>
+          <article class="wide">
+            <h2>梦境碎片池</h2>
+            <div id="dreamFragments" class="fragment-cloud"></div>
           </article>
           <article class="wide">
             <h2>日内状态变化</h2>
@@ -147,6 +240,104 @@
           <article>
             <h2>群聊黑话词云</h2>
             <div id="slangCloud" class="word-cloud"></div>
+          </article>
+          <article class="wide memory-raw">
+            <h2>LivingMemory</h2>
+            <pre id="livingMemoryBox">加载中...</pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-proactive">
+        <div class="section-head">
+          <h2>今日主动候选</h2>
+          <span class="muted">统一候选池、去重、配额与调度结果</span>
+        </div>
+        <div id="proactiveSummary" class="proactive-summary"></div>
+        <div class="proactive-layout">
+          <article>
+            <h2>来源分布</h2>
+            <div id="proactiveSourceChart" class="chart-box"></div>
+          </article>
+          <article>
+            <h2>状态分布</h2>
+            <div id="proactiveStatusChart" class="chart-box"></div>
+          </article>
+          <article class="wide">
+            <h2>候选记录</h2>
+            <div id="proactiveCandidateList" class="proactive-candidates"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-creative">
+        <div class="section-head">
+          <h2>私下创作</h2>
+          <span class="muted">Bot 自己慢慢写的长线项目，只在节点或被问到时自然提起</span>
+        </div>
+        <div class="creative-hero">
+          <article>
+            <span>进行中</span>
+            <b id="creativeActiveCount">0</b>
+          </article>
+          <article>
+            <span>项目总数</span>
+            <b id="creativeProjectCount">0</b>
+          </article>
+          <article>
+            <span>提起方式</span>
+            <b id="creativeRevealMode">-</b>
+          </article>
+          <article>
+            <span>最新项目</span>
+            <b id="creativeLatestTitle">暂无</b>
+          </article>
+        </div>
+        <div class="creative-layout">
+          <article>
+            <h2>创作节奏</h2>
+            <dl id="creativeSettings"></dl>
+          </article>
+          <article>
+            <h2>状态说明</h2>
+            <p id="creativeIntro" class="section-desc"></p>
+          </article>
+        </div>
+        <div id="creativeProjects" class="creative-projects"></div>
+      </section>
+
+      <section class="panel" id="panel-tokens">
+        <div class="section-head">
+          <h2>Token 消耗监控</h2>
+          <div class="actions compact">
+            <button id="resetTokenStatsBtn" class="danger-outline" type="button">清空统计</button>
+          </div>
+        </div>
+        <div class="token-summary" id="tokenSummary"></div>
+        <div class="dashboard-grid token-grid">
+          <article>
+            <h2>Provider 消耗排行</h2>
+            <div id="tokenProviderChart" class="chart-box"></div>
+          </article>
+          <article>
+            <h2>任务消耗排行</h2>
+            <div id="tokenTaskChart" class="chart-box"></div>
+          </article>
+          <article class="wide">
+            <h2>近 48 小时趋势</h2>
+            <div id="tokenHourlyChart" class="token-bars"></div>
+          </article>
+          <article class="wide">
+            <h2>Provider 明细</h2>
+            <div id="tokenProviderTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide">
+            <h2>任务明细</h2>
+            <div id="tokenTaskTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide">
+            <h2>最近调用</h2>
+            <div id="tokenRecentTable" class="table-wrap compact-table"></div>
           </article>
         </div>
       </section>
@@ -166,15 +357,35 @@
             <p>先选择配置预设，再补私聊目标和群聊名单，最后按需要调整模型与功能开关。</p>
           </section>
         </div>
+        <div id="moduleSummary" class="module-summary"></div>
+        <nav class="module-nav" aria-label="模块配置分组">
+          <a href="#module-presets">预设</a>
+          <a href="#module-quick">快速启动</a>
+          <a href="#module-private">私聊主动</a>
+          <a href="#module-group">群聊观察</a>
+          <a href="#module-worldbook">关系网</a>
+          <a href="#module-memory">记忆学习</a>
+          <a href="#module-longterm">长线联动</a>
+        </nav>
         <div class="module-grid">
-          <article class="wide">
-            <h2>配置预设</h2>
-            <p class="section-desc">预设只改常用频率和功能开关，不会覆盖你的名单、Provider、人格或历史记忆。</p>
+          <article class="wide module-card" id="module-presets">
+            <div class="module-card-head">
+              <div>
+                <h2>配置预设</h2>
+                <p class="section-desc">预设只改常用频率和功能开关，不会覆盖你的名单、Provider、人格或历史记忆。</p>
+              </div>
+              <span class="module-badge">建议先选</span>
+            </div>
             <div id="presetCards" class="preset-grid"></div>
           </article>
-          <article>
-            <h2>快速启动</h2>
-            <p class="section-desc">决定插件身份、私聊目标和免打扰窗口。私聊目标可以留空，然后在“私聊”页手动添加。</p>
+          <article class="module-card" id="module-quick">
+            <div class="module-card-head">
+              <div>
+                <h2>快速启动</h2>
+                <p class="section-desc">决定插件身份、私聊目标和免打扰窗口。私聊目标可以留空，然后在“私聊”页手动添加。</p>
+              </div>
+              <span class="module-badge">基础</span>
+            </div>
             <form id="quickModuleForm" class="module-form">
               <label>Bot 名字 <input name="bot_name" /></label>
               <label>目标平台 <input name="target_platform" /></label>
@@ -185,9 +396,14 @@
               <button type="submit">保存快速启动</button>
             </form>
           </article>
-          <article>
-            <h2>私聊主动</h2>
-            <p class="section-desc">控制主动找你的频率。每日上限为 0 时，私聊主动消息等同关闭，但被动聊天和记忆仍可工作。</p>
+          <article class="module-card" id="module-private">
+            <div class="module-card-head">
+              <div>
+                <h2>私聊主动</h2>
+                <p class="section-desc">控制主动找你的频率。每日上限为 0 时，私聊主动消息等同关闭，但被动聊天和记忆仍可工作。</p>
+              </div>
+              <span class="module-badge">频率</span>
+            </div>
             <form id="privateModuleForm" class="module-form">
               <label>每日主动上限 <input name="max_daily_messages" type="number" min="0" max="12" /></label>
               <label>空闲门槛分钟 <input name="idle_minutes" type="number" min="0" /></label>
@@ -196,9 +412,14 @@
               <button type="submit">保存私聊主动</button>
             </form>
           </article>
-          <article>
-            <h2>群聊观察</h2>
-            <p class="section-desc">控制群聊上下文、黑话和插话频率。若只想学习群氛围，把每日插话上限设为 0。</p>
+          <article class="module-card" id="module-group">
+            <div class="module-card-head">
+              <div>
+                <h2>群聊观察</h2>
+                <p class="section-desc">控制群聊上下文、黑话和插话频率。若只想学习群氛围，把每日插话上限设为 0。</p>
+              </div>
+              <span class="module-badge">群聊</span>
+            </div>
             <form id="groupModuleForm" class="module-form">
               <label>插话最小间隔分钟 <input name="group_interject_min_interval_minutes" type="number" min="0" /></label>
               <label>每群每日插话上限 <input name="group_interject_max_daily" type="number" min="0" /></label>
@@ -207,9 +428,31 @@
               <button type="submit">保存群聊观察</button>
             </form>
           </article>
-          <article>
-            <h2>记忆学习</h2>
-            <p class="section-desc">控制画像、表达样本和对话片段的整理频率。间隔越短，模型调用量越高。</p>
+          <article class="module-card" id="module-worldbook">
+            <div class="module-card-head">
+              <div>
+                <h2>群聊关系网</h2>
+              </div>
+              <span class="module-badge">识别</span>
+            </div>
+            <form id="worldbookModuleForm" class="module-form">
+              <label class="toggle-row"><input name="enable_worldbook_member_recognition" type="checkbox" /> <span>启用群聊关系网</span></label>
+              <label class="toggle-row"><input name="worldbook_auto_import" type="checkbox" /> <span>启动时自动刷新关系网</span></label>
+              <label class="toggle-row"><input name="worldbook_member_match_aliases" type="checkbox" /> <span>允许称呼辅助匹配</span></label>
+              <label class="toggle-row"><input name="worldbook_self_registration" type="checkbox" /> <span>允许群聊自登记节点</span></label>
+              <label>单次最多注入节点数 <input name="worldbook_member_inject_limit" type="number" min="1" max="20" /></label>
+              <label class="wide-field">关系网配置路径 <textarea name="worldbook_config_paths" rows="3" placeholder="留空自动查找；也可一行一个 JSON 配置路径"></textarea></label>
+              <button type="submit">保存关系网</button>
+            </form>
+          </article>
+          <article class="module-card" id="module-memory">
+            <div class="module-card-head">
+              <div>
+                <h2>记忆学习</h2>
+                <p class="section-desc">控制画像、表达样本和对话片段的整理频率。间隔越短，模型调用量越高。</p>
+              </div>
+              <span class="module-badge">成本</span>
+            </div>
             <form id="memoryModuleForm" class="module-form">
               <label>长期画像整理间隔分钟 <input name="memory_refresh_interval_minutes" type="number" min="30" /></label>
               <label>片段整理消息阈值 <input name="episode_memory_refresh_messages" type="number" min="1" /></label>
@@ -218,6 +461,35 @@
               <label>表达样本上限 <input name="max_learned_expression_items" type="number" min="1" /></label>
               <label>私聊片段上限 <input name="max_dialogue_episodes" type="number" min="1" /></label>
               <button type="submit">保存记忆学习</button>
+            </form>
+          </article>
+          <article class="wide module-card" id="module-longterm">
+            <div class="module-card-head">
+              <div>
+                <h2>长线主动与联动</h2>
+                <p class="section-desc">控制 B 站 Bot 联动、私下创作等“Bot 自己做事”的长线能力。它们默认只在节点进入主动候选。</p>
+              </div>
+              <span class="module-badge">高级</span>
+            </div>
+            <form id="longTermModuleForm" class="module-form">
+              <div class="module-subgroup">
+                <h3>B 站 Bot 联动</h3>
+                <label class="toggle-row"><input name="enable_bilibili_integration" type="checkbox" /> <span>启用 B 站 Bot 协同</span></label>
+                <label class="toggle-row"><input name="enable_bilibili_boredom_watch" type="checkbox" /> <span>无聊时触发刷 B 站</span></label>
+                <label>B 站触发最小间隔小时 <input name="bilibili_boredom_min_interval_hours" type="number" min="2" max="72" /></label>
+                <label>视频分享概率 <input name="bilibili_share_probability" type="number" min="0" max="1" step="0.05" /></label>
+                <label>视频分享最低评分 <input name="bilibili_share_min_score" type="number" min="0" max="10" /></label>
+              </div>
+              <div class="module-subgroup">
+                <h3>私下创作</h3>
+                <label class="toggle-row"><input name="enable_creative_writing" type="checkbox" /> <span>启用私下创作行为</span></label>
+                <label class="toggle-row"><input name="creative_hidden_mode" type="checkbox" /> <span>创作默认低调进行</span></label>
+                <label>创作灵感触发概率 <input name="creative_inspiration_probability" type="number" min="0" max="1" step="0.05" /></label>
+                <label>创作节点透露概率 <input name="creative_share_probability" type="number" min="0" max="1" step="0.05" /></label>
+                <label>基础写作速度（字/小时） <input name="creative_base_chars_per_hour" type="number" min="60" max="1200" /></label>
+                <label>最多同时创作项目 <input name="creative_max_active_projects" type="number" min="1" max="5" /></label>
+              </div>
+              <button type="submit">保存长线主动</button>
             </form>
           </article>
         </div>
@@ -242,6 +514,10 @@
           <article>
             <h2>群聊策略</h2>
             <dl id="groupConfig"></dl>
+          </article>
+          <article>
+            <h2>长线主动</h2>
+            <dl id="longTermConfig"></dl>
           </article>
           <article class="wide">
             <h2>群聊名单覆盖</h2>
@@ -310,6 +586,6 @@
     </section>
   </main>
 
-  <script src="./app.js?v=20260523-daily-timeline1"></script>
+  <script src="./app.js?v=20260529-creative-page1"></script>
 </body>
 </html>

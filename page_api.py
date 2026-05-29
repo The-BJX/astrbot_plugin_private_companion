@@ -9,6 +9,8 @@ from typing import Any
 from astrbot.api import logger
 from quart import request
 
+from .helpers import _strip_internal_message_blocks
+
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 
@@ -31,6 +33,11 @@ class PrivateCompanionPageApi:
             ("/group/update", self.update_group, ["POST"], "Private Companion Page update group"),
             ("/settings/update", self.update_settings, ["POST"], "Private Companion Page update settings"),
             ("/diagnostics", self.get_diagnostics, ["GET"], "Private Companion Page diagnostics"),
+            ("/token/stats", self.get_token_stats, ["GET"], "Private Companion Page token stats"),
+            ("/token/reset", self.reset_token_stats, ["POST"], "Private Companion Page reset token stats"),
+            ("/worldbook/import", self.import_worldbook, ["POST"], "Private Companion Page import worldbook"),
+            ("/worldbook/member/update", self.update_worldbook_member, ["POST"], "Private Companion Page update worldbook member"),
+            ("/worldbook/group/update", self.update_worldbook_group, ["POST"], "Private Companion Page update worldbook group"),
             ("/preset/apply", self.apply_preset, ["POST"], "Private Companion Page apply preset"),
             ("/providers/available", self.list_available_providers, ["GET"], "Private Companion Page available providers"),
             ("/provider/test", self.test_provider, ["POST"], "Private Companion Page test provider"),
@@ -41,6 +48,7 @@ class PrivateCompanionPageApi:
     async def get_overview(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
+                self._auto_import_worldbook_if_needed_locked()
                 data = deepcopy(self.plugin.data)
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
@@ -75,6 +83,11 @@ class PrivateCompanionPageApi:
                     "providers": self._provider_settings(),
                     "settings": self._runtime_settings(),
                     "livingmemory": self._livingmemory_summary(),
+                    "worldbook": self._worldbook_summary(data),
+                    "proactive_candidates": self._proactive_candidate_summary(data),
+                    "bilibili": self._bilibili_summary(data),
+                    "creative": self._creative_summary(data),
+                    "life_observation": self._life_observation_summary(data),
                     "daily_state": self._daily_state_summary(data.get("daily_state")),
                     "daily_timeline": self._daily_timeline_summary(data),
                 }
@@ -82,6 +95,23 @@ class PrivateCompanionPageApi:
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取总览失败: {exc}", exc_info=True)
             return self._error(str(exc))
+
+    def _auto_import_worldbook_if_needed_locked(self) -> None:
+        if not bool(getattr(self.plugin, "worldbook_auto_import", False)):
+            return
+        if not bool(getattr(self.plugin, "enable_worldbook_member_recognition", False)):
+            return
+        data = getattr(self.plugin, "data", {})
+        if not isinstance(data, dict):
+            return
+        has_imported = bool(data.get("worldbook_entries")) or bool(data.get("worldbook_member_profiles")) or bool(data.get("worldbook_group_profiles"))
+        if has_imported:
+            return
+        importer = getattr(self.plugin, "_import_worldbook_entries_from_sources", None)
+        if not callable(importer):
+            return
+        if importer():
+            self.plugin._save_data_sync()
 
     async def list_users(self) -> dict[str, Any]:
         try:
@@ -116,8 +146,8 @@ class PrivateCompanionPageApi:
                     "dialogue_episodes": self._limited_list(user.get("dialogue_episodes"), 12),
                     "open_loops": self._limited_list(user.get("open_loops"), 12),
                     "recent_reply_topics": self._limited_list(user.get("recent_reply_topics"), 16),
-                    "last_user_message": user.get("last_user_message", ""),
-                    "last_companion_message": user.get("last_companion_message", ""),
+                    "last_user_message": self._display_message_text(user.get("last_user_message"), 500),
+                    "last_companion_message": self._display_message_text(user.get("last_companion_message"), 500),
                     "formatted": {
                         "relationship": self.plugin._format_relationship_summary(user),
                         "action_affinity": self.plugin._format_action_affinity_summary(user),
@@ -149,6 +179,9 @@ class PrivateCompanionPageApi:
                     user["sent_day"] = ""
                     user["ignored_streak"] = 0
                     user["photo_sent_today"] = 0
+                    user["photo_sent_day"] = ""
+                    user["photo_generated_today"] = 0
+                    user["photo_generated_day"] = ""
                     user["screen_peek_today"] = 0
                 if payload.get("clear_schedule"):
                     for key in (
@@ -330,6 +363,142 @@ class PrivateCompanionPageApi:
             logger.error(f"[PrivateCompanionPage] 获取诊断失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def get_token_stats(self) -> dict[str, Any]:
+        try:
+            async with self.plugin._data_lock:
+                usage = deepcopy(self.plugin.data.get("token_usage", {}))
+            return self._ok(self._token_stats_payload(usage))
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 获取 Token 统计失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def reset_token_stats(self) -> dict[str, Any]:
+        try:
+            async with self.plugin._data_lock:
+                self.plugin.data["token_usage"] = {}
+                self.plugin._save_data_sync()
+            return self._ok(self._token_stats_payload({}))
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 重置 Token 统计失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def import_worldbook(self) -> dict[str, Any]:
+        try:
+            async with self.plugin._data_lock:
+                changed = bool(self.plugin._import_worldbook_entries_from_sources())
+                self.plugin._save_data_sync()
+                data = deepcopy(self.plugin.data)
+            return self._ok({"changed": changed, "worldbook": self._worldbook_summary(data)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 导入世界书失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def update_worldbook_member(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        user_id = self._single_line(payload.get("user_id"), 40)
+        if not user_id:
+            return self._error("缺少 user_id")
+        if not user_id.isdigit() or len(user_id) < 5:
+            return self._error("关系节点必须使用有效 QQ 号作为身份键")
+        try:
+            async with self.plugin._data_lock:
+                profiles = self.plugin.data.setdefault("worldbook_member_profiles", {})
+                if not isinstance(profiles, dict):
+                    profiles = {}
+                    self.plugin.data["worldbook_member_profiles"] = profiles
+                if payload.get("delete"):
+                    profiles.pop(user_id, None)
+                    self.plugin._save_data_sync()
+                    data = deepcopy(self.plugin.data)
+                    return self._ok({"worldbook": self._worldbook_summary(data)})
+                profile = profiles.get(user_id)
+                if not isinstance(profile, dict):
+                    profile = {
+                        "user_id": user_id,
+                        "name": user_id,
+                        "aliases": [],
+                        "content": "",
+                        "identity_note": "",
+                        "boundary_note": "",
+                        "important_memories": [],
+                        "enabled": True,
+                        "priority": 120,
+                        "source_entries": ["手动维护"],
+                        "observed_names": [],
+                    }
+                    profiles[user_id] = profile
+                profile["user_id"] = user_id
+                if "enabled" in payload:
+                    profile["enabled"] = bool(payload.get("enabled"))
+                if "name" in payload:
+                    profile["name"] = self._single_line(payload.get("name"), 80) or user_id
+                if "aliases" in payload and isinstance(payload.get("aliases"), list):
+                    profile["aliases"] = [self._single_line(item, 40) for item in payload.get("aliases", []) if self._single_line(item, 40)]
+                if "content" in payload:
+                    profile["content"] = str(payload.get("content") or "").strip()[:2000]
+                if "note" in payload:
+                    profile["note"] = str(payload.get("note") or "").strip()[:2000]
+                if "identity_note" in payload:
+                    profile["identity_note"] = str(payload.get("identity_note") or "").strip()[:2000]
+                if "boundary_note" in payload:
+                    profile["boundary_note"] = str(payload.get("boundary_note") or "").strip()[:1200]
+                if "important_memories" in payload:
+                    profile["important_memories"] = self._normalize_important_memories(payload.get("important_memories"))
+                if "priority" in payload:
+                    profile["priority"] = self._clamp_int(payload.get("priority"), 120, -1000, 10000)
+                profile["manual_edit_ts"] = time.time()
+                self.plugin._save_data_sync()
+                data = deepcopy(self.plugin.data)
+            return self._ok({"worldbook": self._worldbook_summary(data)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新关系节点失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def update_worldbook_group(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        group_id = self._single_line(payload.get("group_id"), 40)
+        if not group_id:
+            return self._error("缺少 group_id")
+        try:
+            async with self.plugin._data_lock:
+                groups = self.plugin.data.setdefault("worldbook_group_profiles", {})
+                if not isinstance(groups, dict):
+                    groups = {}
+                    self.plugin.data["worldbook_group_profiles"] = groups
+                if payload.get("delete"):
+                    groups.pop(group_id, None)
+                    self.plugin._save_data_sync()
+                    data = deepcopy(self.plugin.data)
+                    return self._ok({"worldbook": self._worldbook_summary(data)})
+                group = groups.get(group_id)
+                if not isinstance(group, dict):
+                    group = {
+                        "group_id": group_id,
+                        "name": group_id,
+                        "content": "",
+                        "enabled": True,
+                        "priority": 110,
+                        "aliases": [],
+                        "source_entries": ["手动维护"],
+                    }
+                    groups[group_id] = group
+                group["group_id"] = group_id
+                if "enabled" in payload:
+                    group["enabled"] = bool(payload.get("enabled"))
+                if "name" in payload:
+                    group["name"] = self._single_line(payload.get("name"), 80) or group_id
+                if "content" in payload:
+                    group["content"] = str(payload.get("content") or "").strip()[:2000]
+                if "priority" in payload:
+                    group["priority"] = self._clamp_int(payload.get("priority"), 110, -1000, 10000)
+                group["manual_edit_ts"] = time.time()
+                self.plugin._save_data_sync()
+                data = deepcopy(self.plugin.data)
+            return self._ok({"worldbook": self._worldbook_summary(data)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新群资料失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
     async def apply_preset(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         name = str(payload.get("name", "")).strip()
@@ -424,9 +593,15 @@ class PrivateCompanionPageApi:
             "open_loop_count": len(user.get("open_loops") or []),
         }
 
+    @classmethod
+    def _display_message_text(cls, value: Any, limit: int = 500) -> str:
+        return cls._single_line(_strip_internal_message_blocks(value), limit)
+
     def _group_summary(self, group_id: str, group: dict[str, Any]) -> dict[str, Any]:
         atmosphere = group.get("atmosphere") if isinstance(group.get("atmosphere"), dict) else {}
         slang_terms = group.get("slang_terms") if isinstance(group.get("slang_terms"), list) else []
+        members = group.get("members") if isinstance(group.get("members"), dict) else {}
+        identity_count = sum(1 for item in members.values() if isinstance(item, dict) and item.get("identity_known"))
         return {
             "group_id": str(group_id),
             "enabled": bool(group.get("enabled", True)),
@@ -434,7 +609,8 @@ class PrivateCompanionPageApi:
             "message_count": group.get("message_count", 0),
             "last_seen_ts": group.get("last_seen", 0),
             "last_seen": self.plugin._format_timestamp_elapsed(group.get("last_seen", 0)),
-            "member_count": len(group.get("members") or {}),
+            "member_count": len(members),
+            "recognized_member_count": identity_count,
             "recent_message_count": len(group.get("recent_messages") or []),
             "slang_count": len(slang_terms),
             "slang_terms": slang_terms[:16],
@@ -473,7 +649,12 @@ class PrivateCompanionPageApi:
             "enable_group_slang_meanings",
             "enable_group_relationship_graph",
             "enable_group_privacy_guard",
+            "enable_worldbook_member_recognition",
             "enable_livingmemory_integration",
+            "enable_bilibili_integration",
+            "enable_bilibili_boredom_watch",
+            "enable_creative_writing",
+            "creative_hidden_mode",
         ]
         return {key: bool(getattr(self.plugin, key, False)) for key in keys}
 
@@ -601,6 +782,23 @@ class PrivateCompanionPageApi:
             "max_companion_memory_items",
             "max_learned_expression_items",
             "max_dialogue_episodes",
+            "enable_bilibili_integration",
+            "enable_bilibili_boredom_watch",
+            "bilibili_boredom_min_interval_hours",
+            "bilibili_share_probability",
+            "bilibili_share_min_score",
+            "enable_creative_writing",
+            "creative_inspiration_probability",
+            "creative_share_probability",
+            "creative_base_chars_per_hour",
+            "creative_max_active_projects",
+            "creative_hidden_mode",
+            "enable_worldbook_member_recognition",
+            "worldbook_auto_import",
+            "worldbook_member_match_aliases",
+            "worldbook_self_registration",
+            "worldbook_member_inject_limit",
+            "worldbook_config_paths",
         ]
         return {key: getattr(self.plugin, key, self._config_get(key)) for key in keys}
 
@@ -648,6 +846,23 @@ class PrivateCompanionPageApi:
             living_level = "ok" if self.plugin._livingmemory_available() else "warn"
             living_text = "LivingMemory 插件可被调用" if living_level == "ok" else "已启用协同，但当前未检测到可用工具"
             add(living_level, "LivingMemory 协同", living_text)
+
+        if features.get("enable_bilibili_integration"):
+            bili_available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
+            add(
+                "ok" if bili_available else "info",
+                "B 站 Bot 联动",
+                "已检测到 B 站插件或观看日志" if bili_available else "联动开关已开，但暂未检测到 B 站插件实例或日志",
+            )
+
+        if features.get("enable_creative_writing"):
+            projects = self._creative_summary({"creative_projects": getattr(self.plugin, "data", {}).get("creative_projects", [])})
+            active = projects.get("active_projects", 0)
+            add(
+                "ok" if active else "info",
+                "私下创作行为",
+                f"当前进行中创作 {active} 个" if active else "已开启；会在生活/梦境触发后慢慢开坑",
+            )
 
         if getattr(self.plugin, "enable_group_companion", False):
             if group_mode == "whitelist" and not whitelist:
@@ -852,7 +1067,12 @@ class PrivateCompanionPageApi:
             "enable_group_slang_meanings",
             "enable_group_relationship_graph",
             "enable_group_privacy_guard",
+            "enable_worldbook_member_recognition",
             "enable_livingmemory_integration",
+            "enable_bilibili_integration",
+            "enable_bilibili_boredom_watch",
+            "enable_creative_writing",
+            "creative_hidden_mode",
         }
 
     @staticmethod
@@ -892,11 +1112,30 @@ class PrivateCompanionPageApi:
             "max_companion_memory_items",
             "max_learned_expression_items",
             "max_dialogue_episodes",
+            "enable_bilibili_integration",
+            "enable_bilibili_boredom_watch",
+            "bilibili_boredom_min_interval_hours",
+            "bilibili_share_probability",
+            "bilibili_share_min_score",
+            "enable_creative_writing",
+            "creative_inspiration_probability",
+            "creative_share_probability",
+            "creative_base_chars_per_hour",
+            "creative_max_active_projects",
+            "creative_hidden_mode",
+            "enable_worldbook_member_recognition",
+            "worldbook_auto_import",
+            "worldbook_member_match_aliases",
+            "worldbook_self_registration",
+            "worldbook_member_inject_limit",
+            "worldbook_config_paths",
         }
 
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
         if key == "target_user_ids":
             return self._normalize_id_list(value)
+        if key == "worldbook_config_paths":
+            return str(value or "").strip()[:1000]
         if key in {
             "check_interval_seconds",
             "idle_minutes",
@@ -912,12 +1151,120 @@ class PrivateCompanionPageApi:
             "max_companion_memory_items",
             "max_learned_expression_items",
             "max_dialogue_episodes",
+            "bilibili_boredom_min_interval_hours",
+            "bilibili_share_min_score",
+            "creative_base_chars_per_hour",
+            "creative_max_active_projects",
+            "worldbook_member_inject_limit",
         }:
             try:
                 return max(0, int(value))
             except (TypeError, ValueError):
                 return 0
+        if key in {
+            "bilibili_share_probability",
+            "creative_inspiration_probability",
+            "creative_share_probability",
+        }:
+            try:
+                return max(0.0, min(1.0, float(value)))
+            except (TypeError, ValueError):
+                return 0.0
+        if key in {
+            "enable_bilibili_integration",
+            "enable_bilibili_boredom_watch",
+            "enable_creative_writing",
+            "creative_hidden_mode",
+            "enable_worldbook_member_recognition",
+            "worldbook_auto_import",
+            "worldbook_member_match_aliases",
+            "worldbook_self_registration",
+        }:
+            return bool(value)
         return self._single_line(value, 240)
+
+    def _worldbook_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        profiles = data.get("worldbook_member_profiles") if isinstance(data.get("worldbook_member_profiles"), dict) else {}
+        groups = data.get("worldbook_group_profiles") if isinstance(data.get("worldbook_group_profiles"), dict) else {}
+        entries = data.get("worldbook_entries") if isinstance(data.get("worldbook_entries"), list) else []
+        state = data.get("worldbook_import_state") if isinstance(data.get("worldbook_import_state"), dict) else {}
+        profile_items = []
+        for user_id, item in profiles.items():
+            if not isinstance(item, dict):
+                continue
+            aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
+            observed = item.get("observed_names") if isinstance(item.get("observed_names"), list) else []
+            memories = self._normalize_important_memories(item.get("important_memories"))
+            profile_items.append(
+                {
+                    "user_id": self._single_line(user_id, 40),
+                    "name": self._single_line(item.get("name"), 60),
+                    "enabled": bool(item.get("enabled", True)),
+                    "priority": item.get("priority", 120),
+                    "aliases": [self._single_line(alias, 40) for alias in aliases if self._single_line(alias, 40)],
+                    "observed_names": [self._single_line(name, 40) for name in observed if self._single_line(name, 40)],
+                    "content": self._single_line(item.get("content"), 260),
+                    "identity_note": self._single_line(item.get("identity_note") or item.get("note") or item.get("content"), 500),
+                    "boundary_note": self._single_line(item.get("boundary_note"), 500),
+                    "important_memories": memories,
+                    "source_entries": item.get("source_entries") if isinstance(item.get("source_entries"), list) else [],
+                    "note": self._single_line(item.get("note"), 500),
+                }
+            )
+        profile_items.sort(key=lambda item: (not item.get("enabled", True), item.get("name") or item.get("user_id")))
+        group_items = [
+            {
+                "group_id": self._single_line(group_id, 40),
+                "name": self._single_line(item.get("name"), 60),
+                "enabled": bool(item.get("enabled", True)),
+                "priority": item.get("priority", 110),
+                "content": self._single_line(item.get("content"), 220),
+            }
+            for group_id, item in groups.items()
+            if isinstance(item, dict)
+        ]
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_worldbook_member_recognition", False)),
+            "auto_import": bool(getattr(self.plugin, "worldbook_auto_import", False)),
+            "match_aliases": bool(getattr(self.plugin, "worldbook_member_match_aliases", False)),
+            "self_registration": bool(getattr(self.plugin, "worldbook_self_registration", False)),
+            "inject_limit": getattr(self.plugin, "worldbook_member_inject_limit", 0),
+            "entry_count": len(entries),
+            "member_count": len(profile_items),
+            "enabled_member_count": sum(1 for item in profile_items if item.get("enabled", True)),
+            "group_count": len(group_items),
+            "last_import": self.plugin._format_timestamp_elapsed(state.get("last_import_at", 0)),
+            "source_files": state.get("source_files") if isinstance(state.get("source_files"), list) else [],
+            "members": profile_items[:120],
+            "groups": group_items[:80],
+        }
+
+    def _normalize_important_memories(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        memories: list[dict[str, Any]] = []
+        for raw in value[:12]:
+            if not isinstance(raw, dict):
+                continue
+            content = str(raw.get("content") or "").strip()[:500]
+            if not content:
+                continue
+            privacy = self._single_line(raw.get("privacy"), 20).lower()
+            if privacy not in {"public", "private", "internal"}:
+                privacy = "internal"
+            memories.append(
+                {
+                    "title": self._single_line(raw.get("title"), 60),
+                    "content": content,
+                    "weight": self._clamp_int(raw.get("weight"), 50, 0, 100),
+                    "privacy": privacy,
+                    "source": self._single_line(raw.get("source"), 40),
+                    "enabled": bool(raw.get("enabled", True)),
+                    "updated_at": float(raw.get("updated_at") or time.time()),
+                }
+            )
+        memories.sort(key=lambda item: (item.get("enabled", True), item.get("weight", 50), item.get("updated_at", 0)), reverse=True)
+        return memories[:8]
 
     def _livingmemory_summary(self) -> dict[str, Any]:
         available = bool(self.plugin._livingmemory_available())
@@ -929,11 +1276,165 @@ class PrivateCompanionPageApi:
             "status": self.plugin._format_livingmemory_status(),
         }
 
+    def _bilibili_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        state = data.get("bilibili_integration") if isinstance(data.get("bilibili_integration"), dict) else {}
+        available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
+        latest = None
+        try:
+            latest = self.plugin._latest_bilibili_video_candidate()
+        except Exception:
+            latest = None
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_bilibili_integration", False)),
+            "boredom_watch_enabled": bool(getattr(self.plugin, "enable_bilibili_boredom_watch", False)),
+            "available": available,
+            "watch_log": str(getattr(self.plugin, "_bilibili_watch_log_file", lambda: "")()),
+            "last_boredom_watch_at": self.plugin._format_timestamp_elapsed(state.get("last_boredom_watch_at", 0)),
+            "last_status": state.get("last_boredom_watch_status", ""),
+            "latest_video": latest if isinstance(latest, dict) else {},
+        }
+
+    def _proactive_candidate_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        raw = data.get("proactive_candidate_pool") if isinstance(data.get("proactive_candidate_pool"), list) else []
+        now = time.time()
+        items: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        source_counts: dict[str, int] = {}
+        for item in raw[-120:]:
+            if not isinstance(item, dict):
+                continue
+            status = self._single_line(item.get("status"), 24) or "unknown"
+            source = self._single_line(item.get("source"), 40) or "unknown"
+            counts[status] = counts.get(status, 0) + 1
+            source_counts[source] = source_counts.get(source, 0) + 1
+            scheduled = self._float(item.get("scheduled_ts"))
+            created = self._float(item.get("created_ts"))
+            items.append(
+                {
+                    "id": self._single_line(item.get("id"), 20),
+                    "user_id": self._single_line(item.get("user_id"), 32),
+                    "source": source,
+                    "reason": self._single_line(item.get("reason"), 40),
+                    "action": self._single_line(item.get("action"), 40),
+                    "topic": self._single_line(item.get("topic"), 100),
+                    "motive": self._single_line(item.get("motive"), 180),
+                    "score": self._int(item.get("score")),
+                    "status": status,
+                    "note": self._single_line(item.get("note"), 160),
+                    "created": self.plugin._format_timestamp_elapsed(created),
+                    "scheduled": self.plugin._format_timestamp_elapsed(scheduled),
+                    "scheduled_ts": scheduled,
+                    "is_due": bool(scheduled and scheduled <= now),
+                }
+            )
+        items.sort(key=lambda item: item.get("scheduled_ts") or 0, reverse=True)
+        return {
+            "total": len(items),
+            "counts": counts,
+            "source_counts": source_counts,
+            "items": items[:60],
+        }
+
+    def _creative_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        projects = data.get("creative_projects") if isinstance(data.get("creative_projects"), list) else []
+        items = [item for item in projects if isinstance(item, dict)]
+        active = [item for item in items if item.get("status") == "drafting"]
+        latest = items[-1] if items else {}
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_creative_writing", False)),
+            "hidden_mode": bool(getattr(self.plugin, "creative_hidden_mode", False)),
+            "project_count": len(items),
+            "active_projects": len(active),
+            "latest_title": self._single_line(latest.get("title"), 60) if isinstance(latest, dict) else "",
+            "latest_status": self._single_line(latest.get("status"), 24) if isinstance(latest, dict) else "",
+            "latest_progress": {
+                "current_chars": self._int(latest.get("current_chars")) if isinstance(latest, dict) else 0,
+                "target_chars": self._int(latest.get("target_chars")) if isinstance(latest, dict) else 0,
+            },
+            "items": [
+                {
+                    "id": self._single_line(item.get("id"), 20),
+                    "title": self._single_line(item.get("title"), 60),
+                    "premise": self._single_line(item.get("premise"), 160),
+                    "tone": self._single_line(item.get("tone"), 40),
+                    "source": self._single_line(item.get("source_text"), 160),
+                    "status": self._single_line(item.get("status"), 24),
+                    "current_chars": self._int(item.get("current_chars")),
+                    "target_chars": self._int(item.get("target_chars")),
+                    "chunk_count": len(item.get("draft_chunks") or []) if isinstance(item.get("draft_chunks"), list) else 0,
+                    "latest_snippet": self._single_line(
+                        (item.get("draft_chunks") or [])[-1].get("text") if isinstance(item.get("draft_chunks"), list) and item.get("draft_chunks") else "",
+                        260,
+                    ),
+                    "milestones": item.get("disclosed_milestones") if isinstance(item.get("disclosed_milestones"), list) else [],
+                    "created_at": self.plugin._format_timestamp_elapsed(item.get("created_at", 0)),
+                    "last_advanced": self.plugin._format_timestamp_elapsed(item.get("last_advanced_at", 0)),
+                    "next_advance": self.plugin._format_timestamp_elapsed(item.get("next_advance_at", 0)),
+                }
+                for item in items[-6:]
+            ],
+        }
+
     def _daily_state_summary(self, state: Any) -> dict[str, Any]:
         if not isinstance(state, dict):
             return {}
         keys = ["date", "sleep", "dream", "health", "hunger", "body_cycle", "location", "weather", "mood_bias", "energy", "note"]
         return {key: state.get(key, "") for key in keys}
+
+    def _life_observation_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        dream = data.get("daily_dream") if isinstance(data.get("daily_dream"), dict) else {}
+        diaries = data.get("bot_diaries") if isinstance(data.get("bot_diaries"), list) else []
+        fragments = data.get("dream_fragments") if isinstance(data.get("dream_fragments"), list) else []
+        plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
+        story = data.get("daily_story_plan") if isinstance(data.get("daily_story_plan"), dict) else {}
+        current_item = {}
+        try:
+            picked = self.plugin._get_current_plan_item(plan)
+            current_item = picked if isinstance(picked, dict) else {}
+        except Exception:
+            current_item = {}
+
+        return {
+            "dream": {
+                "date": self._single_line(dream.get("date"), 24),
+                "label": self._single_line(dream.get("label"), 120),
+                "dream_type": self._single_line(dream.get("dream_type"), 40),
+                "content": self._single_line(dream.get("content"), 1000),
+                "afterglow": self._single_line(dream.get("afterglow"), 220),
+                "mood": self._single_line(dream.get("mood"), 30),
+                "energy_delta": self._int(dream.get("energy_delta")),
+                "duration_hours": self._int(dream.get("duration_hours")),
+                "generated_at": self._single_line(dream.get("generated_at"), 24),
+                "factors": [self._single_line(item, 40) for item in dream.get("factors", [])[:8] if self._single_line(item, 40)]
+                if isinstance(dream.get("factors"), list)
+                else [],
+            },
+            "diaries": [
+                {
+                    "date": self._single_line(item.get("date"), 24),
+                    "summary": self._single_line(item.get("summary"), 180),
+                    "share_seed": self._single_line(item.get("share_seed"), 140),
+                    "tags": [self._single_line(tag, 20) for tag in item.get("tags", [])[:6] if self._single_line(tag, 20)]
+                    if isinstance(item.get("tags"), list)
+                    else [],
+                    "generated_at": self._single_line(item.get("generated_at"), 24),
+                }
+                for item in diaries[-4:]
+                if isinstance(item, dict)
+            ],
+            "dream_fragments": self._limited_dream_fragments(fragments),
+            "current_plan": {
+                "time": self._single_line(current_item.get("time"), 12),
+                "activity": self._single_line(current_item.get("activity"), 180),
+                "mood": self._single_line(current_item.get("mood"), 40),
+                "message_seed": self._single_line(current_item.get("message_seed"), 160),
+            },
+            "story": {
+                "date": self._single_line(story.get("date"), 24),
+                "today_events": self._limited_story_items(story.get("today_events"), 4),
+                "proactive_events": self._limited_story_items(story.get("proactive_events"), 4),
+            },
+        }
 
     def _daily_timeline_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
@@ -1006,6 +1507,106 @@ class PrivateCompanionPageApi:
         if not (0 <= start < 24 * 60 and 0 < end <= 28 * 60):
             return {"window": key, "start": 99999}
         return {"window": f"{self.plugin._minutes_to_hhmm(start)}-{self.plugin._minutes_to_hhmm(end)}", "start": start}
+
+    def _token_stats_payload(self, usage: Any) -> dict[str, Any]:
+        if not isinstance(usage, dict):
+            usage = {}
+        totals = self._token_bucket(usage.get("totals"))
+        by_provider = self._token_ranked_map(usage.get("by_provider"))
+        by_task = self._token_ranked_map(usage.get("by_task"))
+        by_day = self._token_series_map(usage.get("by_day"), limit=30)
+        by_hour = self._token_series_map(usage.get("by_hour"), limit=48)
+        recent_raw = usage.get("recent")
+        recent = []
+        if isinstance(recent_raw, list):
+            for item in recent_raw[-80:][::-1]:
+                if not isinstance(item, dict):
+                    continue
+                recent.append(
+                    {
+                        "time": self._single_line(item.get("time"), 24),
+                        "ts": self._float(item.get("ts")),
+                        "provider": self._single_line(item.get("provider"), 80),
+                        "task": self._single_line(item.get("task"), 40),
+                        "success": bool(item.get("success", True)),
+                        "prompt_tokens": self._int(item.get("prompt_tokens")),
+                        "completion_tokens": self._int(item.get("completion_tokens")),
+                        "total_tokens": self._int(item.get("total_tokens")),
+                        "estimated": bool(item.get("estimated", False)),
+                        "elapsed_ms": self._int(item.get("elapsed_ms")),
+                        "prompt_chars": self._int(item.get("prompt_chars")),
+                        "completion_chars": self._int(item.get("completion_chars")),
+                        "error": self._single_line(item.get("error"), 160),
+                    }
+                )
+        return {
+            "updated_at": self._single_line(usage.get("updated_at"), 24),
+            "totals": totals,
+            "by_provider": by_provider,
+            "by_task": by_task,
+            "by_day": by_day,
+            "by_hour": by_hour,
+            "recent": recent,
+        }
+
+    @classmethod
+    def _token_bucket(cls, value: Any) -> dict[str, Any]:
+        bucket = value if isinstance(value, dict) else {}
+        calls = cls._int(bucket.get("calls"))
+        elapsed = cls._int(bucket.get("elapsed_ms"))
+        total_tokens = cls._int(bucket.get("total_tokens"))
+        estimated_tokens = cls._int(bucket.get("estimated_tokens"))
+        return {
+            "calls": calls,
+            "success": cls._int(bucket.get("success")),
+            "errors": cls._int(bucket.get("errors")),
+            "prompt_tokens": cls._int(bucket.get("prompt_tokens")),
+            "completion_tokens": cls._int(bucket.get("completion_tokens")),
+            "total_tokens": total_tokens,
+            "estimated_tokens": estimated_tokens,
+            "estimated_ratio": round(estimated_tokens / total_tokens, 4) if total_tokens > 0 else 0,
+            "avg_tokens": round(total_tokens / calls, 1) if calls > 0 else 0,
+            "avg_latency_ms": round(elapsed / calls, 1) if calls > 0 else 0,
+            "last_ts": cls._float(bucket.get("last_ts")),
+        }
+
+    @classmethod
+    def _token_ranked_map(cls, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, dict):
+            return []
+        rows = []
+        for key, bucket in value.items():
+            item = cls._token_bucket(bucket)
+            item["key"] = cls._single_line(key, 120)
+            rows.append(item)
+        rows.sort(key=lambda item: item.get("total_tokens", 0), reverse=True)
+        return rows
+
+    @classmethod
+    def _token_series_map(cls, value: Any, *, limit: int) -> list[dict[str, Any]]:
+        if not isinstance(value, dict):
+            return []
+        rows = []
+        for key, bucket in value.items():
+            item = cls._token_bucket(bucket)
+            item["key"] = cls._single_line(key, 32)
+            rows.append(item)
+        rows.sort(key=lambda item: item.get("key", ""))
+        return rows[-limit:]
+
+    @staticmethod
+    def _int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _float(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _segment_from_story_windows(self, snapshot: dict[str, Any]) -> dict[str, Any] | None:
         minutes: list[int] = []
@@ -1122,6 +1723,34 @@ class PrivateCompanionPageApi:
         return items
 
     @staticmethod
+    def _limited_dream_fragments(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        items: list[dict[str, Any]] = []
+        for raw in value[-18:]:
+            if isinstance(raw, dict):
+                text = PrivateCompanionPageApi._single_line(
+                    raw.get("text") or raw.get("keyword") or raw.get("label"),
+                    42,
+                )
+                if not text:
+                    continue
+                items.append(
+                    {
+                        "text": text,
+                        "weight": PrivateCompanionPageApi._float(raw.get("effective_weight") or raw.get("weight")),
+                        "source": PrivateCompanionPageApi._single_line(raw.get("source"), 24),
+                        "created_at": PrivateCompanionPageApi._single_line(raw.get("created_at") or raw.get("created_ts"), 24),
+                    }
+                )
+            else:
+                text = PrivateCompanionPageApi._single_line(raw, 42)
+                if text:
+                    items.append({"text": text, "weight": 1.0, "source": "", "created_at": ""})
+        items.sort(key=lambda item: float(item.get("weight") or 0), reverse=True)
+        return items[:14]
+
+    @staticmethod
     def _limited_list(value: Any, limit: int) -> list[Any]:
         return list(value[:limit]) if isinstance(value, list) else []
 
@@ -1140,6 +1769,14 @@ class PrivateCompanionPageApi:
     @staticmethod
     def _query_int(name: str, default: int, minimum: int, maximum: int) -> int:
         raw = request.args.get(name, default)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _clamp_int(raw: Any, default: int, minimum: int, maximum: int) -> int:
         try:
             value = int(raw)
         except (TypeError, ValueError):

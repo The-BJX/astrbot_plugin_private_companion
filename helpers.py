@@ -42,3 +42,11 @@ def _safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
 def _single_line(text: Any, limit: int = 80) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     return normalized[:limit]
+
+
+def _strip_internal_message_blocks(text: Any) -> str:
+    normalized = str(text or "")
+    normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
+    normalized = re.sub(r"<tts\b[^>]*>.*?</tts>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized

@@ -295,6 +295,77 @@
     },
     "default": 45
   },
+  "enable_creative_writing": {
+    "description": "启用小说创作行为",
+    "type": "bool",
+    "hint": "开启后，Bot 会因为生活小事、日记碎片或梦境余温产生小说灵感，并按人格对应的速度慢慢写，不会一次写完整篇。",
+    "default": true
+  },
+  "creative_inspiration_probability": {
+    "description": "创作灵感触发概率",
+    "type": "float",
+    "hint": "每轮调度中尝试开启新小说坑的概率。仍受冷却、活动项目数量和是否有灵感来源影响。",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.2,
+    "condition": {
+      "enable_creative_writing": true
+    }
+  },
+  "creative_share_probability": {
+    "description": "小说节点透露概率",
+    "type": "float",
+    "hint": "Bot 写到开头、过半、完稿或想听读后感觉时，是否找时机向用户透露/征求观感的基础概率。用户反馈只作为灵感参考，创作方向仍由 Bot 自己决定。普通写作进度不会直接分享。",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.28,
+    "condition": {
+      "enable_creative_writing": true
+    }
+  },
+  "creative_base_chars_per_hour": {
+    "description": "基础写作速度（字/小时）",
+    "type": "int",
+    "hint": "小说创作的基础行文速度。实际速度会根据人格关键词、聊天风格和当天能量上下浮动。",
+    "slider": {
+      "min": 60,
+      "max": 1200,
+      "step": 20
+    },
+    "default": 260,
+    "condition": {
+      "enable_creative_writing": true
+    }
+  },
+  "creative_max_active_projects": {
+    "description": "最多同时创作项目数",
+    "type": "int",
+    "hint": "限制同时进行的小说坑数量，避免灵感过多导致状态发散。",
+    "slider": {
+      "min": 1,
+      "max": 5,
+      "step": 1
+    },
+    "default": 2,
+    "condition": {
+      "enable_creative_writing": true
+    }
+  },
+  "creative_hidden_mode": {
+    "description": "创作默认低调进行",
+    "type": "bool",
+    "hint": "开启后，小说创作不会作为普通日常频繁分享，只在达到节点、想听读后感觉，或用户主动询问最近在做什么时作为可选回答素材。不会把故事走向交给用户决定。",
+    "default": true,
+    "condition": {
+      "enable_creative_writing": true
+    }
+  },
   "_section_03_mai": {
     "description": "=== 03 陪伴风格 / 记忆 / 回复质感 ===",
     "type": "text",
@@ -514,6 +585,63 @@
       "enable_livingmemory_integration": true
     }
   },
+  "enable_bilibili_integration": {
+    "description": "启用 B 站 Bot 协同",
+    "type": "bool",
+    "hint": "检测到 astrbot_plugin_bilibili_bot 时，可读取其观看日志，并把适合的视频作为主动私聊分享素材。",
+    "default": true
+  },
+  "enable_bilibili_boredom_watch": {
+    "description": "无聊时触发刷 B 站",
+    "type": "bool",
+    "hint": "当日程/状态显示 Bot 比较空、无聊或在休息时，低频触发 B 站 Bot 看 1 个视频。触发后是否评论、点赞等由 B 站 Bot 自己的配置决定。",
+    "default": true,
+    "condition": {
+      "enable_bilibili_integration": true
+    }
+  },
+  "bilibili_boredom_min_interval_hours": {
+    "description": "刷 B 站最小间隔（小时）",
+    "type": "int",
+    "hint": "陪伴插件主动触发 B 站 Bot 刷视频的最小间隔，避免过于频繁。",
+    "slider": {
+      "min": 2,
+      "max": 72,
+      "step": 1
+    },
+    "default": 8,
+    "condition": {
+      "enable_bilibili_boredom_watch": true
+    }
+  },
+  "bilibili_share_probability": {
+    "description": "视频私聊分享概率",
+    "type": "float",
+    "hint": "读取到 B 站 Bot 最新观看记录后，安排私聊分享的基础概率。高评分视频会略微提高概率。",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.35,
+    "condition": {
+      "enable_bilibili_integration": true
+    }
+  },
+  "bilibili_share_min_score": {
+    "description": "视频分享最低评分",
+    "type": "int",
+    "hint": "B 站 Bot 观看日志中的评分达到该值时，更容易被拿来私聊分享。",
+    "slider": {
+      "min": 0,
+      "max": 10,
+      "step": 1
+    },
+    "default": 7,
+    "condition": {
+      "enable_bilibili_integration": true
+    }
+  },
   "_section_04_group": {
     "description": "=== 04 群聊陪伴 / 观察 / 插话 ===",
     "type": "text",
@@ -630,6 +758,65 @@
     "default": true,
     "condition": {
       "enable_group_companion": true
+    }
+  },
+  "enable_worldbook_member_recognition": {
+    "description": "启用群聊关系网",
+    "type": "bool",
+    "hint": "开启后，会读取关系节点、群资料和原始条目。成员身份以 QQ 号为唯一稳定锚点；改群名片或昵称也不会影响当前发言者识别。",
+    "default": true,
+    "condition": {
+      "enable_group_companion": true
+    }
+  },
+  "worldbook_auto_import": {
+    "description": "启动时自动刷新关系网",
+    "type": "bool",
+    "hint": "开启后插件启动时会读取关系网配置并同步到本插件数据存储。结果可在拓展页“关系网”页查看和刷新。",
+    "default": true,
+    "condition": {
+      "enable_worldbook_member_recognition": true
+    }
+  },
+  "worldbook_member_match_aliases": {
+    "description": "允许称呼辅助匹配",
+    "type": "bool",
+    "hint": "开启后，除 QQ 精确匹配外，还会在当前消息明确提到某个唯一别名或群名片时注入对应节点。它不会用来确认当前发言者身份，短词、歧义别名和不确定身份会跳过。",
+    "default": true,
+    "condition": {
+      "enable_worldbook_member_recognition": true
+    }
+  },
+  "worldbook_self_registration": {
+    "description": "允许群聊自登记节点",
+    "type": "bool",
+    "hint": "开启后，未登记成员在群里明确叫到 Bot 并说“我是XX/你可以叫我XX”时，会自动建立关系节点并生成简短资料正文。",
+    "default": true,
+    "condition": {
+      "enable_worldbook_member_recognition": true
+    }
+  },
+  "worldbook_member_inject_limit": {
+    "description": "关系节点单次注入上限",
+    "type": "int",
+    "hint": "一次群聊回复最多注入多少个匹配到的关系节点。过高会增加上下文长度和误触风险。",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 6,
+    "condition": {
+      "enable_worldbook_member_recognition": true
+    }
+  },
+  "worldbook_config_paths": {
+    "description": "关系网配置文件路径",
+    "type": "string",
+    "hint": "留空会自动查找常见关系网配置。也可填写一个或多个 JSON 配置路径，多个路径用换行或英文逗号分隔。",
+    "default": "",
+    "condition": {
+      "enable_worldbook_member_recognition": true
     }
   },
   "max_group_recent_messages": {

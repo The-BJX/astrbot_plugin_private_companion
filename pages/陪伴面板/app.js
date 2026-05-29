@@ -7,6 +7,7 @@ const state = {
   groups: [],
   diagnostics: [],
   availableProviders: [],
+  tokenStats: null,
   selectedUserId: "",
   selectedGroupId: "",
   featureDraft: {},
@@ -58,7 +59,12 @@ const featureMeta = {
   enable_group_slang_meanings: ["黑话释义", "尝试解释黑话含义，方便后续理解群语境。"],
   enable_group_relationship_graph: ["群关系网", "记录成员之间的互动关系和常见组合。"],
   enable_group_privacy_guard: ["群隐私保护", "避免把私聊记忆和私下关系泄露到群聊。建议开启。"],
+  enable_worldbook_member_recognition: ["群聊关系网", "以 QQ 号确认成员身份，昵称和别名只作辅助线索。"],
   enable_livingmemory_integration: ["LivingMemory 协同", "引导模型按需调用长期记忆工具，避免重复造轮子。"],
+  enable_bilibili_integration: ["B 站联动", "读取 B 站 Bot 观看日志，并在合适节点私聊分享。"],
+  enable_bilibili_boredom_watch: ["无聊刷 B 站", "空档或无聊时低频触发 B 站 Bot 自己看视频。"],
+  enable_creative_writing: ["私下创作", "因生活小事或梦境灵感开小说坑，并按人格速度慢慢写。"],
+  creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
 };
 
 const configLabels = {
@@ -75,6 +81,10 @@ const configLabels = {
   whitelist: "白名单",
   blacklist: "黑名单",
   interjection_enabled: "群主动插话",
+  active_projects: "进行中创作",
+  project_count: "创作项目",
+  boredom_watch_enabled: "无聊刷视频",
+  hidden_mode: "低调模式",
 };
 
 const presetCatalog = {
@@ -94,6 +104,26 @@ const presetCatalog = {
     label: "群聊观察优先",
     desc: "强化群画像、黑话、话题线和关系网，默认不主动插话。",
   },
+};
+
+const tokenTaskLabels = {
+  daily_plan: "日程生成",
+  detail: "日程细化",
+  dream: "梦境内容",
+  diary: "日记整理",
+  memory_profile: "长期画像",
+  dialogue_episode: "私聊片段",
+  response_review: "回复自检",
+  relationship: "关系分析",
+  group_interject: "群聊插话",
+  group_episode: "群聊片段",
+  group_slang: "黑话释义",
+  creative_writing: "小说创作",
+  photo_prompt: "生图提示",
+  voice: "语音文本",
+  yesterday_summary: "昨日摘要",
+  provider_test: "模型测试",
+  other: "其他调用",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -194,18 +224,20 @@ function postJson(path, body) {
 async function loadAll() {
   $("#subtitle").textContent = "读取运行态中...";
   try {
-    const [overview, users, groups, diagnostics, availableProviders] = await Promise.all([
+    const [overview, users, groups, diagnostics, availableProviders, tokenStats] = await Promise.all([
       fetchJson("/overview"),
       fetchJson("/users?limit=300"),
       fetchJson("/groups?limit=300"),
       fetchJson("/diagnostics"),
       fetchJson("/providers/available"),
+      fetchJson("/token/stats"),
     ]);
     state.overview = overview;
     state.users = users.items || [];
     state.groups = groups.items || [];
     state.diagnostics = diagnostics.items || [];
     state.availableProviders = availableProviders.items || [];
+    state.tokenStats = tokenStats || null;
     state.featureDraft = { ...(overview.features || {}) };
     if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
     if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
@@ -221,7 +253,11 @@ function renderAll() {
   renderDashboard();
   renderUsers();
   renderGroups();
+  renderWorldbook();
   renderMemory();
+  renderProactiveCandidates();
+  renderCreative();
+  renderTokens();
   renderModuleSettings();
   renderConfig();
   renderProviders();
@@ -232,9 +268,11 @@ function renderStats() {
   const privateInfo = overview.private || {};
   const groupInfo = overview.group || {};
   const living = overview.livingmemory || {};
+  const creative = overview.creative || {};
   $("#stats").innerHTML = [
     statCard(privateInfo.enabled_user_count || 0, `私聊对象 / 共 ${privateInfo.user_count || 0}`),
     statCard(groupInfo.enabled_group_count || 0, `群聊观测 / 共 ${groupInfo.group_count || 0}`),
+    statCard(creative.active_projects || 0, `私下创作 / 共 ${creative.project_count || 0}`),
     statCard(groupInfo.access_mode || "-", "群聊名单模式"),
     statCard(living.available ? "可用" : "未检测", "LivingMemory"),
   ].join("");
@@ -260,6 +298,8 @@ function renderHealthPanel() {
   const group = overview.group || {};
   const privateInfo = overview.private || {};
   const features = overview.features || {};
+  const bili = overview.bilibili || {};
+  const creative = overview.creative || {};
   const items = [
     {
       level: providers.LLM_PROVIDER_ID ? "ok" : "warn",
@@ -280,6 +320,20 @@ function renderHealthPanel() {
       level: features.enable_livingmemory_integration && overview.livingmemory?.available ? "ok" : "info",
       title: "LivingMemory 协同",
       text: livingMemoryHealthText(overview.livingmemory),
+    },
+    {
+      level: features.enable_bilibili_integration ? (bili.available ? "ok" : "info") : "info",
+      title: "B 站主动联动",
+      text: features.enable_bilibili_integration
+        ? `${bili.available ? "已检测" : "未检测"} · 最新 ${bili.latest_video?.title || "暂无"}`
+        : "联动开关未启用",
+    },
+    {
+      level: features.enable_creative_writing ? "ok" : "info",
+      title: "私下创作",
+      text: features.enable_creative_writing
+        ? `${creative.active_projects || 0} 个进行中 · ${creative.hidden_mode ? "节点自然提起" : "普通模式"}`
+        : "创作行为未启用",
     },
   ];
   $("#healthPanel").innerHTML = items.map((item) => `
@@ -372,6 +426,7 @@ function renderFeatureMatrix() {
     ["陪伴", ["enable_mai_style_integration", "enable_expression_learning", "enable_response_self_review", "enable_dialogue_episode_memory"]],
     ["群聊", ["enable_group_companion", "enable_group_context_injection", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_relationship_graph"]],
     ["记忆", ["enable_companion_memory", "enable_open_loop_tracking", "enable_livingmemory_integration"]],
+    ["主动联动", ["enable_bilibili_integration", "enable_bilibili_boredom_watch", "enable_creative_writing", "creative_hidden_mode"]],
   ];
   $("#featureMatrix").innerHTML = groups.map(([label, keys]) => `
     <section>
@@ -407,6 +462,158 @@ function horizontalBars(data, total) {
       </div>
     `;
   }).join("");
+}
+
+function renderTokens() {
+  const stats = state.tokenStats || {};
+  const totals = stats.totals || {};
+  const totalTokens = Number(totals.total_tokens || 0);
+  const calls = Number(totals.calls || 0);
+  const errors = Number(totals.errors || 0);
+  const estimatedRatio = Number(totals.estimated_ratio || 0);
+  $("#tokenSummary").innerHTML = [
+    miniStat("总 Token", formatNumber(totalTokens)),
+    miniStat("调用次数", formatNumber(calls)),
+    miniStat("平均 Token", formatNumber(Math.round(Number(totals.avg_tokens || 0)))),
+    miniStat("平均延迟", `${formatNumber(Math.round(Number(totals.avg_latency_ms || 0)))} ms`),
+    miniStat("估算占比", `${Math.round(estimatedRatio * 100)}%`),
+    miniStat("失败次数", formatNumber(errors)),
+  ].join("");
+
+  renderTokenChart("#tokenProviderChart", stats.by_provider || [], "暂无 Provider 消耗数据", (item) => item.key || "default");
+  renderTokenChart("#tokenTaskChart", stats.by_task || [], "暂无任务消耗数据", (item) => tokenTaskLabel(item.key));
+  renderTokenHourlyChart(stats.by_hour || []);
+  renderTokenProviderTable(stats.by_provider || []);
+  renderTokenTaskTable(stats.by_task || []);
+  renderTokenRecentTable(stats.recent || []);
+}
+
+function renderTokenChart(selector, rows, emptyText, labeler) {
+  const topRows = rows.slice(0, 8);
+  const max = Math.max(1, ...topRows.map((item) => Number(item.total_tokens || 0)));
+  $(selector).innerHTML = topRows.length
+    ? topRows.map((item) => {
+      const tokens = Number(item.total_tokens || 0);
+      const pct = Math.max(2, Math.round((tokens / max) * 100));
+      return `
+        <div class="token-rank-row">
+          <span title="${escapeHtml(labeler(item))}">${escapeHtml(labeler(item))}</span>
+          <div class="meter"><i style="width:${pct}%"></i></div>
+          <b>${escapeHtml(formatNumber(tokens))}</b>
+        </div>
+      `;
+    }).join("")
+    : `<div class="empty small">${escapeHtml(emptyText)}</div>`;
+}
+
+function renderTokenHourlyChart(rows) {
+  const normalized = rows.slice(-48);
+  const max = Math.max(1, ...normalized.map((item) => Number(item.total_tokens || 0)));
+  $("#tokenHourlyChart").innerHTML = normalized.length
+    ? normalized.map((item) => {
+      const tokens = Number(item.total_tokens || 0);
+      const height = Math.max(4, Math.round((tokens / max) * 112));
+      const label = formatHourKey(item.key);
+      return `
+        <div class="token-bar" title="${escapeHtml(label)} · ${escapeHtml(formatNumber(tokens))} token · ${escapeHtml(item.calls || 0)} 次">
+          <i style="height:${height}px"></i>
+          <span>${escapeHtml(label.slice(-5))}</span>
+        </div>
+      `;
+    }).join("")
+    : `<div class="empty small">暂无小时趋势数据</div>`;
+}
+
+function renderTokenProviderTable(rows) {
+  $("#tokenProviderTable").innerHTML = tokenTable(
+    ["Provider", "总 Token", "输入", "输出", "调用", "估算", "平均延迟"],
+    rows,
+    (item) => [
+      item.key || "default",
+      formatNumber(item.total_tokens),
+      formatNumber(item.prompt_tokens),
+      formatNumber(item.completion_tokens),
+      formatNumber(item.calls),
+      `${Math.round(Number(item.estimated_ratio || 0) * 100)}%`,
+      `${formatNumber(Math.round(Number(item.avg_latency_ms || 0)))} ms`,
+    ],
+    "暂无 Provider 明细"
+  );
+}
+
+function renderTokenTaskTable(rows) {
+  $("#tokenTaskTable").innerHTML = tokenTable(
+    ["任务", "总 Token", "输入", "输出", "调用", "失败", "平均 Token"],
+    rows,
+    (item) => [
+      tokenTaskLabel(item.key),
+      formatNumber(item.total_tokens),
+      formatNumber(item.prompt_tokens),
+      formatNumber(item.completion_tokens),
+      formatNumber(item.calls),
+      formatNumber(item.errors),
+      formatNumber(Math.round(Number(item.avg_tokens || 0))),
+    ],
+    "暂无任务明细"
+  );
+}
+
+function renderTokenRecentTable(rows) {
+  $("#tokenRecentTable").innerHTML = tokenTable(
+    ["时间", "任务", "Provider", "Token", "延迟", "状态"],
+    rows,
+    (item) => [
+      formatRecentTime(item.ts, item.time),
+      tokenTaskLabel(item.task),
+      item.provider || "default",
+      `${formatNumber(item.total_tokens)}${item.estimated ? " 估" : ""}`,
+      `${formatNumber(Math.round(Number(item.elapsed_ms || item.latency_ms || 0)))} ms`,
+      item.success ? "成功" : `失败 ${item.error || ""}`.trim(),
+    ],
+    "暂无最近调用"
+  );
+}
+
+function tokenTable(headers, rows, mapper, emptyText) {
+  if (!rows.length) return `<div class="empty small">${escapeHtml(emptyText)}</div>`;
+  return `
+    <table>
+      <thead><tr>${headers.map((item) => `<th>${escapeHtml(item)}</th>`).join("")}</tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr>${mapper(row).map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function tokenTaskLabel(key) {
+  return tokenTaskLabels[key] || key || "其他调用";
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString("zh-CN");
+}
+
+function formatPercent(value) {
+  const num = Number(value || 0);
+  return `${Math.round(num * 100)}%`;
+}
+
+function formatHourKey(key) {
+  const text = String(key || "");
+  if (!text.includes("T")) return text || "-";
+  return text.replace("T", " ");
+}
+
+function formatRecentTime(ts, fallback) {
+  const num = Number(ts || 0);
+  if (!num) return fallback || "-";
+  return new Date(num * 1000).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function renderUsers() {
@@ -471,7 +678,7 @@ async function renderUserDetail(forceFetch = false) {
     </div>
     <div class="detail-grid">
       ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
-      ${detailBlock("最近对话", "", [["用户", detail.last_user_message || ""], ["陪伴", detail.last_companion_message || ""]])}
+      ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
       ${detailBlock("对话片段", "", (detail.dialogue_episodes || []).map((item, index) => [`#${index + 1}`, item.summary || item.title || JSON.stringify(item)]))}
       ${detailBlock("未完话头", "", (detail.open_loops || []).map((item, index) => [`#${index + 1}`, item.text || item.topic || JSON.stringify(item)]))}
     </div>
@@ -553,6 +760,7 @@ async function renderGroupDetail(forceFetch = false) {
     <div class="visual-strip">
       ${miniStat("消息", detail.message_count || 0)}
       ${miniStat("群友", detail.member_count || Object.keys(detail.members || {}).length)}
+      ${miniStat("已识别", detail.recognized_member_count || 0)}
       ${miniStat("黑话", detail.slang_count || (detail.slang_terms || []).length)}
       ${miniStat("话题", detail.topic_count || (detail.topic_threads || []).length)}
     </div>
@@ -583,14 +791,488 @@ function bindGroupActions(detail) {
   });
 }
 
+function renderWorldbook() {
+  const worldbook = state.overview?.worldbook || {};
+  const members = Array.isArray(worldbook.members) ? worldbook.members : [];
+  const groups = Array.isArray(worldbook.groups) ? worldbook.groups : [];
+  const keyword = ($("#worldbookMemberFilter")?.value || "").trim().toLowerCase();
+  const filteredMembers = members.filter((item) => {
+    const haystack = [
+      item.user_id,
+      item.name,
+      ...(Array.isArray(item.aliases) ? item.aliases : []),
+      ...(Array.isArray(item.observed_names) ? item.observed_names : []),
+      item.content,
+    ].join(" ").toLowerCase();
+    return !keyword || haystack.includes(keyword);
+  });
+
+  $("#worldbookSummary").innerHTML = [
+    worldbookStat("QQ 身份锚点", worldbook.enabled_member_count || 0, `${worldbook.member_count || 0} 个关系节点`),
+    worldbookStat("群资料", worldbook.group_count || 0, "可用于群聊上下文"),
+    worldbookStat("资料条目", worldbook.entry_count || 0, "保留完整原始资料"),
+    worldbookStat("识别方式", worldbook.enabled ? "QQ 精确" : "关闭", worldbook.match_aliases ? "称呼辅助开启" : "仅 QQ 确认"),
+  ].join("");
+  $("#worldbookSourceFiles").textContent = Array.isArray(worldbook.source_files) && worldbook.source_files.length
+    ? `资料路径：${worldbook.source_files.join("；")}`
+    : "资料路径：默认路径尚未读取到可用配置";
+  $("#worldbookMemberCount").textContent = `${filteredMembers.length}/${members.length} 个成员`;
+  renderDl("#worldbookImportState", {
+    last_import: worldbook.last_import || "未导入",
+    auto_import: worldbook.auto_import ? "开启" : "关闭",
+    inject_limit: worldbook.inject_limit || 0,
+  });
+  $("#worldbookMembers").innerHTML = filteredMembers.length
+    ? filteredMembers.map(worldbookMemberCard).join("")
+    : `<div class="empty small">暂无匹配关系节点</div>`;
+  $("#worldbookGroups").innerHTML = groups.length
+    ? groups.map((item) => `
+      <section class="worldbook-group-card">
+        <div class="worldbook-member-head">
+          <div>
+            <b>${escapeHtml(item.group_id || "-")}</b>
+            <span>${escapeHtml(item.name || "未命名群资料")} · 优先级 ${escapeHtml(item.priority ?? "-")}</span>
+          </div>
+          <button type="button" data-worldbook-group-delete="${escapeHtml(item.group_id || "")}" class="danger-outline">删除</button>
+        </div>
+        <div class="worldbook-compact-meta">
+          <span>${escapeHtml(item.content ? "有群资料正文" : "无群资料正文")}</span>
+        </div>
+        <details class="worldbook-editor">
+          <summary>编辑群资料</summary>
+          <label>名称 <input data-worldbook-group-name="${escapeHtml(item.group_id || "")}" value="${escapeHtml(item.name || "")}" /></label>
+          <label>优先级 <input data-worldbook-group-priority="${escapeHtml(item.group_id || "")}" type="number" value="${escapeHtml(item.priority ?? 110)}" /></label>
+          <label>资料正文 <textarea data-worldbook-group-content="${escapeHtml(item.group_id || "")}" rows="5">${escapeHtml(item.content || "")}</textarea></label>
+          <button type="button" data-worldbook-group-save="${escapeHtml(item.group_id || "")}">保存群资料</button>
+        </details>
+      </section>
+    `).join("")
+    : `<div class="empty small">暂无群资料</div>`;
+  bindWorldbookMemberActions();
+  bindWorldbookGroupActions();
+}
+
+function worldbookStat(label, value, note) {
+  return `
+    <article class="worldbook-stat">
+      <span>${escapeHtml(label)}</span>
+      <b>${escapeHtml(value)}</b>
+      <small>${escapeHtml(note)}</small>
+    </article>
+  `;
+}
+
+function worldbookMemberCard(item) {
+  const aliases = Array.isArray(item.aliases) ? item.aliases : [];
+  const observed = Array.isArray(item.observed_names) ? item.observed_names : [];
+  const memories = Array.isArray(item.important_memories) ? item.important_memories : [];
+  const chips = [...aliases.map((name) => `别名：${name}`), ...observed.map((name) => `群名片：${name}`)].slice(0, 12);
+  return `
+    <section class="worldbook-member-card ${item.enabled ? "" : "off"}">
+      <div class="worldbook-member-head">
+        <div>
+          <b>${escapeHtml(item.name || item.user_id || "未命名成员")}</b>
+          <span>身份 QQ ${escapeHtml(item.user_id || "-")} · 优先级 ${escapeHtml(item.priority ?? "-")}</span>
+        </div>
+        <button type="button" data-worldbook-member="${escapeHtml(item.user_id || "")}" data-enabled="${item.enabled ? "0" : "1"}">
+          ${escapeHtml(item.enabled ? "停用" : "启用")}
+        </button>
+      </div>
+      <div class="worldbook-compact-meta">
+        <span>${escapeHtml(aliases.length)} 个别名</span>
+        <span>${escapeHtml(observed.length)} 个曾见群名片</span>
+        <span>${escapeHtml((item.important_memories || []).length)} 条记忆</span>
+      </div>
+      <details class="worldbook-editor">
+        <summary>编辑关系节点</summary>
+        <div class="worldbook-chip-row">
+          ${chips.length ? chips.map((chip) => `<span>${escapeHtml(chip)}</span>`).join("") : `<span>暂无别名记录</span>`}
+        </div>
+        <label>别名
+          <textarea data-worldbook-aliases="${escapeHtml(item.user_id || "")}" rows="3">${escapeHtml(aliases.join("\n"))}</textarea>
+        </label>
+        <label>名称
+          <input data-worldbook-name="${escapeHtml(item.user_id || "")}" value="${escapeHtml(item.name || "")}" />
+        </label>
+        <label>注入优先级
+          <input data-worldbook-priority="${escapeHtml(item.user_id || "")}" type="number" value="${escapeHtml(item.priority ?? 120)}" />
+        </label>
+        <label>资料正文
+          <textarea data-worldbook-content="${escapeHtml(item.user_id || "")}" rows="5">${escapeHtml(item.content || "")}</textarea>
+        </label>
+        <label>身份说明
+          <textarea data-worldbook-identity-note="${escapeHtml(item.user_id || "")}" rows="3">${escapeHtml(item.identity_note || "")}</textarea>
+        </label>
+        <label>互动边界（可选）
+          <textarea data-worldbook-boundary-note="${escapeHtml(item.user_id || "")}" rows="3">${escapeHtml(item.boundary_note || "")}</textarea>
+        </label>
+        <div class="worldbook-memory-list">
+          ${memories.length ? memories.map((memory, index) => worldbookMemoryCard(item.user_id || "", memory, index)).join("") : `<div class="empty small">暂无重要记忆</div>`}
+        </div>
+        <button type="button" data-worldbook-save="${escapeHtml(item.user_id || "")}">保存关系节点</button>
+        <button type="button" data-worldbook-delete="${escapeHtml(item.user_id || "")}" class="danger-outline">删除节点</button>
+      </details>
+    </section>
+  `;
+}
+
+function worldbookMemoryCard(userId, memory, index) {
+  return `
+    <section class="worldbook-memory-card ${memory.enabled === false ? "off" : ""}">
+      <div>
+        <b>${escapeHtml(memory.title || "重要记忆")}</b>
+        <p>${escapeHtml(memory.content || "")}</p>
+        <span>${escapeHtml(memory.privacy || "internal")} · 权重 ${escapeHtml(memory.weight ?? 50)}${memory.source ? ` · ${escapeHtml(memory.source)}` : ""}</span>
+      </div>
+      <div class="actions compact">
+        <button type="button" data-worldbook-memory-toggle="${escapeHtml(userId)}" data-memory-index="${escapeHtml(index)}">
+          ${escapeHtml(memory.enabled === false ? "启用" : "停用")}
+        </button>
+        <button type="button" class="danger-outline" data-worldbook-memory-delete="${escapeHtml(userId)}" data-memory-index="${escapeHtml(index)}">删除</button>
+      </div>
+    </section>
+  `;
+}
+
+function getWorldbookMember(userId) {
+  const members = state.overview?.worldbook?.members || [];
+  return members.find((item) => item.user_id === userId);
+}
+
+function bindWorldbookMemberActions() {
+  document.querySelectorAll("[data-worldbook-member]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const userId = button.dataset.worldbookMember;
+      if (!userId) return;
+      await runAction(() => postJson("/worldbook/member/update", {
+        user_id: userId,
+        enabled: button.dataset.enabled === "1",
+      }));
+    });
+  });
+  document.querySelectorAll("[data-worldbook-save]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const userId = button.dataset.worldbookSave;
+      if (!userId) return;
+      const aliasBox = findWorldbookField("aliases", userId);
+      const identityInput = findWorldbookField("identity-note", userId);
+      const boundaryInput = findWorldbookField("boundary-note", userId);
+      const nameInput = findWorldbookField("name", userId);
+      const priorityInput = findWorldbookField("priority", userId);
+      const contentInput = findWorldbookField("content", userId);
+      const aliases = String(aliasBox?.value || "")
+        .split(/[\n,，;；]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      await runAction(() => postJson("/worldbook/member/update", {
+        user_id: userId,
+        name: nameInput?.value || "",
+        priority: Number(priorityInput?.value || 120),
+        content: contentInput?.value || "",
+        identity_note: identityInput?.value || "",
+        boundary_note: boundaryInput?.value || "",
+        aliases,
+      }));
+    });
+  });
+  document.querySelectorAll("[data-worldbook-memory-toggle]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const userId = button.dataset.worldbookMemoryToggle;
+      const index = Number(button.dataset.memoryIndex || -1);
+      const member = getWorldbookMember(userId);
+      const memories = Array.isArray(member?.important_memories) ? member.important_memories.map((item) => ({ ...item })) : [];
+      if (!userId || index < 0 || index >= memories.length) return;
+      memories[index].enabled = memories[index].enabled === false;
+      await runAction(() => postJson("/worldbook/member/update", { user_id: userId, important_memories: memories }));
+    });
+  });
+  document.querySelectorAll("[data-worldbook-memory-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const userId = button.dataset.worldbookMemoryDelete;
+      const index = Number(button.dataset.memoryIndex || -1);
+      const member = getWorldbookMember(userId);
+      const memories = Array.isArray(member?.important_memories) ? member.important_memories.map((item) => ({ ...item })) : [];
+      if (!userId || index < 0 || index >= memories.length) return;
+      memories.splice(index, 1);
+      await runAction(() => postJson("/worldbook/member/update", { user_id: userId, important_memories: memories }));
+    });
+  });
+  document.querySelectorAll("[data-worldbook-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const userId = button.dataset.worldbookDelete;
+      if (!userId || !confirm(`删除关系节点 ${userId}？`)) return;
+      await runAction(() => postJson("/worldbook/member/update", { user_id: userId, delete: true }));
+    });
+  });
+}
+
+function findWorldbookField(field, id) {
+  return [...document.querySelectorAll(`[data-worldbook-${field}]`)]
+    .find((item) => item.getAttribute(`data-worldbook-${field}`) === id);
+}
+
+function findWorldbookGroupField(field, id) {
+  return [...document.querySelectorAll(`[data-worldbook-group-${field}]`)]
+    .find((item) => item.getAttribute(`data-worldbook-group-${field}`) === id);
+}
+
+function bindWorldbookGroupActions() {
+  document.querySelectorAll("[data-worldbook-group-save]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const groupId = button.dataset.worldbookGroupSave;
+      if (!groupId) return;
+      await runAction(() => postJson("/worldbook/group/update", {
+        group_id: groupId,
+        name: findWorldbookGroupField("name", groupId)?.value || "",
+        priority: Number(findWorldbookGroupField("priority", groupId)?.value || 110),
+        content: findWorldbookGroupField("content", groupId)?.value || "",
+      }));
+    });
+  });
+  document.querySelectorAll("[data-worldbook-group-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const groupId = button.dataset.worldbookGroupDelete;
+      if (!groupId || !confirm(`删除群资料 ${groupId}？`)) return;
+      await runAction(() => postJson("/worldbook/group/update", { group_id: groupId, delete: true }));
+    });
+  });
+}
+
 function renderMemory() {
   const overview = state.overview || {};
+  const daily = overview.daily_state || {};
+  const life = overview.life_observation || {};
   $("#livingMemoryBox").textContent = overview.livingmemory?.status || "未读取到 LivingMemory 状态";
-  renderDl("#dailyState", overview.daily_state || {});
+  renderLifeHero(daily, life);
+  renderDreamCard(life.dream || {});
+  renderStatePillBoard(daily);
+  renderDiaryCards(life.diaries || []);
+  renderDreamFragments(life.dream_fragments || []);
+  renderDl("#dailyState", daily);
   renderDailyTimeline();
   renderInteractionImpact();
   renderMemoryComposition();
   renderSlangCloud();
+}
+
+function renderLifeHero(daily, life) {
+  const energy = Number(daily.energy || 0);
+  const pct = Math.max(0, Math.min(100, energy));
+  $("#lifeEnergy").textContent = daily.energy === undefined || daily.energy === "" ? "--" : `${formatNumber(energy)}`;
+  $("#lifeEnergyBar").style.width = `${pct}%`;
+  $("#lifeMood").textContent = daily.mood_bias || "平稳";
+  $("#lifeNote").textContent = daily.note || daily.sleep || "暂无额外备注";
+  $("#lifeLocation").textContent = daily.location || "未记录";
+  $("#lifeWeather").textContent = daily.weather || "暂无天气";
+  const current = life.current_plan || {};
+  $("#lifeCurrentActivity").textContent = current.activity || "暂无当前日程";
+  $("#lifeCurrentSeed").textContent = [current.time, current.mood, current.message_seed].filter(Boolean).join(" · ") || "等待日程细化";
+}
+
+function renderDreamCard(dream) {
+  const meta = [
+    dream.dream_type || "碎片梦",
+    dream.mood ? `情绪 ${dream.mood}` : "",
+    dream.duration_hours ? `${dream.duration_hours} 小时` : "",
+    dream.generated_at || dream.date || "",
+  ].filter(Boolean).join(" · ");
+  $("#dreamMeta").textContent = meta || "暂无梦境记录";
+  const delta = Number(dream.energy_delta || 0);
+  const deltaText = delta > 0 ? `能量 +${delta}` : delta < 0 ? `能量 ${delta}` : "能量平稳";
+  $("#dreamAfterglow").textContent = dream.afterglow || dream.label || deltaText;
+  $("#dreamContent").textContent = dream.content || dream.label || "暂时没有可展示的梦境内容。开启增强梦境或生成今日状态后，这里会出现更完整的梦境记录。";
+  const factors = Array.isArray(dream.factors) ? dream.factors : [];
+  $("#dreamFactors").innerHTML = factors.length
+    ? factors.map((item) => `<span class="fragment-chip">${escapeHtml(item)}</span>`).join("")
+    : `<span class="muted">暂无梦境因子</span>`;
+}
+
+function renderStatePillBoard(daily) {
+  const items = [
+    ["睡眠", daily.sleep],
+    ["梦境", daily.dream],
+    ["健康", daily.health],
+    ["饥饿", daily.hunger],
+    ["生理周期", daily.body_cycle],
+    ["天气", daily.weather],
+  ].filter(([, value]) => value !== undefined && value !== "");
+  $("#statePillBoard").innerHTML = items.length
+    ? items.map(([label, value]) => `
+      <span>
+        <b>${escapeHtml(label)}</b>
+        ${escapeHtml(value || "-")}
+      </span>
+    `).join("")
+    : `<div class="empty small">暂无今日状态。生成今日状态后会展示生活感指标。</div>`;
+}
+
+function renderDiaryCards(diaries) {
+  $("#diaryCards").innerHTML = diaries.length
+    ? diaries.slice().reverse().map((item) => {
+      const tags = Array.isArray(item.tags) && item.tags.length
+        ? item.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")
+        : `<span>未标记</span>`;
+      return `
+        <section class="diary-card">
+          <div>
+            <b>${escapeHtml(item.date || "未记录日期")}</b>
+            <small>${escapeHtml(item.generated_at || "")}</small>
+          </div>
+          <p>${escapeHtml(item.summary || "暂无日记摘要")}</p>
+          ${item.share_seed ? `<blockquote>${escapeHtml(item.share_seed)}</blockquote>` : ""}
+          <div class="diary-tags">${tags}</div>
+        </section>
+      `;
+    }).join("")
+    : `<div class="empty small">暂无日记。到日记生成时间或手动生成后，这里会记录 Bot 的生活碎片。</div>`;
+}
+
+function renderDreamFragments(fragments) {
+  if (!fragments.length) {
+    $("#dreamFragments").innerHTML = `<div class="empty small">暂无梦境碎片。日记和梦境生成后会积累关键词。</div>`;
+    return;
+  }
+  const max = Math.max(1, ...fragments.map((item) => Number(item.weight || 1)));
+  $("#dreamFragments").innerHTML = fragments.map((item) => {
+    const weight = Number(item.weight || 1);
+    const size = 12 + Math.round((weight / max) * 8);
+    const title = [item.source, item.created_at, weight ? `权重 ${weight.toFixed(1)}` : ""].filter(Boolean).join(" · ");
+    return `<span class="fragment-chip" style="font-size:${size}px" title="${escapeHtml(title)}">${escapeHtml(item.text || "")}</span>`;
+  }).join("");
+}
+
+function renderCreative() {
+  const creative = state.overview?.creative || {};
+  const settings = state.overview?.settings || {};
+  $("#creativeActiveCount").textContent = creative.active_projects || 0;
+  $("#creativeProjectCount").textContent = creative.project_count || 0;
+  $("#creativeRevealMode").textContent = creative.hidden_mode ? "节点自然提起" : "普通模式";
+  $("#creativeLatestTitle").textContent = creative.latest_title || "暂无";
+  $("#creativeIntro").textContent = creative.enabled
+    ? "私下创作会从日程、日记、梦境或生活小事里长出灵感。它不是每天打卡式展示，而是由 Bot 自己按节奏写，写到开头、过半、完稿或想听读后感觉时才可能进入主动候选。"
+    : "私下创作当前未开启。开启后，Bot 会把创作当作自己的长线生活行为之一。";
+  renderDl("#creativeSettings", {
+    "功能状态": creative.enabled ? "开启" : "关闭",
+    "低调模式": creative.hidden_mode ? "开启" : "关闭",
+    "灵感触发概率": formatPercent(settings.creative_inspiration_probability),
+    "节点提起概率": formatPercent(settings.creative_share_probability),
+    "基础写作速度": `${settings.creative_base_chars_per_hour || 0} 字/小时`,
+    "同时项目上限": settings.creative_max_active_projects || 0,
+  });
+  const items = creative.items || [];
+  $("#creativeProjects").innerHTML = items.length
+    ? items.slice().reverse().map(renderCreativeProjectCard).join("")
+    : `<div class="empty">暂无创作项目。等某个生活片段或梦境变成灵感时，这里会出现新的小坑。</div>`;
+}
+
+function renderProactiveCandidates() {
+  const data = state.overview?.proactive_candidates || {};
+  const counts = data.counts || {};
+  const items = data.items || [];
+  $("#proactiveSummary").innerHTML = [
+    proactiveSummaryCard("候选总数", data.total || 0, "最近 36 小时内保留"),
+    proactiveSummaryCard("已进入计划", counts.accepted || 0, "当前或历史接受候选"),
+    proactiveSummaryCard("已发送", counts.sent || 0, "实际发出的主动"),
+    proactiveSummaryCard("被拦截", counts.blocked || 0, "去重、配额或已有更早计划"),
+  ].join("");
+  $("#proactiveSourceChart").innerHTML = donutChart(data.source_counts || {});
+  $("#proactiveStatusChart").innerHTML = donutChart(counts || {});
+  if (!items.length) {
+    $("#proactiveCandidateList").innerHTML = `<div class="empty small">暂无主动候选。运行一段时间后，这里会显示随机日程、群聊分享、B 站、创作等候选。</div>`;
+    return;
+  }
+  $("#proactiveCandidateList").innerHTML = items.map((item) => {
+    const status = proactiveStatusLabel(item.status);
+    return `
+      <section class="proactive-candidate ${escapeHtml(item.status || "unknown")}">
+        <div class="proactive-candidate-head">
+          <div>
+            <b>${escapeHtml(item.topic || item.reason || "未命名候选")}</b>
+            <span>${escapeHtml(item.source || "-")} · ${escapeHtml(item.reason || "-")} · ${escapeHtml(item.action || "message")}</span>
+          </div>
+          <span class="badge">${escapeHtml(status)}</span>
+        </div>
+        <p>${escapeHtml(item.motive || "暂无动机记录")}</p>
+        <div class="proactive-meta">
+          <span>用户：${escapeHtml(item.user_id || "-")}</span>
+          <span>计划：${escapeHtml(item.scheduled || "-")}</span>
+          <span>创建：${escapeHtml(item.created || "-")}</span>
+          <span>评分：${escapeHtml(item.score || 0)}</span>
+          ${item.note ? `<span>说明：${escapeHtml(item.note)}</span>` : ""}
+        </div>
+      </section>
+    `;
+  }).join("");
+}
+
+function proactiveSummaryCard(label, value, note) {
+  return `
+    <section class="proactive-summary-card">
+      <span>${escapeHtml(label)}</span>
+      <b>${escapeHtml(value)}</b>
+      <small>${escapeHtml(note)}</small>
+    </section>
+  `;
+}
+
+function proactiveStatusLabel(status) {
+  return {
+    accepted: "已计划",
+    sent: "已发送",
+    blocked: "已拦截",
+    expired: "已过期",
+  }[status] || status || "未知";
+}
+
+function renderCreativeProjectCard(item) {
+  const current = Number(item.current_chars || 0);
+  const target = Number(item.target_chars || 0);
+  const pct = target > 0 ? Math.min(100, Math.round((current / target) * 100)) : 0;
+  const statusText = {
+    drafting: "慢慢写着",
+    finished: "已写完",
+    paused: "暂时搁置",
+  }[item.status] || item.status || "未知";
+  const milestones = Array.isArray(item.milestones) && item.milestones.length
+    ? item.milestones.map((name) => `<span>${escapeHtml(creativeMilestoneLabel(name))}</span>`).join("")
+    : `<span class="muted">还没提起过</span>`;
+  return `
+    <article class="creative-card">
+      <div class="creative-card-head">
+        <div>
+          <h3>${escapeHtml(item.title || "未定标题")}</h3>
+          <p>${escapeHtml(item.premise || "还没整理出一句设定。")}</p>
+        </div>
+        <span class="badge">${escapeHtml(statusText)}</span>
+      </div>
+      <div class="creative-progress">
+        <div class="meter"><i style="width:${pct}%"></i></div>
+        <b>${escapeHtml(current)} / ${escapeHtml(target || "-")} 字</b>
+      </div>
+      <div class="creative-meta">
+        <span>气质：${escapeHtml(item.tone || "-")}</span>
+        <span>片段：${escapeHtml(item.chunk_count || 0)}</span>
+        <span>创建：${escapeHtml(item.created_at || "-")}</span>
+        <span>上次推进：${escapeHtml(item.last_advanced || "-")}</span>
+        <span>下次推进：${escapeHtml(item.next_advance || "-")}</span>
+      </div>
+      ${item.source ? `<p class="creative-source">灵感来源：${escapeHtml(item.source)}</p>` : ""}
+      ${item.latest_snippet ? `<blockquote>${escapeHtml(item.latest_snippet)}</blockquote>` : ""}
+      <div class="creative-milestones">
+        <b>已自然提起节点</b>
+        <div>${milestones}</div>
+      </div>
+    </article>
+  `;
+}
+
+function creativeMilestoneLabel(name) {
+  return {
+    opening: "开头",
+    midpoint: "过半",
+    finished: "完稿",
+    impression_question: "询问观感",
+  }[name] || name || "节点";
 }
 
 function renderDailyTimeline() {
@@ -728,8 +1410,18 @@ function formatSlangTerms(items) {
 function renderConfig() {
   const overview = state.overview || {};
   const group = overview.group || {};
+  const creative = overview.creative || {};
+  const bili = overview.bilibili || {};
   renderDl("#privateConfig", overview.private || {});
   renderDl("#groupConfig", group);
+  renderDl("#longTermConfig", {
+    "B 站联动": bili.enabled ? "开启" : "关闭",
+    "无聊刷视频": bili.boredom_watch_enabled ? "开启" : "关闭",
+    "最新视频": bili.latest_video?.title || "暂无",
+    "私下创作": creative.enabled ? "开启" : "关闭",
+    "创作项目": `${creative.active_projects || 0}/${creative.project_count || 0}`,
+    "最新创作": creative.latest_title || "暂无",
+  });
   $("#groupAccessMode").value = group.access_mode || "whitelist";
   $("#groupWhitelist").value = (group.whitelist || []).join("\n");
   $("#groupBlacklist").value = (group.blacklist || []).join("\n");
@@ -750,13 +1442,71 @@ function renderConfig() {
 
 function renderModuleSettings() {
   const settings = state.overview?.settings || {};
+  renderModuleSummary(settings);
   fillForm("#quickModuleForm", settings);
   fillForm("#privateModuleForm", settings);
   fillForm("#groupModuleForm", settings);
+  fillForm("#worldbookModuleForm", settings);
   fillForm("#memoryModuleForm", settings);
+  fillForm("#longTermModuleForm", settings);
   const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
   if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
+  document.querySelectorAll(".module-form").forEach((form) => markModuleFormClean(form));
   renderPresetCards();
+}
+
+function renderModuleSummary(settings) {
+  const features = state.overview?.features || {};
+  const groups = state.overview?.group || {};
+  const cards = [
+    {
+      label: "私聊主动",
+      value: `${settings.max_daily_messages ?? 0}/天`,
+      note: `${settings.idle_minutes ?? 0} 分钟空闲后候选`,
+      tone: Number(settings.max_daily_messages || 0) > 0 ? "ok" : "off",
+    },
+    {
+      label: "群聊观察",
+      value: features.enable_group_companion ? "开启" : "关闭",
+      note: `${groups.enabled_group_count || 0}/${groups.group_count || 0} 个群观测中`,
+      tone: features.enable_group_companion ? "ok" : "off",
+    },
+    {
+      label: "关系网",
+      value: settings.enable_worldbook_member_recognition ? "开启" : "关闭",
+      note: `${state.overview?.worldbook?.enabled_member_count || 0}/${state.overview?.worldbook?.member_count || 0} 个节点启用`,
+      tone: settings.enable_worldbook_member_recognition ? "ok" : "off",
+    },
+    {
+      label: "记忆整理",
+      value: `${settings.memory_refresh_interval_minutes ?? 0} 分钟`,
+      note: `片段阈值 ${settings.episode_memory_refresh_messages ?? 0} 条消息`,
+      tone: "cost",
+    },
+    {
+      label: "长线行为",
+      value: settings.enable_creative_writing ? "创作开启" : "创作关闭",
+      note: settings.enable_bilibili_boredom_watch ? "B 站无聊触发开启" : "B 站无聊触发关闭",
+      tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch ? "ok" : "off",
+    },
+  ];
+  $("#moduleSummary").innerHTML = cards.map((item) => `
+    <section class="module-summary-card ${escapeHtml(item.tone)}">
+      <span>${escapeHtml(item.label)}</span>
+      <b>${escapeHtml(item.value)}</b>
+      <small>${escapeHtml(item.note)}</small>
+    </section>
+  `).join("");
+}
+
+function markModuleFormDirty(form) {
+  form?.closest(".module-card")?.classList.add("is-dirty");
+}
+
+function markModuleFormClean(form) {
+  const card = form?.closest(".module-card");
+  if (!card) return;
+  card.classList.remove("is-dirty");
 }
 
 function renderPresetCards() {
@@ -1106,15 +1856,55 @@ document.querySelectorAll(".tab").forEach((button) => {
 $("#refreshBtn").addEventListener("click", loadAll);
 $("#userFilter").addEventListener("input", renderUsers);
 $("#groupFilter").addEventListener("input", renderGroups);
+$("#worldbookMemberFilter").addEventListener("input", renderWorldbook);
+$("#worldbookImportBtn").addEventListener("click", async () => {
+  await runAction(() => postJson("/worldbook/import", {}));
+});
+$("#worldbookAddMemberForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const userId = String(form.get("user_id") || "").trim();
+  if (!userId) return;
+  if (!/^\d{5,}$/.test(userId)) {
+    alert("关系节点必须使用有效 QQ 号作为身份键");
+    return;
+  }
+  await runAction(() => postJson("/worldbook/member/update", {
+    user_id: userId,
+    name: form.get("name") || userId,
+    priority: Number(form.get("priority") || 120),
+    enabled: true,
+  }));
+  event.currentTarget.reset();
+});
+$("#worldbookAddGroupForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const groupId = String(form.get("group_id") || "").trim();
+  if (!groupId) return;
+  await runAction(() => postJson("/worldbook/group/update", {
+    group_id: groupId,
+    name: form.get("name") || groupId,
+    enabled: true,
+  }));
+  event.currentTarget.reset();
+});
+$("#resetTokenStatsBtn").addEventListener("click", async () => {
+  if (!confirm("确定清空 Token 消耗统计吗？这不会影响聊天记忆和配置。")) return;
+  await runAction(() => postJson("/token/reset", {}));
+});
 
-["quickModuleForm", "privateModuleForm", "groupModuleForm", "memoryModuleForm"].forEach((formId) => {
+["quickModuleForm", "privateModuleForm", "groupModuleForm", "worldbookModuleForm", "memoryModuleForm", "longTermModuleForm"].forEach((formId) => {
   const form = document.getElementById(formId);
   if (!form) return;
+  form.addEventListener("input", () => markModuleFormDirty(form));
+  form.addEventListener("change", () => markModuleFormDirty(form));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     await runAction(() => postJson("/settings/update", {
       settings: collectFormSettings(`#${formId}`),
     }));
+    markModuleFormClean(form);
   });
 });
 

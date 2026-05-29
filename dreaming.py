@@ -9,6 +9,45 @@ from typing import Any
 from .helpers import _now_ts, _safe_float, _safe_int, _single_line, _today_key
 
 
+_ABSTRACT_DREAM_FRAGMENT_MARKERS = (
+    "状态", "情绪", "心情", "感觉", "余韵", "碎片", "生活感", "日程", "计划", "总结",
+    "今天", "明天", "用户", "主动", "消息", "回复", "关系", "陪伴", "模型", "生成",
+)
+
+
+def _clean_dream_fragment_text(text: Any, limit: int = 28) -> str:
+    raw = _single_line(text, 80)
+    if not raw:
+        return ""
+    raw = raw.replace("，", ",").replace("。", ",").replace("；", ",").replace("、", ",")
+    parts = [part.strip(" ,.!！？?：:（）()[]【】\"'“”") for part in raw.split(",") if part.strip()]
+    if parts:
+        parts = sorted(parts, key=lambda item: (len(item) > limit, len(item)))
+        raw = parts[0]
+    raw = _single_line(raw, limit).strip(" ,.!！？?：:（）()[]【】\"'“”")
+    if len(raw) <= 1:
+        return ""
+    return raw
+
+
+def _dream_fragment_is_useful(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned or cleaned in {"没有记住梦", "平稳", "暂无天气信息", "无明确碎片"}:
+        return False
+    if len(cleaned) > 32:
+        return False
+    abstract_hits = sum(1 for marker in _ABSTRACT_DREAM_FRAGMENT_MARKERS if marker in cleaned)
+    concrete_markers = (
+        "光", "雨", "风", "水", "纸", "书", "门", "窗", "杯", "碗", "路", "影", "声", "味",
+        "颜色", "蓝", "红", "白", "黑", "暖", "冷", "手", "衣", "鞋", "车", "灯", "雾", "床",
+        "被子", "手机", "屏幕", "钥匙", "包装", "饮料", "猫", "楼梯", "走廊",
+    )
+    has_concrete = any(marker in cleaned for marker in concrete_markers)
+    if abstract_hits >= 2 and not has_concrete:
+        return False
+    return True
+
+
 def recent_diary_tags(plugin, /) -> set[str]:
     diaries = plugin.data.get("bot_diaries", [])
     tags: set[str] = set()
@@ -42,8 +81,8 @@ def recent_diary_context(plugin, count: int = 3) -> str:
 def normalize_dream_fragment_item(plugin, raw: Any) -> dict[str, Any] | None:
     now_ts = _now_ts()
     if isinstance(raw, str):
-        text = _single_line(raw, 40)
-        if not text:
+        text = _clean_dream_fragment_text(raw)
+        if not text or not _dream_fragment_is_useful(text):
             return None
         return {
             "text": text,
@@ -53,8 +92,8 @@ def normalize_dream_fragment_item(plugin, raw: Any) -> dict[str, Any] | None:
         }
     if not isinstance(raw, dict):
         return None
-    text = _single_line(raw.get("text") or raw.get("keyword") or raw.get("label"), 40)
-    if not text:
+    text = _clean_dream_fragment_text(raw.get("text") or raw.get("keyword") or raw.get("label"))
+    if not text or not _dream_fragment_is_useful(text):
         return None
     weight = float(_safe_float(raw.get("weight"), 1.0))
     created_ts = _safe_float(raw.get("created_ts"), now_ts)
@@ -148,7 +187,8 @@ def fallback_dream_fragments_for_diary(plugin, state: dict[str, Any]) -> list[di
         )
     seen: set[str] = set()
     for index, text in enumerate(seed_candidates):
-        if not text or text in seen or text in {"没有记住梦", "平稳", "暂无天气信息"}:
+        text = _clean_dream_fragment_text(text)
+        if not text or text in seen or not _dream_fragment_is_useful(text):
             continue
         seen.add(text)
         items.append(
@@ -203,7 +243,9 @@ def build_dream_memory_fragments(plugin, count: int = 8) -> list[str]:
                 _single_line(diary.get("summary"), 80),
             ):
                 if candidate:
-                    fragments.append(candidate)
+                    cleaned = _clean_dream_fragment_text(candidate)
+                    if cleaned and _dream_fragment_is_useful(cleaned):
+                        fragments.append(cleaned)
     current_plan = plugin.data.get("daily_plan", {})
     if isinstance(current_plan, dict):
         items = current_plan.get("items", [])
@@ -215,14 +257,16 @@ def build_dream_memory_fragments(plugin, count: int = 8) -> list[str]:
                     _single_line(item.get("activity"), 80),
                     _single_line(item.get("message_seed"), 80),
                 ):
-                    if candidate:
-                        fragments.append(candidate)
+                    cleaned = _clean_dream_fragment_text(candidate)
+                    if cleaned and _dream_fragment_is_useful(cleaned):
+                        fragments.append(cleaned)
     can_do = plugin.data.get("can_do", [])
     if isinstance(can_do, list):
         for item in can_do[:4]:
             candidate = _single_line(item, 60)
-            if candidate:
-                fragments.append(candidate)
+            cleaned = _clean_dream_fragment_text(candidate)
+            if cleaned and _dream_fragment_is_useful(cleaned):
+                fragments.append(cleaned)
     for entry in plugin._get_relevant_important_dates()[:3]:
         if not isinstance(entry, dict):
             continue
@@ -230,27 +274,31 @@ def build_dream_memory_fragments(plugin, count: int = 8) -> list[str]:
             f"{entry.get('title', '')} {entry.get('note', '')}",
             80,
         )
-        if joined:
-            fragments.append(joined)
+        cleaned = _clean_dream_fragment_text(joined)
+        if cleaned and _dream_fragment_is_useful(cleaned):
+            fragments.append(cleaned)
     yesterday = plugin.data.get("yesterday_conversation_summary", {})
     if isinstance(yesterday, dict) and yesterday.get("date") == _today_key():
         for candidate in (
             _single_line(yesterday.get("dream_reference"), 100),
             _single_line(yesterday.get("summary"), 100),
         ):
-            if candidate and "无明确" not in candidate:
-                fragments.append(candidate)
+            cleaned = _clean_dream_fragment_text(candidate)
+            if cleaned and "无明确" not in candidate and _dream_fragment_is_useful(cleaned):
+                fragments.append(cleaned)
         residues = yesterday.get("residues", [])
         if isinstance(residues, list):
             for item in residues[:4]:
                 if not isinstance(item, dict):
                     continue
                 content = _single_line(item.get("content"), 80)
-                if content:
-                    fragments.append(content)
+                cleaned = _clean_dream_fragment_text(content)
+                if cleaned and _dream_fragment_is_useful(cleaned):
+                    fragments.append(cleaned)
     weather = _single_line(plugin._weather_summary_text(plugin.data.get("daily_weather", {})), 60)
-    if weather and weather != "暂无天气信息":
-        fragments.append(weather)
+    weather_fragment = _clean_dream_fragment_text(weather)
+    if weather_fragment and _dream_fragment_is_useful(weather_fragment):
+        fragments.append(weather_fragment)
     deduped: list[str] = []
     seen: set[str] = set()
     for fragment in fragments:
@@ -286,7 +334,7 @@ def dream_theme_specs(plugin) -> list[tuple[str, str]]:
     for name in names:
         if name == "暧昧春梦" and not plugin.enable_intimate_dream_theme:
             continue
-        specs.append((name, default_specs.get(name, f"梦整体偏{name}，但仍然像生活碎片被欠逻辑地重新拼在一起。")))
+        specs.append((name, default_specs.get(name, f"梦整体偏{name}，但仍然要从具体生活碎片出发,保留一条能读懂的梦内情绪线。")))
     if not specs:
         specs.append(("温柔日常", default_specs["温柔日常"]))
     return specs
@@ -317,9 +365,37 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
     persona = plugin._get_default_persona_prompt()
     weather_text = plugin._weather_summary_text(weather or plugin.data.get("daily_weather", {}))
     prompt = f"""
-请根据这些记忆碎片,写一个拟人化 Bot 今早残留的完整梦境。
-这个梦可以欠逻辑、跳接、荒诞、前后矛盾,但不能空泛,不能只有“做了一个梦”的状态标签。它必须像醒来后还能复述出来的一段梦：有开头的画面、中间的变化、至少一个不合逻辑的转折、醒来后留下的余韵。
+你现在是 Private Companion 的梦境生成器。请根据本次输入的记忆碎片,写一个拟人化 Bot 今早残留的完整梦境。
+这个梦可以跳接、荒诞、前后不完全合逻辑,但读起来必须摸得到一条“梦里的情绪线”：她在找什么、躲什么、靠近什么、误认了什么,或为什么醒来后还残留那种感觉。不要只把碎片随机拼贴。
 
+要求：
+1. 梦境内容要像把记忆碎片在梦里重新变形,允许断裂和跳场,但必须有“发生了什么”和“为什么醒来后还记得”。
+2. 尽量保留一点真实生活残影,不要纯奇幻大场面；如果出现奇幻,也要让它从生活物件、聊天残留或身体感受里长出来。
+3. 不要写成日程、日记、设定说明或心理分析。梦里可以有人、物、地点变化,但不要解释得太清楚。
+4. 如果主题偏温柔,energy_delta 可以略微为正；如果主题偏压迫/追赶/恐怖,可以略微为负。
+5. 如果主题涉及暧昧或春梦,保持含蓄,只写心跳、靠近、错觉感,不要露骨。
+6. 如果碎片很少,也要用已有的人格、天气、最近日记补出一个完整梦,不能输出“没有梦”“记不清”“什么都没有”。
+7. 梦境不是现实复盘,但要有现实残留：物件、颜色、声音、气味、身体感受、半句话、聊天余味都可以以变形方式出现。
+8. 不要让梦境像宏大奇幻设定简介。即使有不现实元素,也要从房间、桌面、手机、路口、雨声、光线、衣物、食物、课本、屏幕等具体生活物里长出来。
+9. 梦境可以有突兀转场,但每个转场前后都要能被读者想象到画面。
+10. 输出必须是 JSON,不要 Markdown,不要解释,不要在 JSON 外补充任何内容。
+11. factors 必须是可感知的小碎片,例如物件、颜色、声音、气味、触感、半句话；不要输出“情绪很好”“今天很累”“日程残留”这类抽象标签。
+12. content 至少包含三个连续梦内节点：起始画面、变形/转场、醒前一瞬。可以不讲现实逻辑,但要讲梦内因果。
+13. 不要把“资料室、发光、迷路、追逐、水光、草稿纸”等词当作固定模板反复使用；只有输入碎片里真的有相近材料时才用。
+
+只输出 JSON：
+{{
+  "dream_type": "梦境类型,例如温柔日常/奇幻/追逐/悬疑/荒诞/怀旧/混合类型",
+  "factors": ["梦境因子或碎片,3到8个,可以是物件/颜色/声音/气味/半句话/动作"],
+  "content": "180到600字的梦境内容,写成完整一段梦；要有起始画面、变形/转场、醒前一瞬和清楚的梦内情绪线",
+  "afterglow": "醒来后的梦境余韵,20到120字,说明身体或情绪残留",
+  "label": "20到50字的短标签,概括这个梦留在身上的感觉",
+  "mood": "平稳/恍惚/柔和/低落/敏感/轻快 之一",
+  "energy_delta": -12到6之间的整数",
+  "duration_hours": 3到8之间的整数
+}}
+
+【本次输入】
 【人格参考】
 {persona}
 
@@ -332,25 +408,6 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
 【天气】
 {weather_text}
 
-只输出 JSON：
-{{
-  "dream_type": "梦境类型,例如温柔日常/奇幻/追逐/悬疑/荒诞/怀旧/混合类型",
-  "factors": ["梦境因子或碎片,3到8个,可以是物件/颜色/声音/气味/半句话/动作"],
-  "content": "180到600字的梦境内容,写成完整一段梦；可以短也可以长,可以没有现实逻辑,但要有具体画面、推进和至少一个转场",
-  "afterglow": "醒来后的梦境余韵,20到120字,说明身体或情绪残留",
-  "label": "20到50字的短标签,概括这个梦留在身上的感觉",
-  "mood": "平稳/恍惚/柔和/低落/敏感/轻快 之一",
-  "energy_delta": -12到6之间的整数",
-  "duration_hours": 3到8之间的整数
-}}
-
-要求：
-1. 梦境内容要像把记忆碎片欠逻辑地拼在一起,允许断裂和跳场,但必须有“发生了什么”。
-2. 尽量保留一点真实生活残影,不要纯奇幻大场面；如果出现奇幻,也要让它从生活物件、聊天残留或身体感受里长出来。
-3. 不要写成日程、日记、设定说明或心理分析。梦里可以有人、物、地点变化,但不要解释得太清楚。
-4. 如果主题偏温柔,energy_delta 可以略微为正；如果主题偏压迫/追赶/恐怖,可以略微为负。
-5. 如果主题涉及暧昧或春梦,保持含蓄,只写心跳、靠近、错觉感,不要露骨。
-6. 如果碎片很少,也要用已有的人格、天气、最近日记补出一个完整梦,不能输出“没有梦”“记不清”“什么都没有”。
 """.strip()
     raw_text = await plugin._llm_call(
         prompt,
@@ -397,7 +454,7 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     calendar_context = plugin._format_calendar_context_for_prompt()
     yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
     prompt = f"""
-今天是 {today}。请为你自己写一条今天的日记,同时预设今天的生活碎片和主动聊天计划。
+你现在是 Private Companion 的日记生成器。请为拟人化 Bot 写一条今天的日记,同时预设今天的生活碎片和主动聊天计划。
 
 【写日记的要求】
 · 短、口语、像社交媒体上随手写给自己看的。不要散文腔,不要长篇。
@@ -407,6 +464,27 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 · proactive_events 要同时带 motive（心里一闪而过的念头,不要长解释）,适合时也可以带 scene/tone/impulse。
 · 顺手产出 3–8 个梦境碎片关键词,它们是今天残留在脑子里的小东西：物件、动作、气味、颜色、情绪、半句话都可以。每个碎片给一个 0.6–3.5 的权重,越重代表越容易在梦里反复冒出来。
 
+只输出 JSON：
+{{
+  "summary": "一句短日记,口语化,像写给自己看的生活碎片",
+  "share_seed": "以后可以主动发给朋友的一小句话,像私聊消息",
+  "tags": ["低能量", "失眠", "好梦", "生病", "恢复期", "回弹", "平稳"],
+  "today_events": [
+    {{"window": "09:00-10:30", "event": "早间醒来,确认今天状态", "mood": "平稳"}}
+  ],
+ "proactive_events": [
+    {{"window": "17:20-18:30", "reason": "activity_share", "action": "message", "why": "傍晚适合补充一段今日状态", "topic": "今日状态", "motive": "傍晚整理时想到可以和用户说一句", "scene": "傍晚整理时", "tone": "平稳", "impulse": "分享一段简短的今日状态"}}
+  ],
+  "dream_fragments": [
+    {{"text": "碗边沾着的水光", "weight": 2.2}},
+    {{"text": "楼下吹过来的晚风", "weight": 1.4}}
+  ],
+  "long_term_events": [
+    {{"title": "准备分享一张路上看到的照片", "status": "刚想到,还没拍", "next_hint": "如果傍晚天气好,可以用 photo_text 主动分享"}}
+  ]
+}}
+
+【本次输入】
 日期：{today}
 当前状态：
 {plugin._format_state_for_prompt(state if isinstance(state, dict) else {})}
@@ -431,26 +509,6 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 
 近期重要日期：
 {plugin._format_important_dates_for_prompt()}
-
-只输出 JSON：
-{{
-  "summary": "一句短日记,口语化,像写给自己看的生活碎片",
-  "share_seed": "以后可以主动发给朋友的一小句话,像私聊消息",
-  "tags": ["低能量", "失眠", "好梦", "生病", "恢复期", "回弹", "平稳"],
-  "today_events": [
-    {{"window": "09:00-10:30", "event": "早间醒来,确认今天状态", "mood": "平稳"}}
-  ],
- "proactive_events": [
-    {{"window": "17:20-18:30", "reason": "activity_share", "action": "message", "why": "傍晚适合补充一段今日状态", "topic": "今日状态", "motive": "傍晚整理时想到可以和用户说一句", "scene": "傍晚整理时", "tone": "平稳", "impulse": "分享一段简短的今日状态"}}
-  ],
-  "dream_fragments": [
-    {{"text": "碗边沾着的水光", "weight": 2.2}},
-    {{"text": "楼下吹过来的晚风", "weight": 1.4}}
-  ],
-  "long_term_events": [
-    {{"title": "准备分享一张路上看到的照片", "status": "刚想到,还没拍", "next_hint": "如果傍晚天气好,可以用 photo_text 主动分享"}}
-  ]
-}}
 """.strip()
     raw_text = await plugin._llm_call(prompt, max_tokens=500)
     payload = plugin._extract_json_payload(raw_text or "")
