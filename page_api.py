@@ -5,6 +5,7 @@ import time
 import re
 import shutil
 import base64
+import hashlib
 import mimetypes
 from copy import deepcopy
 from pathlib import Path
@@ -47,6 +48,7 @@ class PrivateCompanionPageApi:
             ("/worldbook/import", self.import_worldbook, ["POST"], "Private Companion Page import worldbook"),
             ("/worldbook/member/update", self.update_worldbook_member, ["POST"], "Private Companion Page update worldbook member"),
             ("/worldbook/group/update", self.update_worldbook_group, ["POST"], "Private Companion Page update worldbook group"),
+            ("/skill/update", self.update_skill_growth, ["POST"], "Private Companion Page update skill growth"),
             ("/preset/apply", self.apply_preset, ["POST"], "Private Companion Page apply preset"),
             ("/providers/available", self.list_available_providers, ["GET"], "Private Companion Page available providers"),
             ("/provider/test", self.test_provider, ["POST"], "Private Companion Page test provider"),
@@ -105,6 +107,7 @@ class PrivateCompanionPageApi:
                     "private_reading": self._jm_cosmos_summary(data),
                     "creative": self._creative_summary(data),
                     "bookshelf": await self._bookshelf_summary(data, unlocked=False),
+                    "skill_growth": self._skill_growth_summary(data),
                     "life_observation": self._life_observation_summary(data),
                     "daily_state": self._daily_state_summary(data.get("daily_state")),
                     "daily_timeline": self._daily_timeline_summary(data),
@@ -280,7 +283,7 @@ class PrivateCompanionPageApi:
                 {
                     "members": group.get("members") if isinstance(group.get("members"), dict) else {},
                     "recent_messages": self._limited_list(group.get("recent_messages"), 30),
-                    "topic_threads": self._limited_list(group.get("topic_threads"), 16),
+                    "topic_threads": self._group_topic_thread_items(group),
                     "group_episodes": self._limited_list(group.get("group_episodes"), 12),
                     "relationship_edges": group.get("relationship_edges") if isinstance(group.get("relationship_edges"), dict) else {},
                     "interjection_feedback": group.get("interjection_feedback") if isinstance(group.get("interjection_feedback"), dict) else {},
@@ -883,6 +886,72 @@ class PrivateCompanionPageApi:
             logger.error(f"[PrivateCompanionPage] 应用预设失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def update_skill_growth(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        skill_id = self._single_line(payload.get("id"), 40)
+        name = self._single_line(payload.get("name"), 32)
+        if not skill_id and not name:
+            return self._error("缺少技能名称")
+        try:
+            async with self.plugin._data_lock:
+                state = self.plugin.data.setdefault("skill_growth", {})
+                if not isinstance(state, dict):
+                    state = {}
+                    self.plugin.data["skill_growth"] = state
+                skills = state.setdefault("skills", {})
+                if not isinstance(skills, dict):
+                    skills = {}
+                    state["skills"] = skills
+
+                if payload.get("delete"):
+                    changed = bool(skill_id and skills.pop(skill_id, None) is not None)
+                    state["updated_ts"] = time.time()
+                    self.plugin._save_data_sync()
+                    return self._ok({"changed": changed, "message": "已删除技能", "skill_growth": self._skill_growth_summary(self.plugin.data)})
+
+                if not name:
+                    return self._error("缺少技能名称")
+                if not skill_id:
+                    skill_id = hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
+                existing = skills.get(skill_id) if isinstance(skills.get(skill_id), dict) else {}
+                level = max(1, min(6, self._int(payload.get("level")) or self._int(existing.get("level")) or 1))
+                exp = self._float(payload.get("exp"))
+                if exp <= 0 and isinstance(existing, dict):
+                    exp = self._float(existing.get("exp"))
+                if exp <= 0:
+                    exp = {1: 0, 2: 100, 3: 260, 4: 520, 5: 900, 6: 1400}.get(level, 0)
+                if hasattr(self.plugin, "_skill_level_from_exp"):
+                    level = self.plugin._skill_level_from_exp(exp)
+                raw_keywords = payload.get("keywords")
+                if isinstance(raw_keywords, list):
+                    keywords = [self._single_line(item, 24) for item in raw_keywords]
+                else:
+                    keywords = [self._single_line(item, 24) for item in re.split(r"[,，、\n]+", str(raw_keywords or ""))]
+                keywords = [item for item in keywords if item][:16] or [name]
+                skill = dict(existing) if isinstance(existing, dict) else {}
+                skill.update(
+                    {
+                        "id": skill_id,
+                        "name": name,
+                        "category": self._single_line(payload.get("category"), 20) or self._single_line(skill.get("category"), 20) or "能力",
+                        "keywords": keywords,
+                        "exp": round(max(0.0, exp), 2),
+                        "level": level,
+                        "level_title": self.plugin._skill_level_title(level) if hasattr(self.plugin, "_skill_level_title") else self._single_line(skill.get("level_title"), 24),
+                        "created_ts": self._float(skill.get("created_ts")) or time.time(),
+                        "last_trained_ts": self._float(skill.get("last_trained_ts")),
+                        "training_count": self._int(skill.get("training_count")),
+                        "recent_logs": skill.get("recent_logs") if isinstance(skill.get("recent_logs"), list) else [],
+                    }
+                )
+                skills[skill_id] = skill
+                state["updated_ts"] = time.time()
+                self.plugin._save_data_sync()
+                return self._ok({"message": "已保存技能", "skill_growth": self._skill_growth_summary(self.plugin.data)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新技能失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
     async def list_available_providers(self) -> dict[str, Any]:
         try:
             items = self._available_provider_items()
@@ -940,6 +1009,33 @@ class PrivateCompanionPageApi:
             display_name = nickname if nickname and nickname not in generic_names else user_id_text
         else:
             display_name = f"临时会话 · {user_id_text[:8]}"
+        relationship_stage = ""
+        rel_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
+        if isinstance(rel_state, dict):
+            relationship_stage = self._single_line(rel_state.get("stage"), 12)
+        profile_getter = getattr(self.plugin, "_relationship_profile", None)
+        if not relationship_stage and callable(profile_getter):
+            try:
+                profile = profile_getter(user)
+                if isinstance(profile, dict):
+                    relationship_stage = self._single_line(profile.get("level"), 12)
+            except Exception:
+                relationship_stage = ""
+        if relationship_stage not in {"亲近", "熟悉", "陌生"}:
+            persona_profile = user.get("persona_relationship") if isinstance(user.get("persona_relationship"), dict) else {}
+            relationship_stage = self._single_line(persona_profile.get("level"), 12) if isinstance(persona_profile, dict) else ""
+        if relationship_stage not in {"亲近", "熟悉", "陌生"}:
+            score = self._int(user.get("relationship_score"))
+            inbound_count = self._int(user.get("inbound_count"))
+            proactive_count = self._int(user.get("proactive_sent_count"))
+            reply_count = self._int(user.get("reply_count"))
+            reply_rate = reply_count / proactive_count if proactive_count > 0 else 0.0
+            if score >= 16 and reply_rate >= 0.35:
+                relationship_stage = "亲近"
+            elif score >= 3 or inbound_count >= 1 or reply_rate >= 0.2:
+                relationship_stage = "熟悉"
+            else:
+                relationship_stage = "陌生"
         return {
             "user_id": user_id_text,
             "display_name": display_name,
@@ -958,7 +1054,7 @@ class PrivateCompanionPageApi:
             "reply_count": user.get("reply_count", 0),
             "proactive_sent_count": user.get("proactive_sent_count", 0),
             "relationship_score": user.get("relationship_score", 0),
-            "relationship_stage": (user.get("relationship_state") or {}).get("stage", ""),
+            "relationship_stage": relationship_stage,
             "planned_reason": user.get("planned_proactive_reason", ""),
             "planned_action": user.get("planned_proactive_action", ""),
             "next_proactive_ts": user.get("next_proactive_at", 0),
@@ -975,6 +1071,14 @@ class PrivateCompanionPageApi:
     def _group_summary(self, group_id: str, group: dict[str, Any]) -> dict[str, Any]:
         atmosphere = group.get("atmosphere") if isinstance(group.get("atmosphere"), dict) else {}
         slang_terms = group.get("slang_terms") if isinstance(group.get("slang_terms"), list) else []
+        cleaner = getattr(self.plugin, "_cleanup_group_slang_terms", None)
+        if callable(cleaner):
+            try:
+                group_for_filter = deepcopy(group)
+                if cleaner(group_for_filter):
+                    slang_terms = group_for_filter.get("slang_terms") if isinstance(group_for_filter.get("slang_terms"), list) else []
+            except Exception:
+                pass
         members = group.get("members") if isinstance(group.get("members"), dict) else {}
         identity_count = sum(1 for item in members.values() if isinstance(item, dict) and item.get("identity_known"))
         return {
@@ -1001,6 +1105,133 @@ class PrivateCompanionPageApi:
             },
         }
 
+    def _group_topic_thread_items(self, group: dict[str, Any], limit: int = 16) -> list[dict[str, Any]]:
+        threads = group.get("topic_threads") if isinstance(group.get("topic_threads"), list) else []
+        members = group.get("members") if isinstance(group.get("members"), dict) else {}
+        now = time.time()
+        items: list[dict[str, Any]] = []
+        for index, raw in enumerate(threads[:limit]):
+            if not isinstance(raw, dict):
+                continue
+            started_ts = self._float(raw.get("started_ts"))
+            last_ts = self._float(raw.get("last_ts"))
+            duration_seconds = max(0.0, (last_ts or started_ts) - started_ts) if started_ts else 0.0
+            participants = raw.get("participants") if isinstance(raw.get("participants"), list) else []
+            participant_items = []
+            for user_id in participants[:8]:
+                uid = self._single_line(user_id, 40)
+                member = members.get(uid) if isinstance(members.get(uid), dict) else {}
+                name = self._single_line(
+                    member.get("display_name")
+                    or member.get("nickname")
+                    or member.get("name")
+                    or member.get("card")
+                    or uid,
+                    24,
+                )
+                if uid:
+                    participant_items.append({"id": uid, "name": name or uid})
+            examples = []
+            for example in (raw.get("recent_examples") if isinstance(raw.get("recent_examples"), list) else [])[-4:]:
+                if not isinstance(example, dict):
+                    continue
+                examples.append(
+                    {
+                        "name": self._single_line(example.get("name"), 24),
+                        "text": self._single_line(example.get("text"), 120),
+                        "time": self.plugin._format_timestamp_elapsed(example.get("ts", 0)),
+                    }
+                )
+            message_count = self._int(raw.get("message_count"))
+            freshness = max(0.0, now - last_ts) if last_ts else 0.0
+            heat = min(100, max(8, message_count * 10 + len(participant_items) * 8 - int(freshness / 600) * 5))
+            status = "活跃" if freshness <= 15 * 60 else "刚冷却" if freshness <= 90 * 60 else "历史"
+            title = self._single_line(raw.get("title") or raw.get("topic") or raw.get("summary"), 80)
+            items.append(
+                {
+                    "rank": index + 1,
+                    "title": title or "未命名话题",
+                    "summary": self._single_line(raw.get("summary"), 180),
+                    "message_count": message_count,
+                    "participant_count": len(participants),
+                    "participants": participant_items,
+                    "recent_examples": examples,
+                    "started": self.plugin._format_timestamp_elapsed(started_ts),
+                    "last_seen": self.plugin._format_timestamp_elapsed(last_ts),
+                    "duration": self._format_duration(duration_seconds),
+                    "heat": heat,
+                    "status": status,
+                    "bot_joined": bool(raw.get("bot_joined")),
+                }
+            )
+        return items
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds or 0))
+        if seconds < 60:
+            return "不到 1 分钟"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes} 分钟"
+        hours = minutes // 60
+        rest = minutes % 60
+        return f"{hours} 小时 {rest} 分钟" if rest else f"{hours} 小时"
+
+    def _skill_growth_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        state = data.get("skill_growth") if isinstance(data.get("skill_growth"), dict) else {}
+        skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        items: list[dict[str, Any]] = []
+        for raw in skills.values():
+            if not isinstance(raw, dict):
+                continue
+            level = self._int(raw.get("level")) or 1
+            exp = self._float(raw.get("exp"))
+            next_exp = self.plugin._skill_next_exp(level) if hasattr(self.plugin, "_skill_next_exp") else None
+            prev_exp = {1: 0, 2: 100, 3: 260, 4: 520, 5: 900, 6: 1400}.get(level, 0)
+            if next_exp:
+                progress = max(0, min(100, int(((exp - prev_exp) / max(1, next_exp - prev_exp)) * 100)))
+            else:
+                progress = 100
+            logs = raw.get("recent_logs") if isinstance(raw.get("recent_logs"), list) else []
+            keywords = raw.get("keywords") if isinstance(raw.get("keywords"), list) else []
+            items.append(
+                {
+                    "id": self._single_line(raw.get("id"), 32),
+                    "name": self._single_line(raw.get("name"), 32),
+                    "category": self._single_line(raw.get("category"), 24),
+                    "keywords": [self._single_line(item, 24) for item in keywords if self._single_line(item, 24)][:16],
+                    "level": level,
+                    "level_title": self.plugin._skill_level_title(level) if hasattr(self.plugin, "_skill_level_title") else self._single_line(raw.get("level_title"), 24),
+                    "description": self.plugin._skill_level_description(level) if hasattr(self.plugin, "_skill_level_description") else "",
+                    "exp": round(exp, 2),
+                    "next_exp": next_exp,
+                    "progress": progress,
+                    "training_count": self._int(raw.get("training_count")),
+                    "last_trained": self.plugin._format_timestamp_elapsed(raw.get("last_trained_ts", 0)),
+                    "recent_logs": [
+                        {
+                            "activity": self._single_line(log.get("activity"), 80),
+                            "exp": self._float(log.get("exp")),
+                            "time": self.plugin._format_timestamp_elapsed(log.get("ts", 0)),
+                            "level_up": bool(log.get("level_up")),
+                        }
+                        for log in logs[-4:]
+                        if isinstance(log, dict)
+                    ],
+                }
+            )
+        items.sort(key=lambda item: (item["level"], item["exp"], item["training_count"]), reverse=True)
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_skill_growth_simulation", False)),
+            "rate": float(getattr(self.plugin, "skill_growth_rate", 1.0) or 1.0),
+            "schedule_influence": bool(getattr(self.plugin, "enable_skill_growth_schedule_influence", False)),
+            "schedule_influence_strength": float(getattr(self.plugin, "skill_growth_schedule_influence_strength", 0.35) or 0.0),
+            "updated": self.plugin._format_timestamp_elapsed(state.get("updated_ts", 0)),
+            "skill_count": len(items),
+            "items": items[:24],
+        }
+
     def _feature_flags(self) -> dict[str, bool]:
         keys = [
             "enable_mai_style_integration",
@@ -1013,6 +1244,10 @@ class PrivateCompanionPageApi:
             "enable_relationship_state_machine",
             "enable_dialogue_episode_memory",
             "enable_open_loop_tracking",
+            "enable_humanized_states",
+            "inject_passive_states",
+            "enable_cycle_state",
+            "enable_skill_growth_simulation",
             "enable_environment_perception",
             "enable_holiday_perception",
             "enable_platform_perception",
@@ -1041,7 +1276,9 @@ class PrivateCompanionPageApi:
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
             "enable_news_integration",
+            "enable_news_boredom_read",
             "enable_web_exploration",
+            "enable_web_exploration_boredom_search",
             "enable_qzone_integration",
             "enable_qzone_life_publish",
             "enable_private_reading_integration",
@@ -1198,6 +1435,7 @@ class PrivateCompanionPageApi:
             "worldview_adaptation_prompt",
             "quiet_hours",
             "daily_token_limit",
+            "humanized_state_intensity",
             "check_interval_seconds",
             "idle_minutes",
             "min_interval_minutes",
@@ -1232,6 +1470,11 @@ class PrivateCompanionPageApi:
             "max_companion_memory_items",
             "max_learned_expression_items",
             "max_dialogue_episodes",
+            "enable_skill_growth_simulation",
+            "skill_growth_rate",
+            "skill_growth_custom_skills",
+            "enable_skill_growth_schedule_influence",
+            "skill_growth_schedule_influence_strength",
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
             "bilibili_boredom_min_interval_hours",
@@ -1267,6 +1510,7 @@ class PrivateCompanionPageApi:
             "private_reading_share_probability",
             "private_reading_ask_probability",
             "private_reading_default_keywords",
+            "private_reading_blocked_tags",
             "enable_unanswered_screen_peek_followup",
             "unanswered_screen_peek_after_minutes",
             "unanswered_screen_peek_cooldown_minutes",
@@ -1301,6 +1545,7 @@ class PrivateCompanionPageApi:
                 "private_reading_share_probability": getattr(self.plugin, "jm_cosmos_share_probability", 0.18),
                 "private_reading_ask_probability": getattr(self.plugin, "private_reading_ask_probability", 0.16),
                 "private_reading_default_keywords": getattr(self.plugin, "jm_cosmos_default_keywords", ""),
+                "private_reading_blocked_tags": getattr(self.plugin, "private_reading_blocked_tags", "連載中,長篇,青年漫"),
                 "group_repeat_follow_probability": int(round(float(getattr(self.plugin, "group_repeat_follow_probability", 0.18) or 0) * 100)),
                 "group_repeat_interrupt_probability": int(round(float(getattr(self.plugin, "group_repeat_interrupt_probability", 0.10) or 0) * 100)),
                 "group_repeat_interrupt_probability_step": int(round(float(getattr(self.plugin, "group_repeat_interrupt_probability_step", 0.12) or 0) * 100)),
@@ -1596,6 +1841,7 @@ class PrivateCompanionPageApi:
             "private_reading_share_probability": "jm_cosmos_share_probability",
             "private_reading_ask_probability": "private_reading_ask_probability",
             "private_reading_default_keywords": "jm_cosmos_default_keywords",
+            "private_reading_blocked_tags": "private_reading_blocked_tags",
         }
         if key in private_reading_attr_map:
             setattr(self.plugin, private_reading_attr_map[key], value)
@@ -1666,6 +1912,9 @@ class PrivateCompanionPageApi:
             "enable_relationship_state_machine",
             "enable_dialogue_episode_memory",
             "enable_open_loop_tracking",
+            "enable_humanized_states",
+            "inject_passive_states",
+            "enable_cycle_state",
             "enable_environment_perception",
             "enable_holiday_perception",
             "enable_platform_perception",
@@ -1694,8 +1943,10 @@ class PrivateCompanionPageApi:
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
             "enable_news_integration",
+            "enable_news_boredom_read",
             "enable_news_daily_hot_read",
             "enable_web_exploration",
+            "enable_web_exploration_boredom_search",
             "enable_qzone_integration",
             "enable_qzone_life_publish",
             "enable_private_reading_integration",
@@ -1787,6 +2038,11 @@ class PrivateCompanionPageApi:
             "max_companion_memory_items",
             "max_learned_expression_items",
             "max_dialogue_episodes",
+            "enable_skill_growth_simulation",
+            "skill_growth_rate",
+            "skill_growth_custom_skills",
+            "enable_skill_growth_schedule_influence",
+            "skill_growth_schedule_influence_strength",
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
             "bilibili_boredom_min_interval_hours",
@@ -1819,6 +2075,7 @@ class PrivateCompanionPageApi:
             "private_reading_share_probability",
             "private_reading_ask_probability",
             "private_reading_default_keywords",
+            "private_reading_blocked_tags",
             "enable_unanswered_screen_peek_followup",
             "unanswered_screen_peek_after_minutes",
             "unanswered_screen_peek_cooldown_minutes",
@@ -1863,6 +2120,11 @@ class PrivateCompanionPageApi:
             return mode if mode in {"persona", "soft", "original"} else "persona"
         if key == "worldview_adaptation_prompt":
             return str(value or "").strip()[:1200]
+        if key == "humanized_state_intensity":
+            try:
+                return max(0, min(100, int(value)))
+            except (TypeError, ValueError):
+                return 50
         if key in {
             "check_interval_seconds",
             "daily_token_limit",
@@ -1936,11 +2198,17 @@ class PrivateCompanionPageApi:
             "private_reading_ask_probability",
             "creative_inspiration_probability",
             "creative_share_probability",
+            "skill_growth_schedule_influence_strength",
         }:
             try:
                 return max(0.0, min(1.0, float(value)))
             except (TypeError, ValueError):
                 return 0.0
+        if key == "skill_growth_rate":
+            try:
+                return max(0.1, min(3.0, float(value)))
+            except (TypeError, ValueError):
+                return 1.0
         if key in {
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
@@ -1963,13 +2231,21 @@ class PrivateCompanionPageApi:
             "enable_lunar_perception",
             "enable_solar_term_perception",
             "enable_almanac_perception",
+            "enable_humanized_states",
+            "inject_passive_states",
+            "enable_cycle_state",
             "enable_worldbook_member_recognition",
             "enable_group_scene_awareness",
             "enable_group_repeat_follow",
             "enable_forward_message_adaptation",
+            "enable_skill_growth_simulation",
+            "enable_skill_growth_schedule_influence",
             "forward_message_parse_nested",
             "forward_message_image_vision",
             "enable_semantic_message_debounce",
+            "enable_humanized_states",
+            "inject_passive_states",
+            "enable_cycle_state",
             "enable_group_conversation_followup",
             "worldbook_auto_import",
             "worldbook_member_match_aliases",
@@ -2141,6 +2417,7 @@ class PrivateCompanionPageApi:
         return {
             "enabled": bool(getattr(self.plugin, "enable_news_integration", False)),
             "boredom_read_enabled": bool(getattr(self.plugin, "enable_news_boredom_read", False)),
+            "daily_hot_enabled": bool(getattr(self.plugin, "enable_news_daily_hot_read", False)),
             "source_count": source_count,
             "last_read_at": self.plugin._format_timestamp_elapsed(state.get("last_read_at", 0)),
             "last_status": self._single_line(state.get("last_status"), 80),
@@ -2167,14 +2444,14 @@ class PrivateCompanionPageApi:
         state = data.get("web_exploration") if isinstance(data.get("web_exploration"), dict) else {}
         digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
         notes = state.get("notes") if isinstance(state.get("notes"), list) else []
+        history = self._browsing_history_entries(data)
         try:
-            available = bool(getattr(self.plugin, "_astrbot_web_search_available", lambda _umo="": False)(""))
+            available = bool(getattr(self.plugin, "_astrbot_any_web_search_available", lambda: False)())
         except Exception:
             available = False
         return {
             "enabled": bool(getattr(self.plugin, "enable_web_exploration", False)),
             "boredom_search_enabled": bool(getattr(self.plugin, "enable_web_exploration_boredom_search", False)),
-            "daily_hot_enabled": bool(getattr(self.plugin, "enable_news_daily_hot_read", False)),
             "available": available,
             "last_explore_at": self.plugin._format_timestamp_elapsed(state.get("last_explore_at", 0)),
             "last_status": self._single_line(state.get("last_status"), 80),
@@ -2190,6 +2467,8 @@ class PrivateCompanionPageApi:
                 "source_url": self._single_line(digest.get("source_url"), 400),
             },
             "note_count": len(notes),
+            "history_count": len(history),
+            "history": history,
             "recent_notes": [
                 {
                     "topic": self._single_line(item.get("topic"), 80),
@@ -2201,6 +2480,89 @@ class PrivateCompanionPageApi:
                 if isinstance(item, dict)
             ],
         }
+
+    def _browsing_history_entries(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        news_state = data.get("news_integration") if isinstance(data.get("news_integration"), dict) else {}
+        news_digest = news_state.get("last_digest") if isinstance(news_state.get("last_digest"), dict) else {}
+        news_digests = news_state.get("digests") if isinstance(news_state.get("digests"), list) else []
+        news_items = [item for item in news_digests if isinstance(item, dict)]
+        if news_digest and not any(
+            self._single_line(item.get("selected_key"), 32) == self._single_line(news_digest.get("selected_key"), 32)
+            and self._float(item.get("created_ts")) == self._float(news_digest.get("created_ts"))
+            for item in news_items
+        ):
+            news_items.append(news_digest)
+        for news_digest in news_items:
+            headline = self._single_line(news_digest.get("headline") or news_digest.get("topic"), 120)
+            impression = self._single_line(news_digest.get("impression"), 1000)
+            selected_source = self._single_line(news_digest.get("selected_source"), 40)
+            selected_link = self._single_line(news_digest.get("selected_link"), 400)
+            created_ts = self._float(news_digest.get("created_ts"))
+            entries.append(
+                {
+                    "_ts": created_ts,
+                    "source": "news",
+                    "source_label": "新闻阅读",
+                    "date": self.plugin._format_timestamp_elapsed(created_ts) or "今日新闻",
+                    "generated_at": self.plugin._format_timestamp_elapsed(created_ts),
+                    "title": headline or "新闻阅读",
+                    "query": "",
+                    "intro": impression or "这次新闻阅读没有留下明显印象。",
+                    "content": "\n\n".join(
+                        part
+                        for part in (
+                            f"新闻见闻：{headline}" if headline else "",
+                            impression,
+                            f"来源：{selected_source}" if selected_source else "",
+                            f"链接：{selected_link}" if selected_link else "",
+                        )
+                        if part
+                    ) or "这次新闻阅读没有留下正文。",
+                    "source_title": selected_source,
+                    "source_url": selected_link,
+                    "tags": ["新闻阅读"],
+                }
+            )
+        web_state = data.get("web_exploration") if isinstance(data.get("web_exploration"), dict) else {}
+        web_notes = web_state.get("notes") if isinstance(web_state.get("notes"), list) else []
+        for item in [note for note in web_notes if isinstance(note, dict)]:
+            topic = self._single_line(item.get("topic"), 100)
+            query = self._single_line(item.get("query"), 100)
+            note = self._single_line(item.get("note"), 1000)
+            source_title = self._single_line(item.get("source_title"), 120)
+            source_url = self._single_line(item.get("source_url"), 400)
+            created_ts = self._float(item.get("created_ts"))
+            entries.append(
+                {
+                    "_ts": created_ts,
+                    "source": self._single_line(item.get("source"), 40) or "web_exploration",
+                    "source_label": self._single_line(item.get("source_label"), 40) or "主动搜索",
+                    "date": self.plugin._format_timestamp_elapsed(created_ts) or "某次搜索",
+                    "generated_at": self.plugin._format_timestamp_elapsed(created_ts),
+                    "title": topic or query or "主动搜索",
+                    "query": query,
+                    "intro": note or "这次搜索没有留下明显印象。",
+                    "content": "\n\n".join(
+                        part
+                        for part in (
+                            f"搜索词：{query}" if query else "",
+                            f"搜索动机：{self._single_line(item.get('reason'), 160)}" if self._single_line(item.get("reason"), 160) else "",
+                            f"笔记：{note}" if note else "",
+                            f"主要来源：{source_title}" if source_title else "",
+                            f"链接：{source_url}" if source_url else "",
+                        )
+                        if part
+                    ) or "这次主动搜索没有留下正文。",
+                    "source_title": source_title,
+                    "source_url": source_url,
+                    "tags": ["主动搜索"],
+                }
+            )
+        entries.sort(key=lambda item: self._float(item.get("_ts")))
+        for item in entries:
+            item.pop("_ts", None)
+        return entries
 
     def _qzone_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         state = data.get("qzone_integration") if isinstance(data.get("qzone_integration"), dict) else {}
@@ -2289,6 +2651,7 @@ class PrivateCompanionPageApi:
                     "type": "jm_album",
                     "title": last_album.get("title"),
                     "album_id": last_album.get("id"),
+                    "description": last_album.get("description") or last_album.get("intro") or last_album.get("summary"),
                     "keyword": last_album.get("keyword"),
                     "author": last_album.get("author"),
                     "tags": last_album.get("tags"),
@@ -2296,6 +2659,7 @@ class PrivateCompanionPageApi:
                     "impression": last_album.get("impression"),
                     "reading_impression": last_album.get("reading_impression") or last_album.get("impression"),
                     "vision": last_album.get("vision"),
+                    "page_comments": last_album.get("page_comments") if isinstance(last_album.get("page_comments"), list) else [],
                     "image_count": last_album.get("image_count"),
                     "pages": last_album.get("pages") if isinstance(last_album.get("pages"), list) else [],
                     "sampled_pages": last_album.get("sampled_pages") if isinstance(last_album.get("sampled_pages"), list) else [],
@@ -2326,62 +2690,7 @@ class PrivateCompanionPageApi:
                     "created": self.plugin._format_timestamp_elapsed(item.get("created_at", 0)),
                 }
             )
-        browsing_entries: list[dict[str, Any]] = []
-        news_state = data.get("news_integration") if isinstance(data.get("news_integration"), dict) else {}
-        news_digest = news_state.get("last_digest") if isinstance(news_state.get("last_digest"), dict) else {}
-        if news_digest:
-            headline = self._single_line(news_digest.get("headline") or news_digest.get("topic"), 120)
-            impression = self._single_line(news_digest.get("impression"), 1000)
-            selected_source = self._single_line(news_digest.get("selected_source"), 40)
-            selected_link = self._single_line(news_digest.get("selected_link"), 400)
-            browsing_entries.append(
-                {
-                    "date": self.plugin._format_timestamp_elapsed(news_digest.get("created_ts", 0)) or "今日新闻",
-                    "generated_at": self.plugin._format_timestamp_elapsed(news_digest.get("created_ts", 0)),
-                    "title": headline or "新闻阅读",
-                    "intro": impression or "这次新闻阅读没有留下明显印象。",
-                    "content": "\n\n".join(
-                        part
-                        for part in (
-                            f"新闻见闻：{headline}" if headline else "",
-                            impression,
-                            f"来源：{selected_source}" if selected_source else "",
-                            f"链接：{selected_link}" if selected_link else "",
-                        )
-                        if part
-                    ) or "这次新闻阅读没有留下正文。",
-                    "tags": ["新闻阅读"],
-                }
-            )
-        web_state = data.get("web_exploration") if isinstance(data.get("web_exploration"), dict) else {}
-        web_notes = web_state.get("notes") if isinstance(web_state.get("notes"), list) else []
-        for item in [note for note in web_notes if isinstance(note, dict)][-40:]:
-            topic = self._single_line(item.get("topic"), 100)
-            query = self._single_line(item.get("query"), 100)
-            note = self._single_line(item.get("note"), 1000)
-            source_title = self._single_line(item.get("source_title"), 120)
-            source_url = self._single_line(item.get("source_url"), 400)
-            browsing_entries.append(
-                {
-                    "date": self.plugin._format_timestamp_elapsed(item.get("created_ts", 0)) or "某次搜索",
-                    "generated_at": self.plugin._format_timestamp_elapsed(item.get("created_ts", 0)),
-                    "title": topic or query or "主动搜索",
-                    "intro": note or "这次搜索没有留下明显印象。",
-                    "content": "\n\n".join(
-                        part
-                        for part in (
-                            f"搜索词：{query}" if query else "",
-                            f"搜索动机：{self._single_line(item.get('reason'), 160)}" if self._single_line(item.get("reason"), 160) else "",
-                            f"笔记：{note}" if note else "",
-                            f"主要来源：{source_title}" if source_title else "",
-                            f"链接：{source_url}" if source_url else "",
-                        )
-                        if part
-                    ) or "这次主动搜索没有留下正文。",
-                    "tags": ["主动搜索"],
-                }
-            )
-        locked_count = (1 if diaries else 0) + (1 if browsing_entries else 0) + len(jm_items)
+        locked_count = (1 if diaries else 0) + len(jm_items)
         secret_books: list[dict[str, Any]] = []
         if unlocked:
             diary_entries = []
@@ -2414,24 +2723,43 @@ class PrivateCompanionPageApi:
                         "created": diary_entries[-1].get("generated_at", ""),
                     }
             )
-            if browsing_entries:
-                secret_books.append(
-                    {
-                        "id": "browsing-main",
-                        "kind": "browsing",
-                        "title": "浏览记录",
-                        "intro": f"这里收着 {len(browsing_entries)} 条新闻阅读和主动搜索留下的记录。",
-                        "content": browsing_entries[-1].get("content") or "这本浏览记录暂时没有可读内容。",
-                        "entries": browsing_entries,
-                        "created": browsing_entries[-1].get("generated_at", ""),
-                        "tags": ["新闻阅读", "主动搜索"],
-                    }
-                )
             for item in jm_items[-18:]:
                 album_id = self._single_line(item.get("album_id") or item.get("id"), 32)
                 pages = item.get("pages") if isinstance(item.get("pages"), list) else []
                 reading_impression = self._single_line(item.get("reading_impression") or item.get("impression"), 1000)
                 vision_impression = self._single_line(item.get("vision"), 1000)
+                album_description = self._single_line(
+                    item.get("description")
+                    or item.get("intro")
+                    or item.get("summary")
+                    or item.get("desc"),
+                    600,
+                )
+                if not album_description:
+                    detail_parts = []
+                    author_text = self._single_line(item.get("author"), 40)
+                    photo_count = self._int(item.get("photo_count")) or self._int(item.get("image_count"))
+                    tag_text = "、".join(
+                        self._single_line(tag, 24)
+                        for tag in (item.get("tags") if isinstance(item.get("tags"), list) else [])[:6]
+                        if self._single_line(tag, 24)
+                    )
+                    if author_text:
+                        detail_parts.append(f"作者：{author_text}")
+                    if photo_count:
+                        detail_parts.append(f"页数：{photo_count}")
+                    if tag_text:
+                        detail_parts.append(f"标签：{tag_text}")
+                    album_description = "；".join(detail_parts) or "这本藏书暂时没有整理出明确简介。"
+                page_comment_map: dict[int, str] = {}
+                raw_comments = item.get("page_comments") if isinstance(item.get("page_comments"), list) else []
+                for comment_item in raw_comments:
+                    if not isinstance(comment_item, dict):
+                        continue
+                    page_no = self._int(comment_item.get("page"))
+                    comment_text = self._single_line(comment_item.get("comment"), 100)
+                    if page_no > 0 and comment_text:
+                        page_comment_map[page_no] = comment_text
                 page_items = []
                 data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
                 for page in pages:
@@ -2450,6 +2778,7 @@ class PrivateCompanionPageApi:
                         {
                             "index": index,
                             "src": page_src,
+                            "comment": page_comment_map.get(index, ""),
                         }
                     )
                 cover_src = ""
@@ -2461,7 +2790,7 @@ class PrivateCompanionPageApi:
                         "kind": "jm_album",
                         "album_id": album_id,
                         "title": self._single_line(item.get("title"), 100) or "未命名藏书",
-                        "intro": self._single_line(reading_impression or vision_impression, 240) or "只留下了一点模糊的阅读印象。",
+                        "intro": self._single_line(album_description, 600),
                         "reading_impression": reading_impression or vision_impression,
                         "author": self._single_line(item.get("author"), 40),
                         "progress": f"{len(page_items) or self._int(item.get('image_count')) or self._int(item.get('photo_count'))} 页",
@@ -2480,6 +2809,10 @@ class PrivateCompanionPageApi:
                         else [],
                         "cover_src": cover_src,
                         "pages": page_items,
+                        "page_comments": [
+                            {"page": page, "comment": comment}
+                            for page, comment in sorted(page_comment_map.items())
+                        ],
                     }
                 )
         return {
@@ -2495,11 +2828,11 @@ class PrivateCompanionPageApi:
     def _proactive_candidate_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         raw = data.get("proactive_candidate_pool") if isinstance(data.get("proactive_candidate_pool"), list) else []
         now = time.time()
-        items: list[dict[str, Any]] = []
+        buckets: list[dict[str, Any]] = []
         counts: dict[str, int] = {}
         source_counts: dict[str, int] = {}
         total_attempts = 0
-        for item in raw[-120:]:
+        for item in raw[-240:]:
             if not isinstance(item, dict):
                 continue
             repeat_count = max(1, self._int(item.get("repeat_count")))
@@ -2520,27 +2853,75 @@ class PrivateCompanionPageApi:
                 reason = "bookshelf_recommendation_request"
             if action == "jm_cosmos_read":
                 action = "bookshelf_reading"
-            items.append(
-                {
-                    "id": self._single_line(item.get("id"), 20),
-                    "user_id": self._single_line(item.get("user_id"), 32),
-                    "source": display_source,
-                    "reason": reason,
-                    "action": action,
-                    "topic": self._single_line(item.get("topic"), 100),
-                    "motive": self._single_line(item.get("motive"), 180),
-                    "score": self._int(item.get("score")),
-                    "status": status,
-                    "note": self._single_line(item.get("note"), 160),
-                    "repeat_count": repeat_count,
-                    "created": self.plugin._format_timestamp_elapsed(created),
-                    "last_seen": self.plugin._format_timestamp_elapsed(last_seen),
-                    "scheduled": self.plugin._format_timestamp_elapsed(scheduled),
-                    "scheduled_ts": scheduled,
-                    "last_seen_ts": last_seen,
-                    "is_due": bool(scheduled and scheduled <= now),
-                }
-            )
+            signature = self._single_line(item.get("signature"), 120)
+            topic = self._single_line(item.get("topic"), 100)
+            motive = self._single_line(item.get("motive"), 180)
+            note = self._single_line(item.get("note"), 160)
+            user_id = self._single_line(item.get("user_id"), 32)
+            merged = None
+            for existing in reversed(buckets):
+                if existing.get("status") != status:
+                    continue
+                if existing.get("user_id") != user_id:
+                    continue
+                if existing.get("source") != display_source or existing.get("reason") != reason:
+                    continue
+                if existing.get("action") != action or existing.get("note") != note:
+                    continue
+                old_signature = str(existing.get("_signature") or "")
+                if signature and old_signature:
+                    similar = bool(getattr(self.plugin, "_topic_signature_similar", lambda a, b: a == b)(signature, old_signature))
+                else:
+                    similar = (topic or motive) == (existing.get("topic") or existing.get("motive"))
+                if not similar:
+                    continue
+                if max(last_seen, scheduled, created) - self._float(existing.get("_first_ts")) > 36 * 3600:
+                    continue
+                merged = existing
+                break
+            if merged is None:
+                buckets.append(
+                    {
+                        "id": self._single_line(item.get("id"), 20),
+                        "user_id": user_id,
+                        "source": display_source,
+                        "reason": reason,
+                        "action": action,
+                        "topic": topic,
+                        "motive": motive,
+                        "score": self._int(item.get("score")),
+                        "status": status,
+                        "note": note,
+                        "repeat_count": repeat_count,
+                        "created_ts": created,
+                        "last_seen_ts": last_seen,
+                        "scheduled_ts": scheduled,
+                        "is_due": bool(scheduled and scheduled <= now),
+                        "_signature": signature,
+                        "_first_ts": max(created, scheduled, last_seen),
+                    }
+                )
+                continue
+            merged["repeat_count"] = self._int(merged.get("repeat_count")) + repeat_count
+            merged["last_seen_ts"] = max(self._float(merged.get("last_seen_ts")), last_seen, created)
+            merged["scheduled_ts"] = max(self._float(merged.get("scheduled_ts")), scheduled)
+            merged["score"] = max(self._int(merged.get("score")), self._int(item.get("score")))
+            if topic:
+                merged["topic"] = topic
+            if motive:
+                merged["motive"] = motive
+            merged["is_due"] = bool(merged.get("scheduled_ts") and self._float(merged.get("scheduled_ts")) <= now)
+        items: list[dict[str, Any]] = []
+        for item in buckets:
+            created = self._float(item.get("created_ts"))
+            last_seen = self._float(item.get("last_seen_ts")) or created
+            scheduled = self._float(item.get("scheduled_ts"))
+            item.pop("_signature", None)
+            item.pop("_first_ts", None)
+            item["created"] = self.plugin._format_timestamp_elapsed(created)
+            item["last_seen"] = self.plugin._format_timestamp_elapsed(last_seen)
+            item["scheduled"] = self.plugin._format_timestamp_elapsed(scheduled)
+            items.append(item)
         items.sort(key=lambda item: item.get("last_seen_ts") or item.get("scheduled_ts") or 0, reverse=True)
         return {
             "total": total_attempts,

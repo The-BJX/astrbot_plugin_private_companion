@@ -93,7 +93,7 @@
           <button type="submit">新增对象</button>
         </form>
         <div class="table-wrap">
-          <table>
+          <table class="private-user-table">
             <thead>
               <tr>
                 <th>用户</th>
@@ -111,30 +111,30 @@
       </section>
 
       <section class="panel" id="panel-group">
-        <div class="section-head">
-          <h2>群聊观测</h2>
-          <input id="groupFilter" type="search" placeholder="筛选群号" />
+        <div class="group-page-head">
+          <div>
+            <h2>群聊观测</h2>
+            <span class="muted">管理群聊观察、名单状态、话题线和插话反馈</span>
+          </div>
+          <input id="groupFilter" type="search" placeholder="筛选群号 / 群名" />
         </div>
-        <form id="addGroupForm" class="inline-form manage-form">
-          <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
-          <label>名单 <select name="list_mode"><option value="none">只创建观测</option><option value="whitelist">加入白名单</option><option value="blacklist">加入黑名单</option></select></label>
-          <button type="submit">新增群聊</button>
-        </form>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>群</th>
-                <th>模式</th>
-                <th>气氛</th>
-                <th>积累</th>
-                <th>最近</th>
-              </tr>
-            </thead>
-            <tbody id="groupRows"></tbody>
-          </table>
+        <div class="group-add-card">
+          <form id="addGroupForm" class="inline-form manage-form">
+            <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
+            <label>名单 <select name="list_mode"><option value="none">只创建观测</option><option value="whitelist">加入白名单</option><option value="blacklist">加入黑名单</option></select></label>
+            <button type="submit">新增群聊</button>
+          </form>
         </div>
-        <article class="detail" id="groupDetail"></article>
+        <div class="group-workbench">
+          <aside class="group-list-panel">
+            <div class="group-list-head">
+              <b>群列表</b>
+              <span id="groupListCount" class="muted"></span>
+            </div>
+            <div id="groupRows" class="group-card-list"></div>
+          </aside>
+          <article class="detail group-detail-panel" id="groupDetail"></article>
+        </div>
       </section>
 
       <section class="panel" id="panel-worldbook">
@@ -240,6 +240,34 @@
             <h2>日内状态变化</h2>
             <div id="dailyTimeline" class="timeline-list"></div>
           </article>
+          <article class="wide skill-growth-shell">
+            <details class="skill-growth-drawer">
+              <summary>
+                <span>技能成长</span>
+                <small>默认收起，展开后查看等级、训练记录和管理项</small>
+              </summary>
+              <details class="skill-manage-drawer">
+                <summary>管理技能</summary>
+                <form id="skillAddForm" class="inline-form manage-form skill-add-form">
+                  <label>技能 <input name="name" maxlength="32" required /></label>
+                  <label>分类 <input name="category" maxlength="20" placeholder="能力" /></label>
+                  <label>等级
+                    <select name="level">
+                      <option value="1">Lv.1</option>
+                      <option value="2">Lv.2</option>
+                      <option value="3">Lv.3</option>
+                      <option value="4">Lv.4</option>
+                      <option value="5">Lv.5</option>
+                      <option value="6">Lv.6</option>
+                    </select>
+                  </label>
+                  <label>关键词 <input name="keywords" maxlength="160" placeholder="逗号分隔" /></label>
+                  <button type="submit">新增技能</button>
+                </form>
+              </details>
+              <div id="skillGrowthPanel" class="skill-growth-panel"></div>
+            </details>
+          </article>
           <article class="wide">
             <h2>用户交互影响</h2>
             <div id="interactionImpact" class="impact-list"></div>
@@ -320,7 +348,7 @@
               <div class="drawer-head">
                 <div>
                   <h2>抽屉夹层</h2>
-                  <p class="section-desc">密码由 Bot 自己记着，需要在聊天里自然询问。</p>
+                  <p class="section-desc">需要密码</p>
                 </div>
                 <span id="bookshelfLockState" class="module-badge">未解锁</span>
               </div>
@@ -546,6 +574,11 @@
               <label>原始记忆上限 <input name="max_companion_memory_items" type="number" min="1" /></label>
               <label>表达样本上限 <input name="max_learned_expression_items" type="number" min="1" /></label>
               <label>私聊片段上限 <input name="max_dialogue_episodes" type="number" min="1" /></label>
+              <label class="toggle-row"><input name="enable_skill_growth_simulation" type="checkbox" /> <span>启用技能成长模拟</span></label>
+              <label>技能成长倍率 <input name="skill_growth_rate" type="number" min="0.1" max="3" step="0.1" /></label>
+              <label>自定义技能 <input name="skill_growth_custom_skills" type="text" maxlength="160" /></label>
+              <label class="toggle-row"><input name="enable_skill_growth_schedule_influence" type="checkbox" /> <span>技能影响日程</span></label>
+              <label>日程影响强度 <input name="skill_growth_schedule_influence_strength" type="number" min="0" max="1" step="0.05" /></label>
               <button type="submit">保存记忆学习</button>
             </form>
           </article>
@@ -582,6 +615,7 @@
                 <label>主动提起概率 <input name="private_reading_share_probability" type="number" min="0" max="1" step="0.05" /></label>
                 <label>征求推荐概率 <input name="private_reading_ask_probability" type="number" min="0" max="1" step="0.05" /></label>
                 <label>默认搜索关键词 <input name="private_reading_default_keywords" type="text" maxlength="120" /></label>
+                <label>过滤标签 <input name="private_reading_blocked_tags" type="text" maxlength="120" /></label>
               </div>
               <div class="module-subgroup">
                 <h3>私下创作</h3>

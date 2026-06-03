@@ -460,6 +460,9 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     today = _today_key()
     state = plugin.data.get("daily_state", {})
     plan = plugin.data.get("daily_plan", {})
+    persona = plugin._get_default_persona_prompt()
+    schedule_persona = _single_line(getattr(plugin, "schedule_persona_prompt", ""), 1200)
+    schedule_worldview = _single_line(getattr(plugin, "schedule_worldview_prompt", ""), 1200)
     can_do = plugin._format_can_do_for_prompt()
     calendar_context = plugin._format_calendar_context_for_prompt()
     yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
@@ -501,6 +504,16 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 
 【本次输入】
 日期：{today}
+
+【AstrBot 默认人格】
+{persona}
+
+【生活/日程人设补充】
+{schedule_persona or "（无）"}
+
+【生活/世界观补充】
+{schedule_worldview or "（无）"}
+
 当前状态：
 {plugin._format_state_for_prompt(state if isinstance(state, dict) else {})}
 

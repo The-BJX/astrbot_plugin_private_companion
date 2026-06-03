@@ -14,14 +14,17 @@ import re
 import shutil
 import sys
 import time
+import unicodedata
 import uuid
 import zoneinfo
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from http.cookies import SimpleCookie
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from xml.etree import ElementTree as ET
 
 from astrbot.api import AstrBotConfig, logger
@@ -237,7 +240,7 @@ class _CapturedSendMessageCall:
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "2.5.0",
+    "2.6.0",
 )
 class PrivateCompanionPlugin(Star):
     @staticmethod
@@ -358,6 +361,12 @@ class PrivateCompanionPlugin(Star):
         self.segmented_proactive_split_words = [str(item) for item in split_words] if isinstance(split_words, list) else ["。", "？", "！", "~", "…"]
         self.enable_segmented_proactive_content_cleanup = self._cfg_bool(c, "enable_segmented_proactive_content_cleanup", False)
         self.segmented_proactive_content_cleanup_rule = str(c.get("segmented_proactive_content_cleanup_rule", r"[\n]"))
+        cleanup_words = c.get("segmented_proactive_content_cleanup_words", ["\n"])
+        self.segmented_proactive_content_cleanup_words = (
+            [str(item) for item in cleanup_words if str(item) != ""]
+            if isinstance(cleanup_words, list)
+            else ["\n"]
+        )
         self.segmented_proactive_interval_method = self._cfg_str(c, "segmented_proactive_interval_method", "log", "log")
         if self.segmented_proactive_interval_method not in {"random", "log"}:
             self.segmented_proactive_interval_method = "log"
@@ -435,6 +444,11 @@ class PrivateCompanionPlugin(Star):
         self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
         self.enable_dialogue_episode_memory = self._cfg_bool(c, "enable_dialogue_episode_memory", True)
         self.enable_open_loop_tracking = self._cfg_bool(c, "enable_open_loop_tracking", True)
+        self.enable_skill_growth_simulation = self._cfg_bool(c, "enable_skill_growth_simulation", True)
+        self.skill_growth_rate = self._cfg_float(c, "skill_growth_rate", 1.0, 0.1)
+        self.skill_growth_custom_skills = self._cfg_str(c, "skill_growth_custom_skills", "")
+        self.enable_skill_growth_schedule_influence = self._cfg_bool(c, "enable_skill_growth_schedule_influence", True)
+        self.skill_growth_schedule_influence_strength = max(0.0, min(1.0, self._cfg_float(c, "skill_growth_schedule_influence_strength", 0.35, 0.0)))
         self.memory_refresh_interval_minutes = self._cfg_int(c, "memory_refresh_interval_minutes", 360, 30, 4320)
         self.max_companion_memory_items = self._cfg_int(c, "max_companion_memory_items", 36, 8, 120)
         self.max_learned_expression_items = self._cfg_int(c, "max_learned_expression_items", 18, 4, 60)
@@ -592,6 +606,11 @@ class PrivateCompanionPlugin(Star):
             "private_reading_default_keywords",
             self._cfg_str(c, "jm_cosmos_default_keywords", "纯爱,恋爱,同人"),
         )
+        self.private_reading_blocked_tags = self._cfg_str(
+            c,
+            "private_reading_blocked_tags",
+            self._cfg_str(c, "jm_cosmos_blocked_tags", "連載中,長篇,青年漫"),
+        )
         self.jm_cosmos_vision_provider_id = self._cfg_str(
             c,
             "PRIVATE_READING_VISION_PROVIDER_ID",
@@ -605,6 +624,7 @@ class PrivateCompanionPlugin(Star):
                 "jm_cosmos_max_photo_count": "private_reading_max_photo_count",
                 "jm_cosmos_share_probability": "private_reading_share_probability",
                 "jm_cosmos_default_keywords": "private_reading_default_keywords",
+                "jm_cosmos_blocked_tags": "private_reading_blocked_tags",
                 "JM_COSMOS_VISION_PROVIDER_ID": "PRIVATE_READING_VISION_PROVIDER_ID",
             }
             for old_key, new_key in legacy_private_reading_keys.items():
@@ -634,6 +654,8 @@ class PrivateCompanionPlugin(Star):
         self._framework_captured_send_cache: dict[str, list[_CapturedSendMessageCall]] = {}
         self._last_input_status_at: dict[str, float] = {}
         self.data = self._load_data_sync()
+        if self._cleanup_all_group_slang_terms():
+            self._save_data_sync()
         if self.worldbook_auto_import:
             try:
                 if self._import_worldbook_entries_from_sources():
@@ -763,6 +785,7 @@ class PrivateCompanionPlugin(Star):
             await self._ensure_daily_state()
             await self._ensure_daily_plan()
             await self._ensure_daily_diary(force=not self._has_today_diary())
+            await self._maybe_settle_skill_growth()
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 启动时生成今日日志失败: {e}", exc_info=True)
 
@@ -802,6 +825,7 @@ class PrivateCompanionPlugin(Star):
             "daily_dream": {},
             "diary_generated_day": "",
             "daily_story_plan": {},
+            "skill_growth": {},
             "detail_enhanced_day": "",
             "detail_enhanced_segments": {},
             "schedule_adjustments": [],
@@ -842,6 +866,7 @@ class PrivateCompanionPlugin(Star):
         data.setdefault("daily_dream", {})
         data.setdefault("diary_generated_day", "")
         data.setdefault("daily_story_plan", {})
+        data.setdefault("skill_growth", {})
         data.setdefault("detail_enhanced_day", "")
         data.setdefault("detail_enhanced_segments", {})
         data.setdefault("schedule_adjustments", [])
@@ -1695,7 +1720,7 @@ class PrivateCompanionPlugin(Star):
                 return text
         return ""
 
-    def _persist_private_inbound_images(self, event: AstrMessageEvent, user_id: str) -> list[str]:
+    async def _persist_private_inbound_images(self, event: AstrMessageEvent, user_id: str) -> list[str]:
         result: list[str] = []
         target_dir = Path(self.data_dir) / "private_inbound_images" / re.sub(r"[^0-9A-Za-z_.-]+", "_", str(user_id or "unknown"))
         try:
@@ -1703,14 +1728,35 @@ class PrivateCompanionPlugin(Star):
         except Exception:
             return result
         now_ms = int(_now_ts() * 1000)
+
+        async def resolve_source(comp: Any) -> str:
+            source = self._image_component_source(comp)
+            if source:
+                return source
+            converter = getattr(comp, "convert_to_file_path", None)
+            if callable(converter):
+                try:
+                    maybe = converter()
+                    return str(await maybe if hasattr(maybe, "__await__") else maybe or "").strip()
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 私聊图片组件转换失败: %s", exc)
+            return ""
+
         for index, comp in enumerate(self._event_components(event), 1):
             class_name = comp.__class__.__name__.lower()
             if isinstance(comp, dict):
                 class_name = str(comp.get("type") or "").lower()
             if class_name != "image":
                 continue
-            source = self._image_component_source(comp)
+            source = await resolve_source(comp)
             if not source:
+                data = getattr(comp, "data", None)
+                data_keys = ",".join(sorted(str(key) for key in data.keys())) if isinstance(data, dict) else ""
+                logger.info(
+                    "[PrivateCompanion] 私聊图片组件未能解析出文件路径: class=%s data_keys=%s",
+                    comp.__class__.__name__,
+                    data_keys or "-",
+                )
                 continue
             source_path = Path(source)
             if source_path.exists() and source_path.is_file():
@@ -1725,6 +1771,134 @@ class PrivateCompanionPlugin(Star):
             if re.match(r"^https?://", source, flags=re.I):
                 result.append(source)
         return result
+
+    def _private_image_source_to_model_url(self, source: str) -> str:
+        text = str(source or "").strip()
+        if not text:
+            return ""
+        if re.match(r"^https?://", text, flags=re.I) or text.startswith("data:"):
+            return text
+        path = Path(text)
+        if not path.exists() or not path.is_file():
+            return ""
+        suffix = path.suffix.lower()
+        mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/gif" if suffix == ".gif" else "image/jpeg"
+        try:
+            return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 私聊图片转 data url 失败: %s", exc)
+            return ""
+
+    def _astrbot_provider_settings_for_umo(self, umo: str = "") -> dict[str, Any]:
+        try:
+            cfg = self.context.get_config(umo=umo) if umo else self.context.get_config()
+        except Exception:
+            try:
+                cfg = self.context.get_config()
+            except Exception:
+                cfg = {}
+        provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
+        return dict(provider_settings) if isinstance(provider_settings, dict) else {}
+
+    def _private_image_caption_provider_id(self, umo: str = "") -> tuple[str, str, str]:
+        provider_settings = self._astrbot_provider_settings_for_umo(umo)
+        astrbot_provider_id = _single_line(provider_settings.get("default_image_caption_provider_id"), 160)
+        prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
+        if astrbot_provider_id:
+            return astrbot_provider_id, "astrbot_image_caption", prompt
+        fallback_provider_id = self._task_provider(self.jm_cosmos_vision_provider_id, self.narration_provider_id)
+        return fallback_provider_id, "plugin_vision", prompt
+
+    @staticmethod
+    def _provider_supports_image(provider: Any) -> bool:
+        config = getattr(provider, "provider_config", None) or getattr(provider, "config", None) or {}
+        modalities = config.get("modalities") if isinstance(config, dict) else None
+        return isinstance(modalities, list) and "image" in modalities
+
+    def _event_main_provider_supports_image(self, event: AstrMessageEvent) -> bool:
+        provider = None
+        try:
+            selected = event.get_extra("selected_provider")
+        except Exception:
+            selected = ""
+        getter = getattr(self.context, "get_provider_by_id", None)
+        if selected and callable(getter):
+            try:
+                provider = getter(str(selected))
+            except Exception:
+                provider = None
+        if provider is None:
+            get_using = getattr(self.context, "get_using_provider", None)
+            if callable(get_using):
+                try:
+                    provider = get_using(umo=getattr(event, "unified_msg_origin", ""))
+                except TypeError:
+                    try:
+                        provider = get_using(getattr(event, "unified_msg_origin", ""))
+                    except Exception:
+                        provider = None
+                except Exception:
+                    provider = None
+        return self._provider_supports_image(provider)
+
+    async def _transcribe_private_inbound_images(self, image_sources: list[str], *, umo: str = "") -> str:
+        sources = [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:4]
+        if not sources:
+            return ""
+        provider_id, provider_source, configured_prompt = self._private_image_caption_provider_id(umo)
+        if not provider_id:
+            logger.info("[PrivateCompanion] 私聊图片视觉转述跳过: 未配置 AstrBot 识图模型或插件总视觉模型")
+            return ""
+        getter = getattr(self.context, "get_provider_by_id", None)
+        provider = getter(provider_id) if callable(getter) else None
+        if provider is None:
+            fallback_provider_id = self._task_provider(self.jm_cosmos_vision_provider_id, self.narration_provider_id)
+            if fallback_provider_id and fallback_provider_id != provider_id and callable(getter):
+                provider_id = fallback_provider_id
+                provider_source = "plugin_vision_fallback"
+                provider = getter(provider_id)
+            if provider is None:
+                logger.info("[PrivateCompanion] 私聊图片视觉转述跳过: provider 不可用 id=%s", provider_id)
+                return ""
+        image_urls = [url for url in (self._private_image_source_to_model_url(source) for source in sources) if url]
+        if not image_urls:
+            return ""
+        prompt = configured_prompt or (
+            "请阅读用户刚刚单独发送的图片,输出一段供后续聊天模型使用的视觉摘要。\n"
+            "要求：\n"
+            "1. 只描述画面里能看见的内容、文字、主体、情绪和可能需要注意的细节。\n"
+            "2. 不要假装已经回复用户,不要输出工具名、模型名、路径或插件信息。\n"
+            "3. 如果图片像表情包、截图、聊天记录、作业、网页或照片,请直接说明类型和关键信息。\n"
+            "4. 保持简洁自然,80-220 字。"
+        )
+        if not self._can_run_llm_task(provider_id, task="private_image_vision"):
+            self._record_llm_budget_skip(provider_id=provider_id, task="private_image_vision", prompt=prompt)
+            return ""
+        try:
+            start = time.time()
+            result = await provider.text_chat(prompt=prompt, image_urls=image_urls)
+            text = str(getattr(result, "completion_text", result) or "").strip()
+            self._record_llm_usage(
+                provider_id=provider_id,
+                task="private_image_vision",
+                prompt=prompt,
+                completion=text,
+                resp=result,
+                elapsed_ms=int((time.time() - start) * 1000),
+                success=True,
+                budget_exempt=True,
+            )
+            logger.info(
+                "[PrivateCompanion] 私聊图片视觉转述完成: provider=%s source=%s images=%s chars=%s",
+                provider_id,
+                provider_source,
+                len(image_urls),
+                len(text),
+            )
+            return _single_line(_strip_internal_message_blocks(text), 600)
+        except Exception as exc:
+            logger.info("[PrivateCompanion] 私聊图片视觉转述失败: %s", _single_line(exc, 160))
+            return ""
 
     async def _consume_semantic_message_buffer_for_event(self, event: AstrMessageEvent, *, private_chat: bool) -> str:
         if not self.enable_semantic_message_debounce:
@@ -1772,23 +1946,58 @@ class PrivateCompanionPlugin(Star):
         return "\n".join(f"{idx + 1}. {line}" for idx, line in enumerate(lines))
 
     def _take_buffered_private_images_for_event(self, event: AstrMessageEvent) -> list[str]:
+        context = self._take_buffered_private_image_context_for_event(event)
+        return [str(item) for item in context.get("images", [])[:4] if str(item or "").strip()] if isinstance(context, dict) else []
+
+    def _take_buffered_private_image_context_for_event(self, event: AstrMessageEvent) -> dict[str, Any]:
         try:
             sender_id = str(event.get_sender_id())
         except Exception:
             sender_id = ""
         if not sender_id:
-            return []
+            return {}
         key = self._semantic_buffer_key(f"private:{sender_id}", sender_id)
         buffers = getattr(self, "_semantic_message_buffers", None)
         if not isinstance(buffers, dict):
-            return []
+            return {}
         buffer = buffers.get(key)
         if not isinstance(buffer, dict):
-            return []
+            return {}
         if _now_ts() - _safe_float(buffer.get("first_ts"), 0) > max(30.0, float(getattr(self, "semantic_message_debounce_seconds", 8.0) or 8.0) + 30.0):
-            return []
+            return {}
         images = buffer.pop("images", [])
-        return [str(item) for item in images[:4] if str(item or "").strip()]
+        return {
+            "images": [str(item) for item in images[:4] if str(item or "").strip()],
+            "image_mode": _single_line(buffer.pop("image_mode", ""), 20),
+            "vision_task": buffer.pop("vision_task", None),
+            "vision_text": _single_line(buffer.pop("vision_text", ""), 600),
+        }
+
+    async def _finalize_private_image_buffer_after_wait(self, key: str, user_id: str, first_ts: float) -> None:
+        wait = max(0.0, float(getattr(self, "semantic_message_debounce_seconds", 0.0) or 0.0))
+        remaining = max(0.0, first_ts + wait - _now_ts())
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        buffers = getattr(self, "_semantic_message_buffers", None)
+        buffer = buffers.get(key) if isinstance(buffers, dict) else None
+        if not isinstance(buffer, dict):
+            return
+        messages = buffer.get("messages") if isinstance(buffer.get("messages"), list) else []
+        placeholder = "用户刚刚先单独发送了一张图片,可能马上会补充说明。"
+        has_followup = any(
+            isinstance(item, dict)
+            and (cleaned := _single_line(item.get("text"), 260))
+            and cleaned != placeholder
+            for item in messages
+        )
+        if has_followup:
+            logger.info("[PrivateCompanion] 私聊单图已由补充消息接管: user=%s", user_id)
+            return
+        vision_task = buffer.get("vision_task")
+        if isinstance(vision_task, asyncio.Task) and not vision_task.done():
+            vision_task.cancel()
+        buffers.pop(key, None)
+        logger.info("[PrivateCompanion] 私聊单图等待补充后无文字指示,已终止原图事件: user=%s", user_id)
 
     def _group_active_conversation(self, group: dict[str, Any]) -> dict[str, Any]:
         active = group.setdefault("active_bot_conversation", {})
@@ -2838,23 +3047,563 @@ class PrivateCompanionPlugin(Star):
         return candidates[0]
 
     def _find_qzone_instance(self) -> Any | None:
-        for obj in gc.get_objects():
-            try:
-                module = str(getattr(obj.__class__, "__module__", ""))
-                if "astrbot_plugin_qzone" not in module:
-                    continue
-                if hasattr(obj, "service") and hasattr(obj, "session"):
-                    return obj
-            except Exception:
-                continue
         return None
 
     def _qzone_available(self) -> bool:
-        if not self.enable_qzone_integration:
-            return False
-        if self._find_qzone_instance() is not None:
-            return True
-        return (self._qzone_plugin_dir() / "main.py").exists()
+        return bool(self.enable_qzone_integration)
+
+    @staticmethod
+    def _qzone_gtk(p_skey: str) -> str:
+        hash_val = 5381
+        for ch in str(p_skey or ""):
+            hash_val += (hash_val << 5) + ord(ch)
+        return str(hash_val & 0x7FFFFFFF)
+
+    @staticmethod
+    def _qzone_normalize_cookie_fields(cookies: dict[str, Any]) -> dict[str, str]:
+        aliases = {
+            "pskey": "p_skey",
+            "p-skey": "p_skey",
+            "p_uin": "p_uin",
+            "ptui_loginuin": "ptui_loginuin",
+            "csrf-token": "csrf_token",
+        }
+        normalized: dict[str, str] = {}
+        for key, value in (cookies or {}).items():
+            if value in (None, ""):
+                continue
+            original = str(key).strip()
+            if not original:
+                continue
+            text = str(value).strip().strip('"')
+            if not text:
+                continue
+            canonical = aliases.get(original.lower(), original)
+            normalized.setdefault(original, text)
+            normalized.setdefault(canonical, text)
+        if "uin" in normalized and "p_uin" not in normalized:
+            normalized["p_uin"] = normalized["uin"]
+        if "p_uin" in normalized and "uin" not in normalized:
+            normalized["uin"] = normalized["p_uin"]
+        return normalized
+
+    @classmethod
+    def _qzone_parse_cookie_text(cls, cookie_text: str) -> dict[str, str]:
+        raw = str(cookie_text or "").strip()
+        if not raw:
+            return {}
+        if raw.lower().startswith("cookie:"):
+            raw = raw.split(":", 1)[1].strip()
+        raw = raw.replace("\r", ";").replace("\n", ";")
+        if raw.startswith(("{", "[")):
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                return cls._qzone_normalize_cookie_fields(payload)
+        try:
+            return cls._qzone_normalize_cookie_fields({key: morsel.value for key, morsel in SimpleCookie(raw).items()})
+        except Exception:
+            parsed: dict[str, str] = {}
+            for part in raw.split(";"):
+                if "=" not in part:
+                    continue
+                key, value = part.split("=", 1)
+                key = key.strip()
+                if key:
+                    parsed[key] = value.strip().strip('"')
+            return cls._qzone_normalize_cookie_fields(parsed)
+
+    @staticmethod
+    def _qzone_cookie_header(cookies: dict[str, Any]) -> str:
+        return "; ".join(f"{key}={value}" for key, value in (cookies or {}).items() if key and value not in (None, ""))
+
+    def _qzone_extract_cookie_text(self, payload: Any, *, _depth: int = 0, _seen: set[int] | None = None) -> str:
+        if _seen is None:
+            _seen = set()
+        if payload is None or _depth > 8:
+            return ""
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except Exception:
+                return ""
+        if isinstance(payload, str):
+            text = payload.strip()
+            return text if "=" in text and re.search(r"\b(?:uin|p_uin|skey|p_skey|pskey|g_tk|gtk|bkn)\s*=", text, re.I) else ""
+        if isinstance(payload, (list, tuple)):
+            parts = [self._qzone_extract_cookie_text(item, _depth=_depth + 1, _seen=_seen) for item in payload]
+            cookies: dict[str, str] = {}
+            for part in parts:
+                cookies.update(self._qzone_parse_cookie_text(part))
+            return self._qzone_cookie_header(cookies)
+        if not isinstance(payload, dict):
+            return ""
+        obj_id = id(payload)
+        if obj_id in _seen:
+            return ""
+        _seen.add(obj_id)
+        name = payload.get("name") or payload.get("key")
+        value = payload.get("value")
+        if name and value not in (None, ""):
+            return f"{name}={value}"
+        cookie_keys = {
+            "cookies",
+            "cookie",
+            "cookie_text",
+            "cookie_str",
+            "cookies_str",
+            "data",
+            "result",
+            "retdata",
+            "ret_data",
+            "payload",
+            "response",
+        }
+        allow = {
+            "uin",
+            "p_uin",
+            "ptui_loginuin",
+            "luin",
+            "skey",
+            "p_skey",
+            "pskey",
+            "skey2",
+            "pt4_token",
+            "pt_key",
+            "pt_login_sig",
+            "clientkey",
+            "superkey",
+            "qzonetoken",
+            "qm_keyst",
+            "qm_sid",
+            "o_cookie",
+            "uin_cookie",
+            "rv2",
+            "ptcz",
+            "lskey",
+            "ldw",
+            "g_tk",
+            "gtk",
+            "bkn",
+            "csrf_token",
+            "qqmusic_key",
+        }
+        cookies = {
+            str(key): value
+            for key, value in payload.items()
+            if str(key).lower().replace("-", "_") in allow and value not in (None, "")
+        }
+        parts = [self._qzone_cookie_header(self._qzone_normalize_cookie_fields(cookies))] if cookies else []
+        for key in cookie_keys:
+            if key in payload:
+                text = self._qzone_extract_cookie_text(payload.get(key), _depth=_depth + 1, _seen=_seen)
+                if text:
+                    parts.append(text)
+        for value in payload.values():
+            if isinstance(value, (dict, list, tuple, str, bytes)):
+                text = self._qzone_extract_cookie_text(value, _depth=_depth + 1, _seen=_seen)
+                if text:
+                    parts.append(text)
+        merged: dict[str, str] = {}
+        for part in parts:
+            merged.update(self._qzone_parse_cookie_text(part))
+        return self._qzone_cookie_header(merged)
+
+    @staticmethod
+    def _qzone_normalize_uin(cookies: dict[str, Any]) -> int:
+        for key in ("uin", "p_uin", "ptui_loginuin", "luin"):
+            raw = str(cookies.get(key) or "").strip().lstrip("oO")
+            if raw.isdigit():
+                return int(raw)
+        return 0
+
+    def _qzone_context_from_cookies(self, cookies_str: str) -> dict[str, Any]:
+        parsed = self._qzone_parse_cookie_text(cookies_str)
+        uin = self._qzone_normalize_uin(parsed)
+        if not uin:
+            raise RuntimeError("Cookie 中缺少合法 uin")
+        p_skey = parsed.get("p_skey") or parsed.get("pskey") or ""
+        skey = parsed.get("skey") or ""
+        gtk = str(parsed.get("g_tk") or parsed.get("gtk") or parsed.get("bkn") or parsed.get("csrf_token") or "")
+        if not gtk.isdigit():
+            secret = p_skey or skey or parsed.get("skey2") or ""
+            gtk = self._qzone_gtk(secret) if secret else ""
+        if not gtk:
+            raise RuntimeError("Cookie 中缺少 p_skey/skey，无法计算 g_tk")
+        cookies = {**parsed, "uin": f"o{uin}"}
+        if skey:
+            cookies["skey"] = skey
+        if p_skey:
+            cookies["p_skey"] = p_skey
+        return {
+            "uin": int(uin),
+            "skey": skey,
+            "p_skey": p_skey,
+            "gtk": gtk,
+            "cookies": cookies,
+            "cookie_header": self._qzone_cookie_header(cookies),
+        }
+
+    async def _qzone_get_cookies(self, event: AstrMessageEvent | None = None) -> str:
+        bot = getattr(event, "bot", None) if event is not None else getattr(self, "_qzone_last_bot", None)
+        if bot is not None:
+            self._qzone_last_bot = bot
+        if bot is None:
+            raise RuntimeError("没有可用的 OneBot 连接，无法获取 QQ 空间 Cookie")
+        merged: dict[str, str] = {}
+        domains = [
+            "user.qzone.qq.com",
+            "qzone.qq.com",
+            "h5.qzone.qq.com",
+            "mobile.qzone.qq.com",
+            "taotao.qzone.qq.com",
+        ]
+        actions = ("get_cookies", "get_credentials")
+        api = getattr(bot, "api", None)
+        call_action = getattr(api, "call_action", None)
+        for action in actions:
+            direct = getattr(bot, action, None)
+            for domain in domains:
+                for kwargs in ({"domain": domain}, {}):
+                    result = None
+                    if callable(direct):
+                        try:
+                            maybe = direct(**kwargs)
+                            result = await maybe if hasattr(maybe, "__await__") else maybe
+                        except Exception:
+                            result = None
+                    if result is None and callable(call_action):
+                        try:
+                            maybe = call_action(action, **kwargs)
+                            result = await maybe if hasattr(maybe, "__await__") else maybe
+                        except Exception:
+                            result = None
+                    cookie_text = self._qzone_extract_cookie_text(result)
+                    if cookie_text:
+                        merged.update(self._qzone_parse_cookie_text(cookie_text))
+                if self._qzone_normalize_uin(merged) and (merged.get("p_skey") or merged.get("pskey") or merged.get("skey")):
+                    break
+            if self._qzone_normalize_uin(merged) and (merged.get("p_skey") or merged.get("pskey") or merged.get("skey")):
+                break
+        if not self._qzone_normalize_uin(merged):
+            login_uin = 0
+            direct_login = getattr(bot, "get_login_info", None)
+            try:
+                result = None
+                if callable(direct_login):
+                    maybe = direct_login()
+                    result = await maybe if hasattr(maybe, "__await__") else maybe
+                if result is None and callable(call_action):
+                    maybe = call_action("get_login_info")
+                    result = await maybe if hasattr(maybe, "__await__") else maybe
+                if isinstance(result, dict):
+                    login_uin = _safe_int(result.get("user_id") or result.get("uin") or result.get("qq"), 0, 0)
+            except Exception:
+                login_uin = 0
+            if login_uin:
+                merged["uin"] = f"o{login_uin}"
+                merged["p_uin"] = f"o{login_uin}"
+        if merged:
+            cookie_text = self._qzone_cookie_header(merged)
+            try:
+                ctx = self._qzone_context_from_cookies(cookie_text)
+                if ctx.get("uin") and ctx.get("gtk"):
+                    return cookie_text
+            except Exception:
+                pass
+            if self._qzone_normalize_uin(merged):
+                return cookie_text
+        raise RuntimeError("获取 QQ 空间 Cookie 失败")
+
+    @staticmethod
+    def _qzone_parse_response(text: str) -> dict[str, Any]:
+        raw = str(text or "")
+        if not raw.strip():
+            return {"code": -1, "message": "接口返回空响应"}
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end < start:
+            return {"code": -1, "message": "接口响应缺少 JSON"}
+        payload = raw[start : end + 1].replace("undefined", "null")
+        try:
+            parsed = json.loads(payload)
+        except Exception as exc:
+            return {"code": -1, "message": f"JSON 解析失败：{_single_line(exc, 80)}"}
+        if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict):
+            nested = dict(parsed.get("data") or {})
+            nested.setdefault("_raw_code", parsed.get("code", parsed.get("ret")))
+            nested.setdefault("_raw_message", parsed.get("message") or parsed.get("msg"))
+            return nested
+        return parsed if isinstance(parsed, dict) else {"code": -1, "message": "接口响应不是对象"}
+
+    async def _qzone_request(
+        self,
+        event: AstrMessageEvent | None,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout_seconds: float = 20.0,
+    ) -> dict[str, Any]:
+        import aiohttp
+
+        ctx = self._qzone_context_from_cookies(await self._qzone_get_cookies(event))
+        parsed_url = urlparse(url)
+        origin = f"{parsed_url.scheme}://{parsed_url.netloc}" if parsed_url.scheme and parsed_url.netloc else "https://user.qzone.qq.com"
+        request_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            "Cookie": ctx["cookie_header"],
+            "Referer": f"https://user.qzone.qq.com/{ctx['uin']}",
+            "Origin": origin,
+            "Host": parsed_url.netloc or "user.qzone.qq.com",
+            "Connection": "keep-alive",
+        }
+        if headers:
+            request_headers.update(headers)
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout, headers=request_headers) as session:
+            async with session.request(method, url, params=params, data=data) as response:
+                text = await response.text()
+                parsed = self._qzone_parse_response(text)
+                parsed.setdefault("_http_status", response.status)
+                if parsed.get("message") == "接口返回空响应":
+                    parsed["message"] = f"接口返回空响应（HTTP {response.status}）"
+                if response.status == 403 and parsed.get("code") in {-1, None}:
+                    parsed["message"] = "无权限访问 QQ 空间或 Cookie 已失效"
+                return parsed
+
+    def _qzone_parse_feeds(self, msglist: list[Any]) -> list[Any]:
+        posts: list[Any] = []
+        for msg in msglist:
+            if not isinstance(msg, dict):
+                continue
+            images: list[str] = []
+            for image in msg.get("pic", []) if isinstance(msg.get("pic"), list) else []:
+                if not isinstance(image, dict):
+                    continue
+                for key in ("url2", "url3", "url1", "smallurl"):
+                    raw = image.get(key)
+                    if raw:
+                        images.append(str(raw))
+                        break
+            for video in msg.get("video", []) if isinstance(msg.get("video"), list) else []:
+                if isinstance(video, dict) and (video.get("url1") or video.get("pic_url")):
+                    images.append(str(video.get("url1") or video.get("pic_url")))
+            posts.append(
+                SimpleNamespace(
+                    tid=str(msg.get("tid") or ""),
+                    uin=int(msg.get("uin") or 0),
+                    name=str(msg.get("name") or ""),
+                    text=str(msg.get("content") or "").strip(),
+                    rt_con=str((msg.get("rt_con") or {}).get("content") or "") if isinstance(msg.get("rt_con"), dict) else "",
+                    images=images,
+                    comments=[],
+                    create_time=msg.get("created_time") or 0,
+                    status="approved",
+                )
+            )
+        return posts
+
+    async def _qzone_query_feeds(
+        self,
+        event: AstrMessageEvent | None = None,
+        *,
+        target_id: str | None = None,
+        pos: int = 0,
+        num: int = 1,
+        with_detail: bool = False,
+    ) -> list[Any]:
+        ctx = self._qzone_context_from_cookies(await self._qzone_get_cookies(event))
+        target = _single_line(target_id, 40)
+        if not target:
+            target = str(ctx["uin"])
+        payload = await self._qzone_request(
+            event,
+            "GET",
+            "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6",
+            params={
+                "g_tk": ctx["gtk"],
+                "uin": target,
+                "ftype": 0,
+                "sort": 0,
+                "pos": max(0, int(pos or 0)),
+                "num": max(1, int(num or 1)),
+                "replynum": 100,
+                "callback": "_preloadCallback",
+                "code_version": 1,
+                "format": "json",
+                "need_comment": 1 if with_detail else 0,
+                "need_private_comment": 1 if with_detail else 0,
+            },
+        )
+        code = payload.get("code", 0)
+        if code not in {0, "0"}:
+            raise RuntimeError(_single_line(payload.get("message") or payload.get("msg") or f"查询失败 code={code}", 160))
+        msglist = payload.get("msglist") or []
+        if not isinstance(msglist, list):
+            msglist = []
+        return self._qzone_parse_feeds(msglist)
+
+    async def _qzone_publish_post(
+        self,
+        event: AstrMessageEvent | None = None,
+        *,
+        text: str = "",
+        images: list[str] | None = None,
+    ) -> Any:
+        ctx = self._qzone_context_from_cookies(await self._qzone_get_cookies(event))
+        content = _single_line(text, 300)
+        if not content and not images:
+            raise RuntimeError("说说内容为空")
+        referrer = f"https://user.qzone.qq.com/{ctx['uin']}"
+        data = {
+            "syn_tweet_verson": "1",
+            "paramstr": "1",
+            "who": "1",
+            "con": content,
+            "feedversion": "1",
+            "ver": "1",
+            "ugc_right": 1,
+            "to_sign": 0,
+            "hostuin": ctx["uin"],
+            "code_version": "1",
+            "richval": "",
+            "issyncweibo": 0,
+            "format": "json",
+            "qzreferrer": referrer,
+        }
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "Referer": referrer,
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        endpoints = [
+            "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6",
+            "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6",
+            "http://taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6",
+        ]
+        payload: dict[str, Any] = {}
+        failures: list[str] = []
+        for endpoint in endpoints:
+            payload = await self._qzone_request(
+                event,
+                "POST",
+                endpoint,
+                params={"g_tk": ctx["gtk"]},
+                data=data,
+                headers=headers,
+            )
+            code = payload.get("code", 0)
+            if code in {0, "0"}:
+                break
+            failures.append(f"{urlparse(endpoint).netloc}: {_single_line(payload.get('message') or payload.get('msg') or f'code={code}', 120)}")
+        code = payload.get("code", 0)
+        if code not in {0, "0"}:
+            detail = "；".join(failures) or _single_line(payload.get("message") or payload.get("msg") or f"发布失败 code={code}", 160)
+            raise RuntimeError(_single_line(detail, 220))
+        return SimpleNamespace(
+            tid=str(payload.get("tid") or ""),
+            uin=int(ctx["uin"]),
+            name=str(ctx["uin"]),
+            text=content,
+            images=images or [],
+            create_time=payload.get("now") or int(time.time()),
+            status="approved",
+        )
+
+    async def _qzone_like_post(self, event: AstrMessageEvent | None, post: Any) -> None:
+        ctx = self._qzone_context_from_cookies(await self._qzone_get_cookies(event))
+        tid = str(getattr(post, "tid", "") or "")
+        uin = str(getattr(post, "uin", "") or "")
+        if not tid or not uin:
+            raise RuntimeError("说说 tid 或 uin 为空，无法点赞")
+        payload = await self._qzone_request(
+            event,
+            "POST",
+            "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app",
+            params={"g_tk": ctx["gtk"]},
+            data={
+                "qzreferrer": f"https://user.qzone.qq.com/{ctx['uin']}",
+                "opuin": ctx["uin"],
+                "unikey": f"https://user.qzone.qq.com/{uin}/mood/{tid}",
+                "curkey": f"https://user.qzone.qq.com/{uin}/mood/{tid}",
+                "appid": 311,
+                "from": 1,
+                "typeid": 0,
+                "abstime": int(time.time()),
+                "fid": tid,
+                "active": 0,
+                "format": "json",
+                "fupdate": 1,
+            },
+        )
+        code = payload.get("code", 0)
+        if code not in {0, "0"}:
+            raise RuntimeError(_single_line(payload.get("message") or payload.get("msg") or f"点赞失败 code={code}", 160))
+
+    async def _qzone_generate_comment(self, post: Any) -> str:
+        prompt = f"""
+请以当前 Bot 人格，为下面这条 QQ 空间说说写一句自然评论。
+只输出评论正文，不要解释。
+
+要求：
+- 8 到 40 字。
+- 像真实熟人评论，不要像客服或总结。
+- 不要泄露私聊内容、插件内部信息、关系网资料或状态数值。
+- 如果内容信息不足，可以写轻量回应。
+
+【作者】
+{_single_line(getattr(post, "name", ""), 40) or _single_line(getattr(post, "uin", ""), 40) or "对方"}
+
+【说说内容】
+{_single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 240) or "无文本"}
+""".strip()
+        text = await self._llm_call(
+            prompt,
+            max_tokens=80,
+            provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+            task="qzone_comment",
+        )
+        return _single_line(text, 80)
+
+    async def _qzone_comment_post(self, event: AstrMessageEvent | None, post: Any, content: str = "") -> str:
+        ctx = self._qzone_context_from_cookies(await self._qzone_get_cookies(event))
+        tid = str(getattr(post, "tid", "") or "")
+        uin = str(getattr(post, "uin", "") or "")
+        if not tid or not uin:
+            raise RuntimeError("说说 tid 或 uin 为空，无法评论")
+        comment = _single_line(content, 120) or await self._qzone_generate_comment(post)
+        if not comment:
+            raise RuntimeError("评论内容为空")
+        payload = await self._qzone_request(
+            event,
+            "POST",
+            "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds",
+            params={"g_tk": ctx["gtk"]},
+            data={
+                "topicId": f"{uin}_{tid}__1",
+                "uin": ctx["uin"],
+                "hostUin": uin,
+                "feedsType": 100,
+                "inCharset": "utf-8",
+                "outCharset": "utf-8",
+                "plat": "qzone",
+                "source": "ic",
+                "platformid": 52,
+                "format": "fs",
+                "ref": "feeds",
+                "content": comment,
+            },
+        )
+        code = payload.get("code", 0)
+        if code not in {0, "0"}:
+            raise RuntimeError(_single_line(payload.get("message") or payload.get("msg") or f"评论失败 code={code}", 160))
+        return comment
 
     def _jm_cosmos_plugin_dir(self) -> Path:
         candidates = [
@@ -2939,13 +3688,44 @@ class PrivateCompanionPlugin(Star):
                 break
         return result or ["纯爱"]
 
+    @staticmethod
+    def _normalize_private_reading_tag(value: Any) -> str:
+        text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
+        return re.sub(r"\s+", "", text)
+
+    def _private_reading_blocked_tag_set(self) -> set[str]:
+        raw = str(getattr(self, "private_reading_blocked_tags", "") or "")
+        return {
+            normalized
+            for part in re.split(r"[,，、\n]+", raw)
+            if (normalized := self._normalize_private_reading_tag(part))
+        }
+
+    def _jm_cosmos_detail_blocked_by_tags(self, detail: dict[str, Any]) -> str:
+        blocked_tags = self._private_reading_blocked_tag_set()
+        if not blocked_tags:
+            return ""
+        raw_tags = detail.get("tags")
+        if isinstance(raw_tags, list):
+            tags = raw_tags
+        elif isinstance(raw_tags, str):
+            tags = re.split(r"[,，、\s]+", raw_tags)
+        else:
+            tags = []
+        for tag in tags:
+            tag_text = _single_line(tag, 40)
+            normalized = self._normalize_private_reading_tag(tag_text)
+            if normalized and normalized in blocked_tags:
+                return tag_text
+        return ""
+
     async def _call_jm_cosmos_vision(
         self,
         cover_path: Path | None,
         detail: dict[str, Any],
         page_paths: list[Path] | None = None,
         sampled_pages: list[int] | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         image_paths: list[Path] = []
         if cover_path and cover_path.exists():
             image_paths.append(cover_path)
@@ -2955,34 +3735,49 @@ class PrivateCompanionPlugin(Star):
             if len(image_paths) >= 6:
                 break
         if not image_paths:
-            return ""
+            return {}
         provider_id = self._task_provider(self.jm_cosmos_vision_provider_id, self.narration_provider_id)
         if not provider_id:
-            return ""
+            return {}
         try:
             getter = getattr(self.context, "get_provider_by_id", None)
             provider = getter(provider_id) if callable(getter) else None
             if provider is None:
-                return ""
+                return {}
             image_urls = []
             for path in image_paths:
                 suffix = path.suffix.lower()
                 mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
                 image_urls.append(f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}")
             sampled_text = "、".join(str(page) for page in (sampled_pages or [])[:8])
+            persona = _single_line(self._get_default_persona_prompt(), 1200)
+            schedule_persona = _single_line(getattr(self, "schedule_persona_prompt", ""), 800)
+            worldview_context = _single_line(self._format_worldview_adaptation_prompt(), 1200)
+            daily_state = self.data.get("daily_state", {})
+            state_text = _single_line(
+                self._format_state_for_prompt(daily_state if isinstance(daily_state, dict) else {}),
+                800,
+            )
             prompt = (
-                "请根据封面和抽样正文页,用 Bot 自己的口吻留下一段内部读后感,控制在160字以内。\n"
+                "请根据封面和抽样正文页,用 Bot 自己的口吻留下一段内部读后感,并给看过的对应页写短批注。\n"
                 "封面只用于确认标题、画风和整体气质；内容理解主要参考后续正文页。抽样页已尽量避开开头的封面、书脊、目录,以及结尾的汉化组、致谢、后记页。\n"
                 "如果某张图明显是版权页、目录、汉化组说明、鸣谢或空白页,请忽略它,不要当作剧情或人物关系来解读。\n"
                 "可以写画风、氛围、人物关系、叙事节奏和读完后的感觉；不要写成客观数据库摘要,也不要提插件、视觉模型、抽样、页码或数据来源。\n"
                 "表达风格应顺着当前bot人格与状态,不要固定成害羞、含蓄或直白。\n"
+                "批注是 Bot 私下读漫画时留在书页旁边的小吐槽/感想,语气、尺度、害羞或坦然都必须服从下面的人格,不要写成通用解说。\n"
+                "只输出 JSON,不要使用 Markdown。格式：{\"impression\":\"160字以内总读后感\",\"page_comments\":[{\"page\":12,\"comment\":\"35字以内吐槽或评论\"}]}。\n"
+                "page_comments 只为正文参考页里真正看懂的页生成；page 必须来自正文参考页数字。\n"
+                f"\n【AstrBot 默认人格】\n{persona or '未读取到默认人格。'}\n"
+                f"\n【生活/日程人设补充】\n{schedule_persona or '（无）'}\n"
+                f"\n【当前状态】\n{state_text or '（无）'}\n"
+                f"\n{worldview_context}\n"
                 f"标题：{_single_line(detail.get('title'), 80)}\n"
                 f"标签：{_single_line(','.join(str(item) for item in (detail.get('tags') or [])) if isinstance(detail.get('tags'), list) else detail.get('tags'), 120)}"
                 + (f"\n正文参考页：{sampled_text}" if sampled_text else "")
             )
             if self._llm_daily_budget_remaining() == 0:
                 self._record_llm_budget_skip(provider_id=provider_id, task="private_reading_vision", prompt=prompt)
-                return ""
+                return {}
             start = time.time()
             result = await provider.text_chat(prompt=prompt, image_urls=image_urls)
             text = str(getattr(result, "completion_text", result) or "").strip()
@@ -2995,10 +3790,42 @@ class PrivateCompanionPlugin(Star):
                 success=bool(text),
                 resp=result,
             )
-            return _single_line(text, 420)
+            parsed = self._parse_jm_cosmos_vision_result(text, sampled_pages or [])
+            if parsed.get("impression") or parsed.get("page_comments"):
+                return parsed
+            return {"impression": _single_line(text, 420), "page_comments": []}
         except Exception as e:
             logger.debug(f"[PrivateCompanion] 夹层阅读视觉分析失败: {e}")
-            return ""
+            return {}
+
+    def _parse_jm_cosmos_vision_result(self, text: str, sampled_pages: list[int]) -> dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        match = re.search(r"\{.*\}", raw, re.S)
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group(0))
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        allowed_pages = {_safe_int(page, 0, 1) for page in sampled_pages or []}
+        comments: list[dict[str, Any]] = []
+        for item in data.get("page_comments", []):
+            if not isinstance(item, dict):
+                continue
+            page = _safe_int(item.get("page"), 0, 1)
+            comment = _single_line(item.get("comment"), 80)
+            if page > 0 and comment and (not allowed_pages or page in allowed_pages):
+                comments.append({"page": page, "comment": comment})
+            if len(comments) >= 8:
+                break
+        return {
+            "impression": _single_line(data.get("impression"), 420),
+            "page_comments": comments,
+        }
 
     def _jm_cosmos_textual_impression(self, detail: dict[str, Any]) -> str:
         title = _single_line(detail.get("title"), 80) or "没看清标题"
@@ -3197,6 +4024,7 @@ class PrivateCompanionPlugin(Star):
             "key": key,
             "type": "jm_album",
             "title": _single_line(album.get("title"), 100) or f"夹层藏书 {album_id}",
+            "description": _single_line(album.get("description") or album.get("intro") or album.get("summary"), 600),
             "album_id": album_id,
             "keyword": _single_line(album.get("keyword"), 24),
             "author": _single_line(album.get("author"), 40),
@@ -3204,6 +4032,14 @@ class PrivateCompanionPlugin(Star):
             "impression": _single_line(album.get("impression"), 600),
             "reading_impression": _single_line(album.get("reading_impression") or album.get("impression"), 600),
             "vision": _single_line(album.get("vision"), 500),
+            "page_comments": [
+                {
+                    "page": _safe_int(item.get("page"), 0, 1),
+                    "comment": _single_line(item.get("comment"), 80),
+                }
+                for item in (album.get("page_comments") if isinstance(album.get("page_comments"), list) else [])
+                if isinstance(item, dict) and _safe_int(item.get("page"), 0, 1) > 0 and _single_line(item.get("comment"), 80)
+            ][:8],
             "cover_path": _single_line(album.get("cover_path"), 260),
             "download_path": _single_line(album.get("download_path"), 260),
             "pages": album.get("pages") if isinstance(album.get("pages"), list) else [],
@@ -3304,6 +4140,14 @@ class PrivateCompanionPlugin(Star):
                     detail = None
                 if not isinstance(detail, dict):
                     continue
+                blocked_tag = self._jm_cosmos_detail_blocked_by_tags(detail)
+                if blocked_tag:
+                    logger.debug(
+                        "[PrivateCompanion] 夹层阅读候选标签被过滤: album=%s tag=%s",
+                        album_id,
+                        blocked_tag,
+                    )
+                    continue
                 photo_count = _safe_int(detail.get("photo_count"), 0, 0)
                 if photo_count <= 0 or photo_count > self.jm_cosmos_max_photo_count:
                     continue
@@ -3361,17 +4205,29 @@ class PrivateCompanionPlugin(Star):
                         page_paths.append(Path(str(page.get("path"))))
                         page_number = _safe_int(page.get("index"), sample_index + 1, 1)
                         sampled_pages.append(page_number)
-                vision = await self._call_jm_cosmos_vision(
+                vision_result = await self._call_jm_cosmos_vision(
                     Path(cover_path) if cover_path else None,
                     detail,
                     page_paths,
                     sampled_pages=sampled_pages,
                 )
+                vision = _single_line(vision_result.get("impression"), 420) if isinstance(vision_result, dict) else ""
+                page_comments = vision_result.get("page_comments", []) if isinstance(vision_result, dict) else []
                 impression = vision or self._jm_cosmos_textual_impression(detail)
                 title = _single_line(detail.get("title") or candidate.get("title"), 80)
+                description = _single_line(
+                    detail.get("description")
+                    or detail.get("intro")
+                    or detail.get("summary")
+                    or detail.get("comment")
+                    or candidate.get("description")
+                    or candidate.get("intro"),
+                    600,
+                )
                 result = {
                     "id": album_id,
                     "title": title,
+                    "description": description,
                     "keyword": keyword,
                     "author": _single_line(detail.get("author"), 40),
                     "tags": list(detail.get("tags") or [])[:8] if isinstance(detail.get("tags"), list) else [],
@@ -3380,6 +4236,7 @@ class PrivateCompanionPlugin(Star):
                     "vision": vision,
                     "impression": _single_line(impression, 420),
                     "reading_impression": _single_line(impression, 420),
+                    "page_comments": page_comments if isinstance(page_comments, list) else [],
                     "cover_path": str(cover_path or ""),
                     "download_path": str(candidate_paths[0] if candidate_paths else ""),
                     "pages": pages,
@@ -3963,6 +4820,11 @@ class PrivateCompanionPlugin(Star):
         state["last_status"] = "read"
         state["last_reason"] = reason
         state["last_digest"] = digest
+        digests = state.setdefault("digests", [])
+        if not isinstance(digests, list):
+            digests = []
+            state["digests"] = digests
+        digests.append({**digest, "reason": reason})
         state["latest_items"] = items[:12]
         if not allow_share:
             self._save_data_sync()
@@ -4059,6 +4921,35 @@ class PrivateCompanionPlugin(Star):
         if provider == "baidu_ai_search":
             return bool(settings.get("websearch_baidu_app_builder_key"))
         return False
+
+    def _web_search_candidate_umos(self) -> list[str]:
+        candidates = [""]
+        users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+        for uid, item in users.items():
+            if not isinstance(item, dict):
+                continue
+            if not self._is_target_private_user(str(uid), item) or not item.get("enabled", True):
+                continue
+            umo = str(item.get("umo") or "").strip()
+            if umo and umo not in candidates:
+                candidates.append(umo)
+        return candidates
+
+    def _astrbot_any_web_search_available(self) -> bool:
+        return any(self._astrbot_web_search_available(umo) for umo in self._web_search_candidate_umos())
+
+    def _pick_available_web_search_umo(self, preferred: str = "") -> str:
+        candidates = []
+        preferred = str(preferred or "").strip()
+        if preferred:
+            candidates.append(preferred)
+        for umo in self._web_search_candidate_umos():
+            if umo not in candidates:
+                candidates.append(umo)
+        for umo in candidates:
+            if self._astrbot_web_search_available(umo):
+                return umo
+        return ""
 
     async def _run_astrbot_web_search(self, query: str, *, umo: str = "", topic: str = "general") -> list[dict[str, Any]]:
         cleaned_query = _single_line(query, 120)
@@ -4451,9 +5342,10 @@ class PrivateCompanionPlugin(Star):
             for uid, item in users.items()
             if isinstance(item, dict) and self._is_target_private_user(str(uid), item) and item.get("enabled", True) and item.get("umo")
         ]
-        umo = str((random.choice(target_users)[1].get("umo") if target_users else "") or "")
-        web_search_available = self._astrbot_web_search_available(umo)
-        if not web_search_available:
+        target_user = random.choice(target_users)[1] if target_users else {}
+        target_umo = str((target_user.get("umo") if isinstance(target_user, dict) else "") or "")
+        search_umo = self._pick_available_web_search_umo(target_umo)
+        if not search_umo:
             state["last_probe_at"] = now
             state["last_status"] = "web_search_disabled_or_unconfigured"
             self._save_data_sync()
@@ -4465,7 +5357,7 @@ class PrivateCompanionPlugin(Star):
         results: list[dict[str, Any]] = []
         results = await self._run_astrbot_web_search(
             str(query_info.get("query") or ""),
-            umo=umo,
+            umo=search_umo,
             topic=str(query_info.get("topic") or "general"),
         )
         if not results:
@@ -4484,7 +5376,6 @@ class PrivateCompanionPlugin(Star):
             notes = []
             state["notes"] = notes
         notes.append(digest)
-        del notes[:-80]
         state["last_explore_at"] = now
         state["last_status"] = "explored"
         state["last_query"] = query_info
@@ -4521,19 +5412,14 @@ class PrivateCompanionPlugin(Star):
         self._save_data_sync()
         logger.info("[PrivateCompanion] 已完成一次网页探索: %s", _single_line(digest.get("topic"), 80))
 
-    async def _publish_qzone_text(self, text: str) -> dict[str, Any]:
+    async def _publish_qzone_text(self, text: str, event: AstrMessageEvent | None = None) -> dict[str, Any]:
         if not self.enable_qzone_integration:
             return {"success": False, "message": "QQ 空间动态层未启用"}
         content = _single_line(text, 300)
         if not content:
             return {"success": False, "message": "说说内容为空"}
-        plugin = self._find_qzone_instance()
-        service = getattr(plugin, "service", None) if plugin is not None else None
-        publish_post = getattr(service, "publish_post", None)
-        if not callable(publish_post):
-            return {"success": False, "message": "未检测到可用 QQ 空间发布服务"}
         try:
-            post = await publish_post(text=content, images=[])
+            post = await self._qzone_publish_post(event, text=content, images=[])
             return {
                 "success": True,
                 "text": _single_line(getattr(post, "text", content), 300) or content,
@@ -4543,10 +5429,53 @@ class PrivateCompanionPlugin(Star):
         except Exception as exc:
             return {"success": False, "message": _single_line(exc, 160)}
 
+    async def _test_qzone_integration(self, event: AstrMessageEvent, target_id: str = "") -> str:
+        lines = ["QQ 空间测试："]
+
+        lines.append(f"- 整合开关：{'开启' if self.enable_qzone_integration else '关闭'}")
+        lines.append("- 内置服务：可用")
+        lines.append("- 外部插件依赖：无")
+
+        if not self.enable_qzone_integration:
+            lines.append("结果：整合开关关闭。")
+            return "\n".join(lines)
+
+        target = _single_line(target_id, 40)
+        try:
+            ctx = self._qzone_context_from_cookies(await self._qzone_get_cookies(event))
+            target = target or str(ctx.get("uin") or "")
+            lines.append(f"- Cookie：已获取，登录 QQ {ctx.get('uin')}")
+            lines.append("- 读取动态：可用")
+            lines.append("- 发布说说：可用")
+            lines.append("- 点赞/评论：可用")
+            posts = await self._qzone_query_feeds(event, target_id=target or None, pos=0, num=1, with_detail=True)
+            if not posts:
+                lines.append(f"- 查询目标：{target or '默认'}")
+                lines.append("- 查询结果：空")
+                lines.append("结果：读取链路可调用，但没有拿到动态。")
+                return "\n".join(lines)
+            post = posts[0]
+            text = _single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 120)
+            images = list(getattr(post, "images", []) or [])
+            lines.append(f"- 查询目标：{target or '默认'}")
+            lines.append("- 查询结果：成功")
+            lines.append(f"- 作者：{_single_line(getattr(post, 'name', ''), 40) or '未知'}")
+            lines.append(f"- QQ：{str(getattr(post, 'uin', '') or '') or '未知'}")
+            lines.append(f"- 内容：{text or '无文本'}")
+            lines.append(f"- 图片数：{len(images)}")
+            lines.append("结果：QQ 空间读取链路正常。")
+            return "\n".join(lines)
+        except Exception as exc:
+            lines.append(f"- 查询目标：{target or '默认'}")
+            error_text = _single_line(exc, 160)
+            if "空响应" in error_text:
+                error_text = "接口返回空响应，通常表示目标空间不可见、无权限访问，或当前 Cookie 对该目标无访问权"
+            lines.append(f"- 查询结果：失败：{error_text}")
+            lines.append("结果：内置服务已加载，但 QQ 空间访问失败。")
+            return "\n".join(lines)
+
     async def _maybe_publish_qzone_life_post(self) -> None:
         if not (self.enable_qzone_integration and self.enable_qzone_life_publish):
-            return
-        if self._find_qzone_instance() is None:
             return
         now = _now_ts()
         state = self.data.setdefault("qzone_integration", {})
@@ -4634,17 +5563,19 @@ class PrivateCompanionPlugin(Star):
         scheduled = _safe_float(candidate.get("scheduled_ts"), now)
         signature = self._proactive_topic_signature(topic, motive, source, reason)
         pool = self._cleanup_proactive_candidate_pool(now=now)
-        if status == "blocked":
+        if status in {"blocked", "accepted"}:
             for existing in reversed(pool):
                 if not isinstance(existing, dict):
                     continue
-                if str(existing.get("status") or "") != "blocked":
+                if str(existing.get("status") or "") != status:
                     continue
                 if str(existing.get("user_id") or "") != str(user_id):
                     continue
                 if str(existing.get("source") or "") != source or str(existing.get("reason") or "") != reason:
                     continue
                 if str(existing.get("action") or "") != action:
+                    continue
+                if status == "accepted" and str(existing.get("id") or "") == str(candidate.get("id") or ""):
                     continue
                 if str(existing.get("note") or "") != _single_line(note, 160):
                     continue
@@ -6122,6 +7053,7 @@ class PrivateCompanionPlugin(Star):
         if not isinstance(terms, list):
             terms = []
             group["slang_terms"] = terms
+        self._cleanup_group_slang_terms(group)
         candidates: list[str] = []
         for token in re.findall(r"[A-Za-z0-9_]{2,16}|[\u4e00-\u9fff]{2,8}", text):
             token = _single_line(token, 16)
@@ -6132,6 +7064,8 @@ class PrivateCompanionPlugin(Star):
             if re.fullmatch(r"\d+", token):
                 continue
             if len(token) <= 2 and token not in {"草", "绷", "典", "急", "乐"}:
+                continue
+            if self._looks_like_group_member_name(group, token):
                 continue
             candidates.append(token)
         if any(marker in text for marker in ("草", "绷", "典", "急了", "笑死", "蚌埠住", "乐")):
@@ -6154,6 +7088,83 @@ class PrivateCompanionPlugin(Star):
             item["last_seen"] = _now_ts()
         terms.sort(key=lambda item: (_safe_int(item.get("count"), 0, 0), _safe_float(item.get("last_seen"), 0)), reverse=True)
         del terms[self.max_group_slang_terms:]
+
+    def _group_member_name_tokens(self, group: dict[str, Any]) -> set[str]:
+        tokens: set[str] = set()
+
+        def add(value: Any) -> None:
+            text = _single_line(value, 40)
+            if not text or text.isdigit():
+                return
+            tokens.add(text)
+            compact = re.sub(r"\s+", "", text)
+            if compact:
+                tokens.add(compact)
+
+        members = group.get("members") if isinstance(group.get("members"), dict) else {}
+        for user_id, member in members.items():
+            if not isinstance(member, dict):
+                continue
+            add(member.get("name"))
+            add(member.get("identity_name"))
+            add(member.get("display_name"))
+            add(member.get("nickname"))
+            add(member.get("card"))
+            profile = self._worldbook_profile_by_user_id(str(user_id))
+            if isinstance(profile, dict):
+                add(profile.get("name"))
+                for key in ("aliases", "observed_names"):
+                    raw = profile.get(key)
+                    if isinstance(raw, list):
+                        for item in raw:
+                            add(item)
+        return tokens
+
+    def _looks_like_group_member_name(self, group: dict[str, Any], token: str) -> bool:
+        token = _single_line(token, 40)
+        if not token:
+            return False
+        normalized = re.sub(r"\s+", "", token)
+        name_tokens = self._group_member_name_tokens(group)
+        if token in name_tokens or normalized in name_tokens:
+            return True
+        if len(normalized) >= 3:
+            for name in name_tokens:
+                compact_name = re.sub(r"\s+", "", name)
+                if compact_name and (normalized == compact_name or normalized in compact_name or compact_name in normalized):
+                    return True
+        return False
+
+    def _cleanup_group_slang_terms(self, group: dict[str, Any]) -> bool:
+        terms = group.get("slang_terms")
+        if not isinstance(terms, list):
+            return False
+        kept: list[Any] = []
+        removed: set[str] = set()
+        for item in terms:
+            term = _single_line(item.get("term") if isinstance(item, dict) else item, 40)
+            if term and self._looks_like_group_member_name(group, term):
+                removed.add(term)
+                continue
+            kept.append(item)
+        if len(kept) == len(terms):
+            return False
+        group["slang_terms"] = kept
+        meanings = group.get("slang_meanings")
+        if isinstance(meanings, dict):
+            for term in removed:
+                meanings.pop(term, None)
+        return True
+
+    def _cleanup_all_group_slang_terms(self) -> bool:
+        groups = self.data.get("groups") if isinstance(getattr(self, "data", None), dict) else {}
+        if not isinstance(groups, dict):
+            return False
+        changed = False
+        for group in groups.values():
+            if isinstance(group, dict) and self._cleanup_group_slang_terms(group):
+                changed = True
+        return changed
 
     def _update_group_atmosphere(self, group: dict[str, Any]) -> None:
         recent = group.get("recent_messages")
@@ -7002,6 +8013,10 @@ class PrivateCompanionPlugin(Star):
         slang = group.get("slang_terms")
         if not isinstance(slang, list) or len(slang) < 5:
             return
+        if self._cleanup_group_slang_terms(group):
+            slang = group.get("slang_terms")
+            if not isinstance(slang, list) or len(slang) < 5:
+                return
         recent = group.get("recent_messages")
         if not isinstance(recent, list):
             recent = []
@@ -13054,19 +14069,113 @@ Bot 主动后用户回复次数：{reply_count}
             return [normalized]
 
         cleanup_pattern: re.Pattern[str] | None = None
-        if self.enable_segmented_proactive_content_cleanup and self.segmented_proactive_content_cleanup_rule:
-            try:
-                cleanup_pattern = re.compile(self.segmented_proactive_content_cleanup_rule)
-            except re.error as e:
-                logger.warning("[PrivateCompanion] 主动分段内容清理正则无效,跳过清理: %s", e)
+        cleanup_words: list[str] = []
+        if self.enable_segmented_proactive_content_cleanup:
+            if self.segmented_proactive_split_mode == "words":
+                configured_words = getattr(self, "segmented_proactive_content_cleanup_words", [])
+                if isinstance(configured_words, list):
+                    cleanup_words = [str(item) for item in configured_words if str(item) != ""]
+                raw_cleanup_rule = str(self.segmented_proactive_content_cleanup_rule or "")
+                parsed_words: list[Any] | None = None
+                if not cleanup_words and raw_cleanup_rule:
+                    try:
+                        parsed = json.loads(raw_cleanup_rule)
+                        if isinstance(parsed, list):
+                            parsed_words = parsed
+                    except Exception:
+                        parsed_words = None
+                    if parsed_words is None:
+                        parsed_words = re.split(r"[,，、\n]+", raw_cleanup_rule)
+                    cleanup_words = [str(item) for item in parsed_words if str(item) != ""]
+            elif self.segmented_proactive_content_cleanup_rule:
+                try:
+                    cleanup_pattern = re.compile(self.segmented_proactive_content_cleanup_rule)
+                except re.error as e:
+                    logger.warning("[PrivateCompanion] 主动分段内容清理正则无效,跳过清理: %s", e)
+
+        def _protected_cleanup_chunks(value: str) -> list[tuple[str, bool]]:
+            bracket_pairs = {
+                "(": ")",
+                "（": "）",
+                "[": "]",
+                "【": "】",
+                "{": "}",
+            }
+            bracket_closers = {closer: opener for opener, closer in bracket_pairs.items()}
+            quote_pairs = {"\"": "\"", "“": "”"}
+            chunks: list[tuple[str, bool]] = []
+            current: list[str] = []
+            protected = False
+            bracket_stack: list[str] = []
+            quote_close = ""
+
+            def flush() -> None:
+                nonlocal current
+                if current:
+                    chunks.append(("".join(current), protected))
+                    current = []
+
+            for char in str(value or ""):
+                if not protected and char in bracket_pairs:
+                    flush()
+                    protected = True
+                    bracket_stack.append(bracket_pairs[char])
+                    current.append(char)
+                    continue
+                if not protected and char in quote_pairs:
+                    flush()
+                    protected = True
+                    quote_close = quote_pairs[char]
+                    current.append(char)
+                    continue
+
+                current.append(char)
+                if protected:
+                    if quote_close:
+                        if char == quote_close:
+                            quote_close = ""
+                            if not bracket_stack:
+                                flush()
+                                protected = False
+                    elif char in bracket_pairs:
+                        bracket_stack.append(bracket_pairs[char])
+                    elif bracket_stack and char == bracket_stack[-1]:
+                        bracket_stack.pop()
+                        if not bracket_stack:
+                            flush()
+                            protected = False
+                    elif char in bracket_closers and not bracket_stack:
+                        flush()
+                        protected = False
+            flush()
+            return chunks
 
         def _clean_segment(segment: str) -> str:
             original = str(segment or "")
-            cleaned = cleanup_pattern.sub("", original) if cleanup_pattern else original
+            cleaned_parts: list[str] = []
+            for chunk, protected in _protected_cleanup_chunks(original):
+                if protected:
+                    cleaned_parts.append(chunk)
+                    continue
+                cleaned_chunk = chunk
+                if cleanup_words:
+                    for word in cleanup_words:
+                        cleaned_chunk = cleaned_chunk.replace(word, "")
+                elif cleanup_pattern:
+                    cleaned_chunk = cleanup_pattern.sub("", cleaned_chunk)
+                cleaned_parts.append(cleaned_chunk)
+            cleaned = "".join(cleaned_parts)
             cleaned = cleaned.strip()
             original_tail = re.search(r"[。！？!?…~～]+$", original.strip())
-            if cleaned and original_tail and not re.search(r"[。！？!?…~～]+$", cleaned):
-                cleaned += original_tail.group(0)
+            tail_cleaned = _single_line(original_tail.group(0), 20) if original_tail else ""
+            if tail_cleaned:
+                if cleanup_words:
+                    for word in cleanup_words:
+                        tail_cleaned = tail_cleaned.replace(word, "")
+                elif cleanup_pattern:
+                    tail_cleaned = cleanup_pattern.sub("", tail_cleaned)
+            if cleaned and tail_cleaned and not re.search(r"[。！？!?…~～]+$", cleaned):
+                cleaned += tail_cleaned
             return cleaned
 
         if self.segmented_proactive_split_mode == "words":
@@ -13084,7 +14193,7 @@ Bot 主动后用户回复次数：{reply_count}
                 cleaned = _clean_segment(content)
                 if cleaned:
                     segments.append(cleaned)
-            return segments if len(segments) > 1 else [normalized]
+            return segments if segments and (len(segments) > 1 or self.enable_segmented_proactive_content_cleanup) else [normalized]
 
         try:
             raw_segments = re.findall(
@@ -13104,7 +14213,7 @@ Bot 主动后用户回复次数：{reply_count}
             cleaned = _clean_segment(content)
             if cleaned:
                 segments.append(cleaned)
-        return segments if len(segments) > 1 else [normalized]
+        return segments if segments and (len(segments) > 1 or self.enable_segmented_proactive_content_cleanup) else [normalized]
 
     async def _calc_segmented_proactive_interval(self, text: str) -> float:
         if self.segmented_proactive_interval_method == "log":
@@ -16677,6 +17786,7 @@ Bot 主动后用户回复次数：{reply_count}
 
     async def _generate_daily_plan(self) -> dict[str, Any]:
         await self._ensure_yesterday_conversation_summary()
+        await self._maybe_settle_skill_growth(force=True)
         return await generate_daily_plan(self)
 
     def _get_schedule_planning_prompt(self) -> str:
@@ -17759,6 +18869,288 @@ Bot 主动后用户回复次数：{reply_count}
             + "这不是必须回答的内容；如果当前聊天语境不适合,可以只含糊说“在弄一点小东西”。如果回答,要像被问到后才松口,不要主动汇报系统进度,不要一次给完整正文。"
         )
 
+    @staticmethod
+    def _skill_level_title(level: int) -> str:
+        return {1: "初识/陌生", 2: "了解/入门", 3: "基础应用", 4: "熟练应用", 5: "精通/专精", 6: "大师/创新者"}.get(max(1, min(6, int(level or 1))), "初识/陌生")
+
+    @staticmethod
+    def _skill_level_description(level: int) -> str:
+        return {
+            1: "仅听说过名称或基本概念,没有实际应用经验。",
+            2: "知道核心原理和基本操作,能在指导下完成简单任务。",
+            3: "能独立完成常规任务,但效率和深层理解仍有限。",
+            4: "能稳定高效处理大部分常见任务,并迁移到相近场景。",
+            5: "能优化流程、预判问题,也能教别人掌握该技能。",
+            6: "能创造方法或突破框架,在未知条件下仍表现卓越。",
+        }.get(max(1, min(6, int(level or 1))), "")
+
+    @staticmethod
+    def _skill_level_from_exp(exp: float) -> int:
+        level = 1
+        for idx, threshold in enumerate([0, 100, 260, 520, 900, 1400], start=1):
+            if exp >= threshold:
+                level = idx
+        return max(1, min(6, level))
+
+    @staticmethod
+    def _skill_next_exp(level: int) -> int | None:
+        return {1: 100, 2: 260, 3: 520, 4: 900, 5: 1400}.get(max(1, min(6, int(level or 1))))
+
+    def _skill_growth_persona_text(self) -> str:
+        return "\n".join(part for part in (
+            self.bot_name,
+            self._get_default_persona_prompt(),
+            self.schedule_persona_prompt,
+            self.schedule_worldview_prompt,
+            self.worldview_adaptation_prompt,
+            " ".join(str(item) for item in self.data.get("can_do", []) if item),
+        ) if part)
+
+    def _skill_growth_default_catalog(self) -> list[dict[str, Any]]:
+        text = self._skill_growth_persona_text()
+        catalog: list[dict[str, Any]] = []
+
+        def add(name: str, category: str, keywords: list[str]) -> None:
+            if not any(item["name"] == name for item in catalog):
+                catalog.append({"name": name, "category": category, "keywords": keywords})
+
+        for raw in re.split(r"[,，、\n]+", str(self.skill_growth_custom_skills or "")):
+            name = _single_line(raw, 24)
+            if name:
+                add(name, "自定义", [name])
+        if any(token in text for token in ("学生", "上课", "学校", "高中", "初中", "大学", "作业", "考试")):
+            for name in ("语文", "数学", "英语", "物理", "化学", "生物", "历史", "地理"):
+                add(name, "学科", [name, "上课", "作业", "复习", "预习", "考试", "课本"])
+            add("写作", "兴趣", ["写作", "作文", "小说", "日记", "语文"])
+            add("绘画", "兴趣", ["绘画", "画画", "涂鸦", "素描", "草稿纸"])
+        elif any(token in text for token in ("异世界", "冒险", "魔法", "骑士", "精灵", "公会", "地下城")):
+            add("剑术", "冒险", ["剑", "训练", "挥剑", "战斗", "练习"])
+            add("魔法", "冒险", ["魔法", "咒文", "法术", "魔力", "术式"])
+            add("草药学", "冒险", ["草药", "药水", "采集", "治疗"])
+            add("野外生存", "冒险", ["野外", "露营", "探索", "地图", "生火"])
+            add("交涉", "社交", ["交涉", "委托", "公会", "谈判", "聊天"])
+        else:
+            add("观察", "生活", ["观察", "记录", "日记", "生活", "想"])
+            add("阅读", "兴趣", ["阅读", "看书", "资料", "新闻", "搜索", "漫画"])
+            add("写作", "兴趣", ["写作", "小说", "日记", "灵感", "创作"])
+            add("整理", "生活", ["整理", "收拾", "计划", "课本", "房间"])
+            add("社交", "关系", ["聊天", "群聊", "私聊", "回复", "分享"])
+        if any(token in text for token in ("音乐", "唱歌", "钢琴", "吉他")):
+            add("音乐", "兴趣", ["音乐", "唱歌", "练琴", "旋律"])
+        if any(token in text for token in ("料理", "做饭", "烹饪", "厨房")):
+            add("烹饪", "生活", ["烹饪", "做饭", "厨房", "料理"])
+        return catalog[:18]
+
+    def _skill_growth_stable_bonus(self, name: str, text: str) -> float:
+        seed = f"{self.bot_name}|{name}|{hashlib.sha1(text.encode('utf-8', errors='ignore')).hexdigest()[:12]}"
+        bonus = float(int(hashlib.sha1(seed.encode("utf-8")).hexdigest()[:6], 16) % 60)
+        if name and name in text:
+            bonus += 55
+        if any(token in text for token in (f"擅长{name}", f"喜欢{name}", f"{name}很好", f"{name}优秀")):
+            bonus += 70
+        return min(180.0, bonus)
+
+    def _ensure_skill_growth_profile_locked(self) -> dict[str, Any]:
+        state = self.data.setdefault("skill_growth", {})
+        if not isinstance(state, dict):
+            state = {}
+            self.data["skill_growth"] = state
+        skills = state.setdefault("skills", {})
+        if not isinstance(skills, dict):
+            skills = {}
+            state["skills"] = skills
+        text = self._skill_growth_persona_text()
+        profile_changed = False
+        for item in self._skill_growth_default_catalog():
+            name = _single_line(item.get("name"), 24)
+            if not name:
+                continue
+            skill_id = hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
+            if not isinstance(skills.get(skill_id), dict):
+                base_exp = self._skill_growth_stable_bonus(name, text)
+                level = self._skill_level_from_exp(base_exp)
+                skills[skill_id] = {
+                    "id": skill_id,
+                    "name": name,
+                    "category": _single_line(item.get("category"), 20) or "能力",
+                    "keywords": item.get("keywords") if isinstance(item.get("keywords"), list) else [name],
+                    "exp": round(base_exp, 2),
+                    "level": level,
+                    "level_title": self._skill_level_title(level),
+                    "created_ts": _now_ts(),
+                    "last_trained_ts": 0,
+                    "training_count": 0,
+                    "recent_logs": [],
+                }
+                profile_changed = True
+        if profile_changed:
+            state["_profile_changed"] = True
+        state.setdefault("processed_schedule_keys", [])
+        state.setdefault("last_settled_day", "")
+        state.setdefault("updated_ts", _now_ts())
+        return state
+
+    def _skill_growth_match_weight(self, skill: dict[str, Any], activity_text: str) -> float:
+        text = str(activity_text or "")
+        if not text:
+            return 0.0
+        keywords = skill.get("keywords") if isinstance(skill.get("keywords"), list) else []
+        name = _single_line(skill.get("name"), 24)
+        matched = sum(1 for keyword in [name, *keywords] if (key := _single_line(keyword, 24)) and key in text)
+        if matched <= 0:
+            return 0.0
+        weight = 1.0 + min(2.0, matched * 0.35)
+        if any(token in text for token in ("练", "训练", "复习", "预习", "作业", "创作", "写", "阅读", "搜索", "学习")):
+            weight += 0.45
+        if any(token in text for token in ("休息", "睡", "发呆", "刷手机")) and matched == 1:
+            weight *= 0.55
+        return max(0.0, weight)
+
+    async def _maybe_settle_skill_growth(self, *, force: bool = False) -> None:
+        if not self.enable_skill_growth_simulation:
+            return
+        now_ts = _now_ts()
+        async with self._data_lock:
+            state = self._ensure_skill_growth_profile_locked()
+            profile_changed = bool(state.pop("_profile_changed", False))
+            if not force and now_ts - _safe_float(state.get("last_check_ts"), 0) < 20 * 60:
+                if profile_changed:
+                    state["updated_ts"] = now_ts
+                    self._save_data_sync()
+                return
+            state["last_check_ts"] = now_ts
+            plan = self.data.get("daily_plan", {})
+            if not isinstance(plan, dict):
+                if profile_changed:
+                    state["updated_ts"] = now_ts
+                    self._save_data_sync()
+                return
+            items = plan.get("items") if isinstance(plan.get("items"), list) else plan.get("schedule")
+            if not isinstance(items, list):
+                if profile_changed:
+                    state["updated_ts"] = now_ts
+                    self._save_data_sync()
+                return
+            day_key = _single_line(plan.get("date"), 20) or _today_key()
+            processed = state.get("processed_schedule_keys") if isinstance(state.get("processed_schedule_keys"), list) else []
+            if state.get("last_settled_day") != day_key:
+                processed = [key for key in processed if str(key).startswith(day_key + "|")]
+                state["processed_schedule_keys"] = processed
+                state["last_settled_day"] = day_key
+            now_minutes = datetime.now().hour * 60 + datetime.now().minute
+            skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+            changed = profile_changed
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                time_text = _single_line(item.get("time"), 12)
+                minutes = self._parse_hhmm_to_minutes(time_text)
+                if minutes is None or minutes > now_minutes:
+                    continue
+                key = f"{day_key}|{index}|{time_text}"
+                if key in processed:
+                    continue
+                activity_text = " ".join(_single_line(item.get(field), 120) for field in ("activity", "title", "summary", "message_seed", "mood") if _single_line(item.get(field), 120))
+                for skill in skills.values():
+                    if not isinstance(skill, dict):
+                        continue
+                    weight = self._skill_growth_match_weight(skill, activity_text)
+                    if weight <= 0:
+                        continue
+                    old_level = _safe_int(skill.get("level"), 1, 1)
+                    gained = round(max(0.25, weight * 4.0 * float(self.skill_growth_rate or 1.0)), 2)
+                    skill["exp"] = round(_safe_float(skill.get("exp"), 0) + gained, 2)
+                    new_level = self._skill_level_from_exp(_safe_float(skill.get("exp"), 0))
+                    skill["level"] = new_level
+                    skill["level_title"] = self._skill_level_title(new_level)
+                    skill["last_trained_ts"] = now_ts
+                    skill["training_count"] = _safe_int(skill.get("training_count"), 0, 0) + 1
+                    logs = skill.setdefault("recent_logs", [])
+                    if not isinstance(logs, list):
+                        logs = []
+                        skill["recent_logs"] = logs
+                    logs.append({"ts": now_ts, "source": "schedule", "activity": _single_line(activity_text, 80), "exp": gained, "level_up": new_level > old_level})
+                    del logs[:-8]
+                    changed = True
+                processed.append(key)
+                changed = True
+            if len(processed) > 120:
+                del processed[:-120]
+            if changed:
+                state["updated_ts"] = now_ts
+                self._save_data_sync()
+
+    def _format_skill_growth_for_prompt(self, limit: int = 8) -> str:
+        if not self.enable_skill_growth_simulation:
+            return ""
+        state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
+        skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        if not skills:
+            return ""
+        ranked = sorted([item for item in skills.values() if isinstance(item, dict)], key=lambda item: (_safe_int(item.get("level"), 1, 1), _safe_float(item.get("exp"), 0)), reverse=True)[:limit]
+        lines = [
+            "【Bot 技能成长自我认知】",
+            "这些是 Bot 自己长期练习形成的能力层级,不是夸张设定；回复时可以自然体现熟练度,不要直接报数值,除非用户询问技能/学习/最近练了什么。",
+        ]
+        for skill in ranked:
+            level = _safe_int(skill.get("level"), 1, 1)
+            lines.append(f"- {_single_line(skill.get('name'), 24)}: Lv.{level} {self._skill_level_title(level)}；{self._skill_level_description(level)}")
+        return "\n".join(lines)
+
+    def _format_skill_growth_schedule_context(self, limit: int = 8) -> str:
+        if not self.enable_skill_growth_simulation or not self.enable_skill_growth_schedule_influence:
+            return ""
+        strength = max(0.0, min(1.0, _safe_float(self.skill_growth_schedule_influence_strength, 0.35)))
+        if strength <= 0:
+            return ""
+        state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
+        skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        if not skills:
+            return ""
+        now_ts = _now_ts()
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for raw in skills.values():
+            if not isinstance(raw, dict):
+                continue
+            level = _safe_int(raw.get("level"), 1, 1)
+            exp = _safe_float(raw.get("exp"), 0)
+            training_count = _safe_int(raw.get("training_count"), 0, 0)
+            last_trained = _safe_float(raw.get("last_trained_ts"), 0)
+            recency = 0.0
+            if last_trained > 0:
+                age_days = max(0.0, (now_ts - last_trained) / 86400)
+                recency = max(0.0, 3.0 - age_days)
+            score = level * 20 + exp / 20 + min(12, training_count) + recency * 4
+            ranked.append((score, raw))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        if not ranked:
+            return ""
+        strength_text = "很轻" if strength < 0.25 else "轻" if strength < 0.55 else "中等" if strength < 0.8 else "较强"
+        lines = [
+            "【技能成长对日程的能力边界影响】",
+            f"影响强度：{strength_text}。这些技能主要用于保持能力边界一致,优先级低于日期语境、身份主线、状态、天气和用户介入；不要把今天写成训练清单。",
+            "安排方式：高等级技能会改变她面对相关任务的表现。这里的任务可以是题目、创作、料理、训练、战斗、交涉、研究、手工或任何符合人格的活动。Lv.4 以后不要再写她被常规任务难住、完全不会或长期卡死；Lv.5/Lv.6 面对普通任务应表现为熟练、快速、能检查/讲清楚或优化做法。只有高阶、陌生、超纲、状态极差或复杂综合场景,才可以短暂停顿。",
+            "低等级技能仍可以被基础任务卡住；中等级技能可以偶尔卡在细节上,但应能通过复习、查资料、请教、试错或换思路推进。",
+        ]
+        for _, skill in ranked[:limit]:
+            level = _safe_int(skill.get("level"), 1, 1)
+            name = _single_line(skill.get("name"), 24)
+            category = _single_line(skill.get("category"), 18) or "能力"
+            count = _safe_int(skill.get("training_count"), 0, 0)
+            last = self._format_timestamp_elapsed(skill.get("last_trained_ts", 0))
+            if level >= 5:
+                tendency = "普通相关任务不应再被写成难住或不会；可体现效率、判断、优化做法或教别人。只有高阶/陌生/超纲/复杂场景才短暂停顿。"
+            elif level >= 4:
+                tendency = "常规相关任务不应卡死,最多是检查细节、换思路、试错后推进,或被进阶内容短暂拖住。"
+            elif level >= 3:
+                tendency = "常规相关任务能独立推进,但效率一般；可以卡在细节上,再通过复习、查资料或换思路解决。"
+            elif count > 0:
+                tendency = "可以被基础任务难住或需要指导,适合偶尔补一点基础练习或入门尝试,体现仍在慢慢学。"
+            else:
+                tendency = "只在当天身份和场景很合适时轻轻出现,不要强行安排。"
+            lines.append(f"- {name}（{category}, Lv.{level} {self._skill_level_title(level)}, 训练{count}次, 最近{last}）：{tendency}")
+        return "\n".join(lines)
+
     def _current_story_plan_snapshot(self) -> dict[str, Any]:
         plan = self.data.get("daily_story_plan", {})
         if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
@@ -18598,14 +19990,20 @@ Bot 主动后用户回复次数：{reply_count}
             item_time = _single_line(item.get("time"), 8)
             if self._parse_hhmm_to_minutes(item_time) is None:
                 continue
-            activity = self._soften_destructive_daily_plan_text(_single_line(item.get("activity"), 120))
+            activity = self._align_plan_text_with_skill_bounds(
+                self._soften_destructive_daily_plan_text(_single_line(item.get("activity"), 120))
+            )
             if not activity:
                 continue
-            mood = self._soften_destructive_daily_plan_text(_single_line(item.get("mood"), 30))
-            message_seed = self._soften_destructive_daily_plan_text(
-                self._deemphasize_state_report_preamble(
-                    _single_line(item.get("message_seed"), 140),
-                    reason="background_schedule",
+            mood = self._align_plan_text_with_skill_bounds(
+                self._soften_destructive_daily_plan_text(_single_line(item.get("mood"), 30))
+            )
+            message_seed = self._align_plan_text_with_skill_bounds(
+                self._soften_destructive_daily_plan_text(
+                    self._deemphasize_state_report_preamble(
+                        _single_line(item.get("message_seed"), 140),
+                        reason="background_schedule",
+                    )
                 )
             )
             items.append(
@@ -18617,6 +20015,94 @@ Bot 主动后用户回复次数：{reply_count}
                 }
             )
         return sorted(items[: self.daily_plan_item_count], key=lambda item: self._parse_hhmm_to_minutes(item["time"]) or 0)
+
+    def _skill_levels_for_plan_bounds(self) -> dict[str, int]:
+        if not self.enable_skill_growth_simulation or not self.enable_skill_growth_schedule_influence:
+            return {}
+        state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
+        skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        levels = {}
+        for raw in skills.values():
+            if not isinstance(raw, dict):
+                continue
+            level = _safe_int(raw.get("level"), 1, 1)
+            name = _single_line(raw.get("name"), 24)
+            if name:
+                levels[name] = max(1, min(6, level))
+        return dict(list(levels.items())[:18])
+
+    @staticmethod
+    def _skill_task_noun_for_text(text: str) -> str:
+        if any(token in text for token in ("题", "作业", "试卷", "考试", "验算", "算")):
+            return "题目"
+        if any(token in text for token in ("写", "小说", "文章", "日记", "作文", "创作", "草稿")):
+            return "创作"
+        if any(token in text for token in ("画", "绘", "素描", "线稿", "上色")):
+            return "练习"
+        if any(token in text for token in ("做饭", "料理", "烹饪", "菜", "厨房")):
+            return "料理"
+        if any(token in text for token in ("战斗", "训练", "剑", "魔法", "探索", "委托")):
+            return "训练"
+        return "任务"
+
+    @staticmethod
+    def _skill_bound_replacement(name: str, level: int, *, advanced: bool = False, task_noun: str = "任务") -> str:
+        hard = f"{'高阶' if advanced else '常规'}{task_noun}"
+        if level <= 1:
+            return f"被{name}的基础部分绊住,需要从头摸一遍"
+        if level == 2:
+            return f"在{name}基础{task_noun}上慢慢摸索,照着例子才推进下去"
+        if level == 3:
+            return f"{name}常规{task_noun}能自己推进,只是效率不高,中途查了两处"
+        if level == 4:
+            return f"在{name}{hard}上停了一会儿,换个思路后理顺了"
+        if level == 5:
+            return f"把{name}{hard}顺手理清,还顺便检查了一遍更稳的做法"
+        return f"把{name}{hard}拆开重组了一遍,顺手想出一个更漂亮的做法"
+
+    def _align_plan_text_with_skill_bounds(self, text: str) -> str:
+        normalized = _single_line(text, 160)
+        if not normalized:
+            return ""
+        levels = self._skill_levels_for_plan_bounds()
+        if not levels:
+            return normalized
+        difficulty_tokens = (
+            "难住",
+            "卡住",
+            "卡死",
+            "不会做",
+            "做不出来",
+            "完全不会",
+            "看不懂",
+            "想不出来",
+            "算不出来",
+            "写不出来",
+        )
+        if not any(token in normalized for token in difficulty_tokens):
+            return normalized
+        advanced_tokens = ("竞赛", "压轴", "高阶", "陌生", "超纲", "很偏", "少见", "难题", "综合题", "复杂")
+        advanced = any(token in normalized for token in advanced_tokens)
+        task_noun = self._skill_task_noun_for_text(normalized)
+        for name, level in levels.items():
+            if name not in normalized:
+                continue
+            replacement = self._skill_bound_replacement(name, level, advanced=advanced, task_noun=task_noun)
+            replacements = [
+                f"被{name}题难住",
+                f"被{name}难住",
+                f"被{name}卡住",
+                f"{name}题卡住",
+                f"{name}不会做",
+                f"{name}做不出来",
+                f"{name}看不懂",
+                f"{name}算不出来",
+                f"{name}写不出来",
+                f"{name}完全不会",
+            ]
+            for old in replacements:
+                normalized = normalized.replace(old, replacement)
+        return _single_line(normalized, 160)
 
     @staticmethod
     def _soften_destructive_daily_plan_text(text: str) -> str:
@@ -19001,6 +20487,7 @@ Bot 主动后用户回复次数：{reply_count}
         logger.debug(f"[PrivateCompanion] {prefix} {user_id}: {reason_text}")
 
     async def _tick(self):
+        await self._maybe_settle_skill_growth()
         await self._maybe_trigger_bilibili_boredom_watch()
         await self._maybe_trigger_web_exploration()
         await self._maybe_trigger_news_boredom_read()
@@ -19320,6 +20807,8 @@ Bot 主动后用户回复次数：{reply_count}
             "陪伴 长期记忆\n"
             "陪伴 日记\n"
             "陪伴 测试夹层阅读\n"
+            "陪伴 测试QQ空间 [QQ]\n"
+            "陪伴 发说说 <正文>\n"
             "陪伴 重置夹层密码\n"
             "陪伴 生成日记\n"
             "陪伴 日期列表\n"
@@ -19393,11 +20882,6 @@ Bot 主动后用户回复次数：{reply_count}
         """查看某位用户 QQ 空间说说,可按需点赞或评论。"""
         if not self.enable_qzone_integration:
             return json.dumps({"status": "disabled", "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
-        plugin = self._find_qzone_instance()
-        service = getattr(plugin, "service", None) if plugin is not None else None
-        query = getattr(service, "query_feeds", None)
-        if not callable(query):
-            return json.dumps({"status": "unavailable", "message": "未检测到可用 QQ 空间服务"}, ensure_ascii=False)
         target = _single_line(user_id, 40)
         if not target:
             try:
@@ -19405,17 +20889,17 @@ Bot 主动后用户回复次数：{reply_count}
             except Exception:
                 target = ""
         try:
-            posts = await query(target_id=target or None, pos=max(0, int(pos or 0)), num=1, with_detail=True)
+            posts = await self._qzone_query_feeds(event, target_id=target or None, pos=max(0, int(pos or 0)), num=1, with_detail=True)
             if not posts:
                 return json.dumps({"status": "empty", "message": "查询结果为空"}, ensure_ascii=False)
             post = posts[0]
             action_msg = ""
-            if reply and callable(getattr(service, "comment_posts", None)):
-                await service.comment_posts(post, event=event)
-                action_msg = "已评论"
-            if like and callable(getattr(service, "like_posts", None)):
-                await service.like_posts(post)
-                action_msg = (action_msg + "并点赞") if action_msg else "已点赞"
+            if reply:
+                comment = await self._qzone_comment_post(event, post)
+                action_msg = f"已评论：{comment}"
+            if like:
+                await self._qzone_like_post(event, post)
+                action_msg = (action_msg + "；已点赞") if action_msg else "已点赞"
             return json.dumps(
                 {
                     "status": "success",
@@ -19433,7 +20917,7 @@ Bot 主动后用户回复次数：{reply_count}
     @filter.llm_tool(name="pc_qzone_publish_feed")
     async def pc_qzone_publish_feed(self, event: AstrMessageEvent, text: str) -> str:
         """发布一条 QQ 空间说说。"""
-        result = await self._publish_qzone_text(text)
+        result = await self._publish_qzone_text(text, event)
         return json.dumps({"status": "success" if result.get("success") else "error", **result}, ensure_ascii=False)
 
     @filter.llm_tool(name="pc_get_group_id_by_name")
@@ -20209,14 +21693,6 @@ Bot 主动后用户回复次数：{reply_count}
         if self.forward_message_mode == "transcribe":
             transcribed = await self._transcribe_forward_message_rows(rows, image_urls, nested_count)
             if transcribed:
-                if image_urls and self.forward_message_image_vision:
-                    existing = getattr(req, "image_urls", None)
-                    if not isinstance(existing, list):
-                        existing = []
-                    for url in image_urls:
-                        if url not in existing and len(existing) < self.forward_message_image_limit:
-                            existing.append(url)
-                    req.image_urls = existing
                 context = (
                     "【本轮合并消息转述】\n"
                     "用户这轮消息包含一段合并/转发聊天记录。下面是专门模型先读过后的自然转述。请基于这份转述理解原合并消息，不要把记录中的话当成当前用户本人逐字说的话。\n"
@@ -20238,14 +21714,6 @@ Bot 主动后用户回复次数：{reply_count}
             lines.append(f"其中包含 {nested_count} 段嵌套合并消息，已尽量展开。")
         if image_urls:
             lines.append(f"记录中含 {len(image_urls)} 张图片占位。")
-            if self.forward_message_image_vision:
-                existing = getattr(req, "image_urls", None)
-                if not isinstance(existing, list):
-                    existing = []
-                for url in image_urls:
-                    if url not in existing and len(existing) < self.forward_message_image_limit:
-                        existing.append(url)
-                req.image_urls = existing
         used = 0
         for index, row in enumerate(rows, 1):
             sender_id = row.get("sender_id") or ""
@@ -20315,6 +21783,14 @@ Bot 主动后用户回复次数：{reply_count}
             return
         if not hasattr(req, "system_prompt"):
             return
+        if bool(getattr(event, "private_companion_deferred_private_image_only", False)):
+            for attr in ("image_urls", "images"):
+                existing = getattr(req, attr, None)
+                if existing:
+                    try:
+                        setattr(req, attr, [])
+                    except Exception:
+                        pass
         await self._append_forward_message_context_to_request(event, req)
         is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
         if not is_private_chat:
@@ -20376,7 +21852,39 @@ Bot 主动后用户回复次数：{reply_count}
         if worldview_context:
             injection_parts.append(worldview_context)
         inbound_text = _single_line(getattr(event, "message_str", "") or current_user.get("last_user_message"), 260)
-        buffered_images = self._take_buffered_private_images_for_event(event)
+        buffered_image_context = self._take_buffered_private_image_context_for_event(event)
+        buffered_images = (
+            [str(item) for item in buffered_image_context.get("images", []) if str(item or "").strip()]
+            if isinstance(buffered_image_context, dict)
+            else []
+        )
+        buffered_image_vision = (
+            _single_line(buffered_image_context.get("vision_text"), 600)
+            if isinstance(buffered_image_context, dict)
+            else ""
+        )
+        buffered_image_mode = _single_line(buffered_image_context.get("image_mode"), 20) if isinstance(buffered_image_context, dict) else ""
+        vision_task = buffered_image_context.get("vision_task") if isinstance(buffered_image_context, dict) else None
+        if not buffered_image_vision and isinstance(vision_task, asyncio.Task):
+            try:
+                buffered_image_vision = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=2.5), 600)
+            except asyncio.TimeoutError:
+                logger.info("[PrivateCompanion] 私聊图片视觉转述仍在进行,本轮先注入路径兜底")
+            except Exception as exc:
+                logger.info("[PrivateCompanion] 私聊图片视觉转述获取失败: %s", _single_line(exc, 120))
+        if (
+            buffered_images
+            and buffered_image_mode == "direct"
+            and not buffered_image_vision
+            and not self._event_main_provider_supports_image(event)
+        ):
+            buffered_image_vision = _single_line(
+                await self._transcribe_private_inbound_images(
+                    buffered_images,
+                    umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                ),
+                600,
+            )
         combined_text = await self._consume_semantic_message_buffer_for_event(event, private_chat=True)
         if combined_text:
             injection_parts.append(
@@ -20386,13 +21894,35 @@ Bot 主动后用户回复次数：{reply_count}
             )
             inbound_text = _single_line(combined_text.replace("\n", " "), 260)
         if buffered_images:
-            injection_parts.append(
-                "【本轮延迟图片】\n"
-                "用户刚刚先单独发了一张图片。若本轮还有文字补充,请把下面的图片路径视为用户所说的“这张/刚才那张图”；"
-                "若没有文字补充,就直接理解这张图片本身。"
-                "如果需要调用图片处理工具,优先使用这些稳定路径,不要使用更早的 compressed 临时路径。\n"
-                + "\n".join(f"- {path}" for path in buffered_images)
-            )
+            if buffered_image_mode == "direct" and self._event_main_provider_supports_image(event):
+                existing = getattr(req, "image_urls", None)
+                if not isinstance(existing, list):
+                    existing = []
+                for image_ref in buffered_images:
+                    if image_ref not in existing:
+                        existing.append(image_ref)
+                req.image_urls = existing
+                logger.info("[PrivateCompanion] 私聊延迟图片已挂回视觉主模型: user=%s images=%s", user_id, len(buffered_images))
+                injection_parts.append(
+                    "【本轮延迟图片】\n"
+                    "用户刚刚先单独发了一张图片,随后补充了文字。图片已随本轮请求一起交给当前视觉主模型；"
+                    "请把图片和用户文字作为同一轮发言理解,不要提插件或处理过程。"
+                )
+            elif buffered_image_vision:
+                logger.info("[PrivateCompanion] 私聊延迟图片已注入视觉摘要: user=%s chars=%s", user_id, len(buffered_image_vision))
+                injection_parts.append(
+                    "【本轮延迟图片】\n"
+                    "用户刚刚先单独发了一张图片,随后补充了文字。下面是视觉模型对刚才那张图的内部摘要；"
+                    "请把它和用户本轮文字一起理解,不要提模型、插件或路径。\n"
+                    f"{buffered_image_vision}"
+                )
+            else:
+                injection_parts.append(
+                    "【本轮延迟图片】\n"
+                    "用户刚刚先单独发了一张图片,随后补充了文字。图片已暂存,但视觉转述暂时不可用；"
+                    "如果用户问的是图片内容,请自然说明自己这边暂时没看清,不要编造画面。\n"
+                    + "\n".join(f"- {path}" for path in buffered_images)
+                )
         hidden_creative_context = self._format_hidden_creative_context_for_reply(inbound_text)
         if hidden_creative_context:
             injection_parts.append(hidden_creative_context)
@@ -20402,6 +21932,9 @@ Bot 主动后用户回复次数：{reply_count}
         bookshelf_reading_context = self._format_bookshelf_reading_context_for_reply(inbound_text)
         if bookshelf_reading_context:
             injection_parts.append(bookshelf_reading_context)
+        skill_context = self._format_skill_growth_for_prompt()
+        if skill_context:
+            injection_parts.append(skill_context)
         companion_injection = self._format_companion_planner_injection(current_user)
         if companion_injection:
             injection_parts.append(companion_injection)
@@ -20705,6 +22238,8 @@ Bot 主动后用户回复次数：{reply_count}
             "梦境", "做了什么梦", "今日梦境",
             "重置夹层密码", "重设夹层密码", "重新生成夹层密码", "重置书柜密码", "重设书柜密码", "重新生成书柜密码",
             "测试本子", "测试书柜本子", "测试夹层本子", "测试夹层阅读", "测试私密阅读",
+            "测试QQ空间", "测试空间", "QQ空间测试", "测试说说",
+            "发说说", "发QQ空间", "发布说说", "空间发布", "发布空间",
         }
 
         is_private = bool(getattr(event, "is_private_chat", lambda: False)())
@@ -20816,6 +22351,10 @@ Bot 主动后用户回复次数：{reply_count}
                 response = "已重新设置书柜夹层密码。"
             elif action in {"测试本子", "测试书柜本子", "测试夹层本子", "测试夹层阅读", "测试私密阅读"}:
                 response = "正在测试夹层阅读：寻找篇幅较短的内容、读取信息、形成阅读印象并放入书柜夹层。"
+            elif action in {"测试QQ空间", "测试空间", "QQ空间测试", "测试说说"}:
+                response = "正在测试 QQ 空间动态层：只检查读取能力，不会发布、点赞或评论。"
+            elif action in {"发说说", "发QQ空间", "发布说说", "空间发布", "发布空间"}:
+                response = "正在发布 QQ 空间说说。"
             elif action in {"生成日记", "刷新日记"}:
                 response = "正在写今天的日记。"
             elif action in {"日期列表", "重要日期", "日期"}:
@@ -20861,6 +22400,31 @@ Bot 主动后用户回复次数：{reply_count}
                 response_image_path,
                 extra_components=response_extra_components,
             )
+        if action in {"发说说", "发QQ空间", "发布说说", "空间发布", "发布空间"}:
+            if not value:
+                await self._reply(event, "请这样使用：陪伴 发说说 <正文>\n这是公开发布动作，正文不能为空。")
+                event.stop_event()
+                return
+            await self._reply(event, response)
+            result = await self._publish_qzone_text(value, event)
+            if result.get("success"):
+                await self._reply(
+                    event,
+                    "QQ 空间说说已发布。\n"
+                    f"QQ：{result.get('uin') or '未知'}\n"
+                    f"tid：{result.get('tid') or '未知'}\n"
+                    f"正文：{_single_line(result.get('text'), 160)}",
+                )
+            else:
+                await self._reply(event, f"发布失败：{_single_line(result.get('message'), 180)}")
+            event.stop_event()
+            return
+        if action in {"测试QQ空间", "测试空间", "QQ空间测试", "测试说说"}:
+            await self._reply(event, response)
+            result = await self._test_qzone_integration(event, value)
+            await self._reply(event, result)
+            event.stop_event()
+            return
         if action in {"测试本子", "测试书柜本子", "测试夹层本子", "测试夹层阅读", "测试私密阅读"}:
             await self._reply(event, response)
             result = await self._run_jm_cosmos_read_action(user)
@@ -21450,8 +23014,6 @@ Bot 主动后用户回复次数：{reply_count}
         if text.startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴")):
             return
 
-        defer_private_image_only = False
-        private_image_buffer_key = ""
         async with self._data_lock:
             user = self._get_user(user_id)
             is_target_user = self._is_target_private_user(user_id, user) and bool(user.get("enabled", True))
@@ -21463,6 +23025,7 @@ Bot 主动后用户回复次数：{reply_count}
                 return
             private_image_only = is_target_user and self._is_private_image_only_message(event, text)
             if private_image_only:
+                setattr(event, "private_companion_deferred_private_image_only", True)
                 key = self._semantic_buffer_key(f"private:{user_id}", user_id)
                 self._note_semantic_message_buffer(
                     key,
@@ -21471,10 +23034,28 @@ Bot 主动后用户回复次数：{reply_count}
                 )
                 buffers = getattr(self, "_semantic_message_buffers", None)
                 if isinstance(buffers, dict) and isinstance(buffers.get(key), dict):
-                    buffers[key]["images"] = self._persist_private_inbound_images(event, user_id)
-                    defer_private_image_only = True
-                    private_image_buffer_key = key
+                    persisted_images = await self._persist_private_inbound_images(event, user_id)
+                    buffers[key]["images"] = persisted_images
+                    direct_image_mode = bool(persisted_images) and self._event_main_provider_supports_image(event)
+                    buffers[key]["image_mode"] = "direct" if direct_image_mode else "caption"
+                    if persisted_images and not direct_image_mode:
+                        buffers[key]["vision_task"] = asyncio.create_task(
+                            self._transcribe_private_inbound_images(
+                                persisted_images,
+                                umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                            )
+                        )
+                    logger.info(
+                        "[PrivateCompanion] 私聊单图已进入防抖缓冲: user=%s images=%s mode=%s vision=%s",
+                        user_id,
+                        len(persisted_images),
+                        "direct" if direct_image_mode else "caption",
+                        bool(persisted_images) and not direct_image_mode,
+                    )
+                    asyncio.create_task(self._finalize_private_image_buffer_after_wait(key, user_id, received_ts))
                 self._save_data_sync()
+                event.stop_event()
+                return
             elif is_target_user:
                 key = self._semantic_buffer_key(f"private:{user_id}", user_id)
                 buffers = getattr(self, "_semantic_message_buffers", None)
@@ -21563,30 +23144,6 @@ Bot 主动后用户回复次数：{reply_count}
             response = ""
             self._save_data_sync()
             user_snapshot = dict(user)
-
-        if defer_private_image_only and private_image_buffer_key:
-            wait = max(0.0, float(getattr(self, "semantic_message_debounce_seconds", 0.0) or 0.0))
-            buffers = getattr(self, "_semantic_message_buffers", None)
-            buffer = buffers.get(private_image_buffer_key) if isinstance(buffers, dict) else None
-            first_ts = _safe_float(buffer.get("first_ts"), received_ts) if isinstance(buffer, dict) else received_ts
-            remaining = max(0.0, first_ts + wait - _now_ts())
-            if remaining > 0:
-                await asyncio.sleep(remaining)
-            buffers = getattr(self, "_semantic_message_buffers", None)
-            buffer = buffers.get(private_image_buffer_key) if isinstance(buffers, dict) else None
-            messages = buffer.get("messages") if isinstance(buffer, dict) and isinstance(buffer.get("messages"), list) else []
-            placeholder = "用户刚刚先单独发送了一张图片,可能马上会补充说明。"
-            has_followup = any(
-                isinstance(item, dict)
-                and (cleaned := _single_line(item.get("text"), 260))
-                and cleaned != placeholder
-                for item in messages
-            )
-            if has_followup or not isinstance(buffer, dict):
-                logger.info("[PrivateCompanion] 私聊单图已由补充消息接管: user=%s", user_id)
-                event.stop_event()
-                return
-            logger.info("[PrivateCompanion] 私聊单图等待补充后放行原图: user=%s", user_id)
 
         if is_target_user and schedule_adjustment_applied:
             asyncio.create_task(self._kick_proactive_loop_once())

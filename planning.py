@@ -489,6 +489,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
     calendar_context = plugin._format_calendar_context_for_prompt()
     schedule_adjustments = plugin._format_schedule_adjustments_for_prompt()
     recent_plan_history = plugin._format_recent_daily_plan_history_for_prompt()
+    skill_growth_context = plugin._format_skill_growth_schedule_context()
     try:
         now_dt = datetime.strptime(now, "%Y-%m-%d %H:%M")
         weekday_text = "一二三四五六日"[now_dt.weekday()]
@@ -504,6 +505,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
             can_do=can_do_text,
             humanized_state=humanized_state,
             schedule_adjustments=schedule_adjustments,
+            skill_growth_context=skill_growth_context,
             recent_plan_history=recent_plan_history,
             calendar_context=calendar_context,
             recent_diaries=recent_diaries,
@@ -534,6 +536,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 7.1 如果昨日完整对话摘要里有饮食、作息、运动、天气暴露、情绪刺激、约定、礼物、争执、安慰、共同完成/未完成的事等线索,可以让它们以抽象后果影响今日：体力、胃口、身体小不适、心情余波、主动话题、出门意愿、梦境碎片或某个时段的小停顿。影响强度要跟摘要一致,可以很轻,也可以没有；不要为了戏剧性强行安排事故。
 7.2 必须主动避开最近日程骨架的重复：不要连续几天都写同一套“醒来/洗漱/整理/学习或做事/休息/收尾/睡前”。如果某类活动无法避免,要换具体场景、地点、对象、阻碍、小意外、关系伏笔或情绪走向,让今天读起来像新的一天。
 7.3 不要把“草稿纸上画圆圈/随手涂鸦/笔尖划来划去/盯着同一张纸发呆”当作通用生活感反复使用。除非输入材料明确提到这件事,否则优先换成更具体的当日物件、地点、声音、气味、人物互动或真实占用时间的事项。
+7.4 如果“技能成长对日程的能力边界影响”不为空,必须让相关能力表现和技能等级连续一致,不要二分处理。Lv.1 可被基础概念绊住；Lv.2 可照着例子慢慢做；Lv.3 能独立推进常规任务但效率一般；Lv.4 常规任务不应卡死,只会检查细节或换思路；Lv.5 普通相关任务应熟练、能优化或教别人；Lv.6 可创造新做法或在未知条件下表现出明显优势。这里的任务可以是题目、创作、料理、训练、战斗、交涉、研究、手工或任何符合人格的活动。它主要约束“能不能做、会不会卡、卡多久、如何解决”,不是强行增加训练频率。
 8. 状态和天气必须真的影响安排：低能量时密度更松,困倦时上午起步更慢,下雨会改变出门/衣物/交通/心情,天气舒服时更容易出门、开窗或注意到光线。
 9. 生活感来自“有选择的具体”,不是动作清单：动作要透露她的习惯、迟疑、偏好、人际关系、宠物/物件或当天状态。不要连续堆“揉头发、系鞋带、转笔、理刘海”这类谁都能做的通用动作；每段最好有一个独属于此刻的小原因、小物件或小偏差。
 9.1 同一天内不要多次使用同一种微动作或同一种小物件制造生活感。尤其避免反复写草稿纸、圆圈、小画、笔帽、杯沿、水光、窗外光线；这些只能偶尔出现一次,不能成为日程骨架。
@@ -580,6 +583,9 @@ Bot 名字：{plugin.bot_name}
 
 今日互动造成的日程偏移：
 {schedule_adjustments}
+
+技能成长对日程的能力边界影响：
+{skill_growth_context or "暂无技能倾向。"}
 
 最近日程骨架（今天要避免照抄）：
 {recent_plan_history}

@@ -274,7 +274,7 @@
   "PRIVATE_READING_VISION_PROVIDER_ID": {
     "description": "总视觉模型（留空跟随工具结果转述模型）",
     "type": "string",
-    "hint": "用于视觉理解任务：识屏、图片观察、素材封面/抽样页理解等需要看图的环节。适合多模态能力稳定、能准确描述画面与文字信息、输出克制的视觉模型。留空会回退到 NARRATION_PROVIDER_ID 或相关工具默认模型。",
+    "hint": "用于插件自身的视觉理解任务：识屏、素材封面/抽样页理解等需要看图的环节。私聊用户图片会优先使用 AstrBot 本体配置的识图模型，未配置时才回退到这里；留空会回退到 NARRATION_PROVIDER_ID 或相关工具默认模型。",
     "default": "",
     "_special": "select_provider"
   },
@@ -556,6 +556,59 @@
     "default": true,
     "condition": {
       "enable_creative_writing": true
+    }
+  },
+  "enable_skill_growth_simulation": {
+    "description": "启用技能成长模拟",
+    "type": "bool",
+    "hint": "让 Bot 根据人格、世界观、可做事项和日程片段形成自己的技能等级，并在对应日程中缓慢提升。等级只作为自我认知和表现参考，不会让 Bot 变成万能。",
+    "default": true
+  },
+  "skill_growth_rate": {
+    "description": "技能成长倍率",
+    "type": "float",
+    "hint": "控制技能经验增长速度。建议 0.5-1.0；数值越大，等级提升越快。",
+    "slider": {
+      "min": 0.1,
+      "max": 3,
+      "step": 0.1
+    },
+    "default": 1.0,
+    "condition": {
+      "enable_skill_growth_simulation": true
+    }
+  },
+  "skill_growth_custom_skills": {
+    "description": "自定义技能列表",
+    "type": "string",
+    "hint": "逗号分隔。用于补充人设中需要追踪的技能，例如剑术,草药学,古典文学。",
+    "default": "",
+    "condition": {
+      "enable_skill_growth_simulation": true
+    }
+  },
+  "enable_skill_growth_schedule_influence": {
+    "description": "技能约束日程表现",
+    "type": "bool",
+    "hint": "开启后，日程中涉及某项技能时会符合当前等级。高等级技能不再被普通任务难住，低等级技能才会需要指导或被基础问题卡住。",
+    "default": true,
+    "condition": {
+      "enable_skill_growth_simulation": true
+    }
+  },
+  "skill_growth_schedule_influence_strength": {
+    "description": "技能约束强度",
+    "type": "float",
+    "hint": "控制技能等级对日程表现的约束强度。建议 0.3-0.6；数值越大，越严格避免高等级技能被普通任务难住。",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.35,
+    "condition": {
+      "enable_skill_growth_simulation": true,
+      "enable_skill_growth_schedule_influence": true
     }
   },
   "_section_03_mai": {
@@ -861,7 +914,7 @@
   },
   "news_sources": {
     "description": "新闻 RSS/Atom 源",
-    "type": "textarea",
+    "type": "string",
     "hint": "每行一个新闻源，格式为 名称|URL；也可以只填 URL。插件只读取标题、摘要、链接和发布时间，不抓取新闻正文。",
     "default": "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml\nGoogle新闻中文|https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans\nSolidot|https://www.solidot.org/index.rss",
     "condition": {
@@ -926,18 +979,18 @@
     }
   },
   "WEB_EXPLORATION_PROVIDER_ID": {
-    "description": "网页探索模型（留空跟随新闻整理/主模型）",
+    "description": "主动搜索决策/整理模型（留空跟随新闻整理/主模型）",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于决定 Bot 想搜索什么，以及把搜索结果整理成探索笔记。适合便宜、稳定、短 JSON 输出可靠的模型。",
+    "hint": "不负责联网检索；联网仍使用 AstrBot 全局网页搜索配置。该模型只用于决定 Bot 想搜索什么，以及把搜索结果整理成探索笔记。适合便宜、稳定、短 JSON 输出可靠的模型。",
     "condition": {
       "enable_web_exploration": true
     }
   },
   "web_exploration_interests": {
     "description": "探索兴趣倾向",
-    "type": "textarea",
+    "type": "string",
     "hint": "告诉 Bot 自主搜索时可以偏向哪些方向。不是硬名单，Bot 仍会结合人设、日程、最近聊天和心情自行决定。",
     "default": "按 Bot 人格自行决定；可偏向最近聊天、日程、人设兴趣、作品、技术、生活小知识、流行梗、时讯、新鲜事物。",
     "condition": {
@@ -1146,6 +1199,15 @@
     "type": "string",
     "hint": "逗号分隔。会与用户偏好一起作为搜索候选。",
     "default": "纯爱,恋爱,同人",
+    "condition": {
+      "enable_private_reading_integration": true
+    }
+  },
+  "private_reading_blocked_tags": {
+    "description": "夹层阅读过滤标签",
+    "type": "string",
+    "hint": "逗号分隔。候选详情标签命中任一项时会跳过，不下载、不入柜。",
+    "default": "連載中,長篇,青年漫",
     "condition": {
       "enable_private_reading_integration": true
     }
@@ -1784,7 +1846,7 @@
   "daily_plan_prompt": {
     "description": "自定义每日日程提示词",
     "type": "text",
-    "hint": "留空使用默认提示词。可用变量：{now} {bot_name} {astrbot_persona} {can_do} {humanized_state} {recent_diaries}。要求模型输出 JSON，包含 schedule 数组。不要在这里另写新人格。",
+    "hint": "留空使用默认提示词。可用变量：{now} {bot_name} {astrbot_persona} {schedule_persona} {can_do} {humanized_state} {schedule_adjustments} {skill_growth_context} {recent_plan_history} {calendar_context} {recent_diaries} {yesterday_conversation} {important_dates} {weather_info} {daily_plan_item_count}。要求模型输出 JSON，包含 schedule 数组。不要在这里另写新人格。",
     "default": "",
     "condition": {
       "enable_daily_plan": true
@@ -2346,7 +2408,7 @@
   "enable_segmented_proactive_content_cleanup": {
     "description": "主动分段内容清理",
     "type": "bool",
-    "hint": "开启后，在每个分段发送前按正则移除指定内容；切分与清理彼此独立。",
+    "hint": "开启后，在每个分段发送前移除指定内容。括号和双引号内的内容会被保留。",
     "default": false,
     "condition": {
       "enable_segmented_proactive_reply": true
@@ -2355,11 +2417,24 @@
   "segmented_proactive_content_cleanup_rule": {
     "description": "主动分段内容清理正则",
     "type": "string",
-    "hint": "例如 [\\n] 可去掉换行。不建议清理句末标点,插件会尽量保留每段末尾语气。",
+    "hint": "仅在分段模式为 regex 时生效，例如 [\\n]。清理会跳过括号和双引号内的内容。",
     "condition": {
-      "enable_segmented_proactive_content_cleanup": true
+      "enable_segmented_proactive_content_cleanup": true,
+      "segmented_proactive_split_mode": "regex"
     },
     "default": "[\\n]"
+  },
+  "segmented_proactive_content_cleanup_words": {
+    "description": "主动分段内容清理词列表",
+    "type": "list",
+    "hint": "仅在分段模式为 words 时生效；每一项会按原文移除。清理会跳过括号和双引号内的内容。",
+    "condition": {
+      "enable_segmented_proactive_content_cleanup": true,
+      "segmented_proactive_split_mode": "words"
+    },
+    "default": [
+      "\n"
+    ]
   },
   "segmented_proactive_interval_method": {
     "description": "主动分段间隔算法",
