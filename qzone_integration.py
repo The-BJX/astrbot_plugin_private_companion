@@ -35,6 +35,12 @@ class QzoneMixin:
     def _qzone_available(self) -> bool:
         return bool(self.enable_qzone_integration)
 
+    def _qzone_note_event_bot(self, event: AstrMessageEvent | None) -> None:
+        """Cache the latest OneBot connection for background Qzone jobs."""
+        bot = getattr(event, "bot", None) if event is not None else None
+        if bot is not None:
+            self._qzone_last_bot = bot
+
     @staticmethod
     def _qzone_gtk(p_skey: str) -> str:
         hash_val = 5381
@@ -659,9 +665,24 @@ class QzoneMixin:
         if not isinstance(state, dict):
             self.data["qzone_integration"] = {}
             state = self.data["qzone_integration"]
-        if now - _safe_float(state.get("last_life_publish_at"), 0) < max(4, self.qzone_life_publish_min_interval_hours) * 3600:
+        last_status = str(state.get("last_life_publish_status") or "").strip()
+        if (
+            last_status == "published"
+            and now - _safe_float(state.get("last_life_publish_at"), 0) < max(4, self.qzone_life_publish_min_interval_hours) * 3600
+        ):
+            return
+        if now - _safe_float(state.get("last_life_publish_failed_at"), 0) < 15 * 60:
             return
         if random.random() > self.qzone_life_publish_probability:
+            state["last_life_publish_status"] = "skipped:probability_miss"
+            state["last_life_publish_checked_at"] = now
+            self._save_data_sync()
+            return
+        if getattr(self, "_qzone_last_bot", None) is None:
+            state["last_life_publish_failed_at"] = now
+            state["last_life_publish_status"] = "failed:no_onebot_connection"
+            state["last_life_publish_checked_at"] = now
+            self._save_data_sync()
             return
         daily_state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
@@ -695,8 +716,14 @@ class QzoneMixin:
         )
         text = _single_line(text, 180)
         result = await self._publish_qzone_text(text)
-        state["last_life_publish_at"] = now
-        state["last_life_publish_status"] = "published" if result.get("success") else f"failed:{_single_line(result.get('message'), 80)}"
+        if result.get("success"):
+            state["last_life_publish_at"] = now
+            state.pop("last_life_publish_failed_at", None)
+            state["last_life_publish_status"] = "published"
+        else:
+            state["last_life_publish_failed_at"] = now
+            state["last_life_publish_status"] = f"failed:{_single_line(result.get('message'), 80)}"
+        state["last_life_publish_checked_at"] = now
         state["last_life_publish_text"] = _single_line(result.get("text") or text, 180)
         self._save_data_sync()
 

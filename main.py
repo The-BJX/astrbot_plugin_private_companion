@@ -948,6 +948,31 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                     pass
 
     @filter.on_decorating_result()
+    async def suppress_group_silent_control_reply(self, event: AstrMessageEvent):
+        """模型输出“不回复”控制语时静默吞掉，避免把内部判断发到群里。"""
+        if not self.enabled:
+            return
+        if not self.enable_group_companion:
+            return
+        if not self._extract_group_id_from_event(event):
+            return
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        if not chain or any(not isinstance(comp, Plain) for comp in chain):
+            return
+        text = "".join(str(getattr(comp, "text", "") or "") for comp in chain).strip()
+        if not self._is_silent_control_reply_text(text):
+            return
+        logger.info("[PrivateCompanion] 已静默吞掉群聊不回复控制语: %s", _single_line(text, 120))
+        empty_result = self._build_result_from_chain([])
+        try:
+            empty_result.stop_event()
+        except Exception:
+            pass
+        event.set_result(empty_result)
+        event.stop_event()
+
+    @filter.on_decorating_result()
     async def apply_segmented_llm_reply_scope(self, event: AstrMessageEvent):
         """按回复范围与分段策略整理 LLM 输出，减少长回复和误引用。"""
         if not self.enabled:
@@ -1324,6 +1349,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             worldview_context = self._format_worldview_adaptation_prompt()
             if worldview_context:
                 injection_parts.append(worldview_context)
+        identity_anchor = self._format_private_identity_anchor_for_prompt(user_id, current_user, event)
+        if identity_anchor:
+            injection_parts.append(identity_anchor)
         buffered_image_context = self._take_buffered_private_image_context_for_event(event)
         buffered_images = (
             [str(item) for item in buffered_image_context.get("images", []) if str(item or "").strip()]
@@ -1714,6 +1742,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
     @filter.command("陪伴", alias={"私聊陪伴", "主动陪伴"})
     async def companion_command(self, event: AstrMessageEvent):
         """管理私聊陪伴状态、日程、记忆、风格、重要日期和可选外部动作。"""
+        self._qzone_note_event_bot(event)
         raw_text = str(event.message_str or "")
         args = raw_text.replace("\u3000", " ").split(maxsplit=2)
         action = args[1].strip() if len(args) >= 2 else "帮助"
@@ -2003,14 +2032,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
     @filter.command("陪伴群", alias={"群陪伴", "群聊陪伴"})
     async def group_companion_command(self, event: AstrMessageEvent):
         """管理群聊陪伴状态、群友画像、群内常见词、话题线程和关系网。"""
+        self._qzone_note_event_bot(event)
         async for result in self._group_companion_command_impl(event):
             yield result
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     async def on_private_message(self, event: AstrMessageEvent):
         """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
+        self._qzone_note_event_bot(event)
         received_ts = _now_ts()
         user_id = str(event.get_sender_id())
+        sender_display_name = _single_line(self._sender_display_name(event), 40)
         text = _single_line(event.message_str, 120)
         if text.startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴")):
             return
@@ -2054,6 +2086,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
                 return
             fast_user["umo"] = event.unified_msg_origin
+            self._note_private_display_name_observation(fast_user, user_id, sender_display_name, now=received_ts)
             fast_user["last_seen"] = received_ts
             fast_user["last_user_message"] = text
             fast_user["inbound_count"] = _safe_int(fast_user.get("inbound_count"), 0) + 1
@@ -2163,6 +2196,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                     event.stop_event()
                     return
             user["umo"] = event.unified_msg_origin
+            self._note_private_display_name_observation(user, user_id, sender_display_name, now=received_ts)
             if not is_target_user:
                 user["enabled"] = False
                 user["next_proactive_at"] = 0
@@ -2247,6 +2281,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
+        self._qzone_note_event_bot(event)
         if not self.enable_group_companion:
             return
         text = _single_line(event.message_str, 260)

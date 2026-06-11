@@ -1219,6 +1219,80 @@ class UserMemoryMixin:
             sections.append(livingmemory_guidance)
         return "\n\n".join(section for section in sections if section)
 
+    def _format_private_identity_anchor_for_prompt(self, user_id: str, user: dict[str, Any], event: Any | None = None) -> str:
+        worldbook_profile = None
+        try:
+            worldbook_profile = self._worldbook_profile_by_user_id(user_id)
+        except Exception:
+            worldbook_profile = None
+        worldbook_name = _single_line(worldbook_profile.get("name"), 24) if isinstance(worldbook_profile, dict) else ""
+        stable_name = _single_line(user.get("nickname") or worldbook_name or self.default_nickname, 24)
+        identity_note = (
+            _single_line(worldbook_profile.get("identity_note") or worldbook_profile.get("note") or worldbook_profile.get("content"), 180)
+            if isinstance(worldbook_profile, dict)
+            else ""
+        )
+        display_name = _single_line(user.get("last_display_name") or user.get("display_name"), 40)
+        if event is not None:
+            try:
+                display_name = _single_line(self._sender_display_name(event), 40) or display_name
+            except Exception:
+                pass
+        aliases = []
+        for item in user.get("observed_display_names") if isinstance(user.get("observed_display_names"), list) else []:
+            alias = _single_line(item, 24)
+            if alias and alias not in aliases and alias != stable_name:
+                aliases.append(alias)
+        lines = [
+            "【私聊身份锚点】",
+            f"当前私聊对象的稳定 ID：{_single_line(user_id, 40)}",
+            f"你应使用的稳定称呼/关系身份：{stable_name}",
+        ]
+        if worldbook_name and worldbook_name != stable_name:
+            lines.append(f"关系网登记名：{worldbook_name}")
+        if identity_note:
+            lines.append(f"关系网身份备注：{identity_note}")
+        if display_name and display_name != stable_name:
+            lines.append(
+                f"平台当前显示名/临时改名：{display_name}。这只是此刻看到的昵称或用户改名结果,不能覆盖稳定 ID 对应的人。"
+            )
+            lines.append(
+                f"如果显示名像其他角色、家人或熟人名字,应理解为用户在改名/玩梗/模仿；仍然把对方当作{stable_name},不要把对方误认为那个名字本人。"
+            )
+        if aliases:
+            lines.append(f"近期观察到的显示名：{'、'.join(aliases[:6])}")
+        rename_text = self._format_display_name_rename_events(user.get("display_name_events"), limit=3)
+        if rename_text:
+            lines.append(f"近期改名行为：{rename_text}")
+        lines.append("回复时优先按稳定身份和既有关系接话；只有用户明确说明自己身份变了,才临时顺着设定玩。")
+        return "\n".join(lines)
+
+    def _note_private_display_name_observation(self, user: dict[str, Any], user_id: str, display_name: str, *, now: float | None = None) -> None:
+        display_name = _single_line(display_name, 40)
+        user_id = str(user_id or "").strip()
+        if not display_name or display_name == user_id:
+            return
+        now_ts = _safe_float(now, 0) or _now_ts()
+        previous = _single_line(user.get("last_display_name"), 40)
+        if previous and previous != display_name:
+            events = user.setdefault("display_name_events", [])
+            if not isinstance(events, list):
+                events = []
+                user["display_name_events"] = events
+            last = events[-1] if events and isinstance(events[-1], dict) else {}
+            if not (
+                _single_line(last.get("old"), 40) == previous
+                and _single_line(last.get("new"), 40) == display_name
+                and now_ts - _safe_float(last.get("ts"), 0) < 3600
+            ):
+                events.append({"ts": now_ts, "old": previous, "new": display_name})
+                del events[:-12]
+        user["last_display_name"] = display_name
+        observed = user.setdefault("observed_display_names", [])
+        if isinstance(observed, list) and display_name not in observed:
+            observed.append(display_name)
+            del observed[:-8]
+
     async def _maybe_refresh_companion_memory(self, user_id: str, user: dict[str, Any]) -> None:
         if not self.enable_companion_memory:
             return

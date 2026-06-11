@@ -298,6 +298,21 @@ class GroupObservationMixin:
                 member = {"name": sender_name, "count": 0, "recent_phrases": []}
                 members[sender_id] = member
             member["user_id"] = sender_id
+            display_name = _single_line(sender_name, 30) or sender_id
+            previous_display_name = _single_line(member.get("name"), 30)
+            if previous_display_name and display_name and previous_display_name != display_name:
+                events = member.setdefault("display_name_events", [])
+                if not isinstance(events, list):
+                    events = []
+                    member["display_name_events"] = events
+                last = events[-1] if events and isinstance(events[-1], dict) else {}
+                if not (
+                    _single_line(last.get("old"), 30) == previous_display_name
+                    and _single_line(last.get("new"), 30) == display_name
+                    and now - _safe_float(last.get("ts"), 0) < 3600
+                ):
+                    events.append({"ts": now, "old": previous_display_name, "new": display_name})
+                    del events[:-12]
             member["name"] = _single_line(sender_name, 30) or member.get("name") or sender_id
             member["identity_name"] = self._group_member_identity_name(sender_id, sender_name, limit=30)
             member["identity_known"] = bool(self._worldbook_profile_by_user_id(sender_id))
@@ -1022,6 +1037,9 @@ class GroupObservationMixin:
             meaning = _single_line(item.get("meaning"), 80)
             usage = _single_line(item.get("usage"), 80)
             not_owner = _single_line(item.get("not_owner"), 80)
+            confidence = min(1.0, _safe_float(item.get("confidence"), 1.0, 0.0))
+            if self._is_uncertain_group_slang_meaning(meaning, usage) or confidence < 0.55:
+                continue
             if meaning:
                 source = _single_line(item.get("source"), 30)
                 lines.append(
@@ -1031,6 +1049,33 @@ class GroupObservationMixin:
                     + ("｜显式纠正" if source == "explicit_correction" else "")
                 )
         return "\n".join(lines)
+
+    def _is_uncertain_group_slang_meaning(self, meaning: str = "", usage: str = "") -> bool:
+        text = _single_line(f"{meaning} {usage}", 180)
+        if not text:
+            return True
+        uncertain_markers = (
+            "语境不明", "上下文不明", "含义不明", "无法判断", "不能判断", "暂不确定",
+            "不确定", "不清楚", "看不出", "未看出", "无法确定", "可能是", "大概是",
+            "也许是", "疑似", "需要更多上下文", "需要结合上下文",
+        )
+        return any(marker in text for marker in uncertain_markers)
+
+    def _prune_uncertain_group_slang_meanings(self, group: dict[str, Any]) -> int:
+        meanings = group.get("slang_meanings")
+        if not isinstance(meanings, dict):
+            return 0
+        removed = 0
+        for term, item in list(meanings.items()):
+            if not isinstance(item, dict):
+                continue
+            if item.get("source") == "explicit_correction":
+                continue
+            confidence = min(1.0, _safe_float(item.get("confidence"), 1.0, 0.0))
+            if confidence < 0.55 or self._is_uncertain_group_slang_meaning(item.get("meaning"), item.get("usage")):
+                meanings.pop(term, None)
+                removed += 1
+        return removed
 
     def _format_group_topic_threads_for_prompt(self, group: dict[str, Any]) -> str:
         threads = group.get("topic_threads")
@@ -1137,12 +1182,17 @@ class GroupObservationMixin:
                 phrase_text = " / ".join(_single_line(item, 24) for item in phrases[:4] if _single_line(item, 24))
                 identity_note = _single_line(member.get("identity_note"), 80)
                 boundary_note = _single_line(member.get("boundary_note"), 80)
+                display_name = _single_line(member.get("name"), 40)
+                anchor_note = self._group_member_identity_anchor_note(sender_id, display_name, limit=120)
+                rename_text = self._format_display_name_rename_events(member.get("display_name_events"), limit=3)
                 lines.append(
                     f"当前发言者：{self._group_member_identity_label(sender_id, member.get('identity_name') or member.get('name'), limit=24)}"
                     f"｜发言样本 {member.get('count', 0)} 条"
                     + (f"｜近期短句：{phrase_text}" if phrase_text else "")
                     + (f"｜关系备注：{identity_note}" if identity_note else "")
                     + (f"｜互动边界：{boundary_note}" if boundary_note else "")
+                    + (f"｜近期改名：{rename_text}" if rename_text else "")
+                    + (f"｜{anchor_note}" if anchor_note else "")
                 )
         lines.append(
             "群聊回复原则：被叫到或确实需要回应时再说；短一点,像群友接话；不要逐条总结群聊,不要当主持人,不要把每个话题都认真升格。"
@@ -1177,7 +1227,18 @@ class GroupObservationMixin:
             current = recent[-1] if recent and isinstance(recent[-1], dict) else None
         if not isinstance(current, dict):
             return ""
-        sender_name = self._group_member_identity_label(str(current.get("sender_id") or ""), current.get("identity_name") or current.get("name"), limit=40)
+        current_sender_id = str(current.get("sender_id") or "")
+        current_display_name = _single_line(current.get("name"), 40)
+        sender_name = self._group_member_identity_label(current_sender_id, current.get("identity_name") or current.get("name"), limit=40)
+        anchor_note = self._group_member_identity_anchor_note(current_sender_id, current_display_name, limit=120)
+        current_member = None
+        members = group.get("members") if isinstance(group.get("members"), dict) else {}
+        if current_sender_id and isinstance(members, dict):
+            current_member = members.get(current_sender_id)
+        rename_text = self._format_display_name_rename_events(
+            current_member.get("display_name_events") if isinstance(current_member, dict) else None,
+            limit=3,
+        )
         scene = {
             "talking_to": current.get("talking_to") or "group",
             "talking_to_name": current.get("talking_to_name") or "",
@@ -1193,6 +1254,9 @@ class GroupObservationMixin:
             f'  <trigger type="{_single_line(scene.get("trigger"), 40)}">{_single_line(scene.get("reason"), 80) or "group_message"}</trigger>',
             "  <current_message>",
             f"    <sender>{sender_name}</sender>",
+            f"    <display_name>{current_display_name}</display_name>" if current_display_name else "",
+            f"    <recent_rename>{rename_text}</recent_rename>" if rename_text else "",
+            f"    <identity_note>{anchor_note}</identity_note>" if anchor_note else "",
             f"    <talking_to>{self._scene_talking_to_text(scene)}</talking_to>",
             f"    <content>{_single_line(current.get('text'), 100)}</content>",
             "  </current_message>",
@@ -1727,8 +1791,9 @@ class GroupObservationMixin:
         if not examples:
             return
         prompt = f"""
-请根据群聊样例,给这些群内常见词/梗做很短的语义解释。
-只解释能从样例看出来的含义；不确定就写“语境不明”。
+请根据群聊样例,给这些群内常见词/梗做很短的语义解释。这是一个“黑话解释”专门任务。
+只解释能从样例明确看出来的含义；证据不足、只是普通词、只是人名/群名片、只是口头语、含义不稳定时,直接不要输出这个词。
+不要写“语境不明”“可能是”“不确定”等模糊解释；低置信度宁可省略。
 不要输出解释过程。
 
 【候选词】
@@ -1739,8 +1804,16 @@ class GroupObservationMixin:
 
 只输出 JSON,键为词,值为对象：
 {{
-  "某词": {{"meaning": "一句话含义", "usage": "什么时候用"}}
+  "某词": {{
+    "meaning": "一句话含义,必须是从样例能看出的稳定含义",
+    "usage": "什么时候用,不确定就不要输出该词",
+    "type": "外号|事件代称|梗|口头禅|调侃|称赞|辱骂|其他",
+    "confidence": 0.0到1.0的小数,
+    "evidence": "最能说明含义的一条短样例"
+  }}
 }}
+
+入库标准：只输出 confidence >= 0.65 的词。无法达到就省略。
 """.strip()
         raw = await self._llm_call(
             prompt,
@@ -1749,29 +1822,38 @@ class GroupObservationMixin:
             task="group_slang",
         )
         payload = self._extract_json_payload(raw or "")
-        if not isinstance(payload, dict):
-            return
         normalized: dict[str, dict[str, str]] = {}
-        for term, value in payload.items():
-            key = _single_line(term, 20)
-            if not key:
-                continue
-            if isinstance(value, dict):
-                meaning = _single_line(value.get("meaning"), 90)
-                usage = _single_line(value.get("usage"), 90)
-            else:
-                meaning = _single_line(value, 90)
-                usage = ""
-            if meaning:
+        if isinstance(payload, dict):
+            for term, value in payload.items():
+                key = _single_line(term, 20)
+                if not key:
+                    continue
+                if isinstance(value, dict):
+                    meaning = _single_line(value.get("meaning"), 90)
+                    usage = _single_line(value.get("usage"), 90)
+                    slang_type = _single_line(value.get("type"), 24)
+                    evidence = _single_line(value.get("evidence"), 120)
+                    confidence = min(1.0, _safe_float(value.get("confidence"), 0.0, 0.0))
+                else:
+                    meaning = _single_line(value, 90)
+                    usage = ""
+                    slang_type = ""
+                    evidence = ""
+                    confidence = 0.0
+                if not meaning or confidence < 0.65 or self._is_uncertain_group_slang_meaning(meaning, usage):
+                    continue
                 normalized[key] = {
                     "meaning": meaning,
                     "usage": usage,
+                    "type": slang_type,
+                    "confidence": f"{confidence:.2f}",
+                    "evidence": evidence,
+                    "source": "llm_slang",
                     "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 }
-        if not normalized:
-            return
         async with self._data_lock:
             current = self._get_group(group_id)
+            removed_uncertain = self._prune_uncertain_group_slang_meanings(current)
             meanings = current.setdefault("slang_meanings", {})
             if not isinstance(meanings, dict):
                 meanings = {}
@@ -1782,5 +1864,7 @@ class GroupObservationMixin:
                     continue
                 meanings[term] = payload
             current["last_slang_summary_at"] = now
+            if removed_uncertain:
+                logger.info("[PrivateCompanion] 已清理低置信度群黑话释义: group=%s removed=%s", group_id, removed_uncertain)
             self._save_data_sync()
 

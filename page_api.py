@@ -708,6 +708,36 @@ class PrivateCompanionPageApi:
                         if (data_root / "bookshelf_pages" / album_id).exists():
                             removed_album_ids.add(album_id)
                             changed = True
+                    if removed_album_ids or title_payload:
+                        state = self.plugin.data.setdefault("jm_cosmos_integration", {})
+                        if not isinstance(state, dict):
+                            state = {}
+                            self.plugin.data["jm_cosmos_integration"] = state
+                        deleted_ids = state.setdefault("deleted_album_ids", [])
+                        if not isinstance(deleted_ids, list):
+                            deleted_ids = []
+                            state["deleted_album_ids"] = deleted_ids
+                        for removed_id in sorted(removed_album_ids):
+                            if removed_id and removed_id not in deleted_ids:
+                                deleted_ids.append(removed_id)
+                        del deleted_ids[:-300]
+                        deleted_titles = state.setdefault("deleted_titles", [])
+                        if not isinstance(deleted_titles, list):
+                            deleted_titles = []
+                            state["deleted_titles"] = deleted_titles
+                        removed_titles = [
+                            self._single_line(item.get("title"), 120)
+                            for item in items
+                            if isinstance(item, dict)
+                            and item.get("type") == "jm_album"
+                            and self._single_line(item.get("album_id") or item.get("id"), 80) in removed_album_ids
+                        ]
+                        if title_payload:
+                            removed_titles.append(title_payload)
+                        for removed_title in removed_titles:
+                            if removed_title and removed_title not in deleted_titles:
+                                deleted_titles.append(removed_title)
+                        del deleted_titles[:-300]
                     self._cleanup_bookshelf_page_files(removed_pages)
                     self._cleanup_bookshelf_album_dirs(removed_album_ids)
                     logger.info(

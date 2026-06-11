@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from astrbot.api.event import AstrMessageEvent
 
-from .helpers import _safe_int, _single_line
+from .helpers import _safe_float, _safe_int, _single_line
 
 
 class CommandHandlersMixin:
@@ -53,7 +53,12 @@ class CommandHandlersMixin:
                             continue
                         meaning = ""
                         if isinstance(meanings.get(term), dict):
-                            meaning = _single_line(meanings[term].get("meaning"), 60)
+                            meaning_item = meanings[term]
+                            confidence = min(1.0, _safe_float(meaning_item.get("confidence"), 1.0, 0.0))
+                            raw_meaning = _single_line(meaning_item.get("meaning"), 60)
+                            raw_usage = _single_line(meaning_item.get("usage"), 60)
+                            if confidence >= 0.55 and not self._is_uncertain_group_slang_meaning(raw_meaning, raw_usage):
+                                meaning = raw_meaning
                         lines.append(f"- {term}｜出现 {item.get('count', 0)} 次" + (f"｜{meaning}" if meaning else ""))
                     response = "\n".join(lines)
                 else:

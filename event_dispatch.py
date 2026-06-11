@@ -652,6 +652,7 @@ class EventDispatchMixin:
 - 上一次明确和 Bot 对话的人：{self._group_member_identity_label(str(active.get('sender_id') or sender_id), active.get('sender_name'), limit=24)}
 - 上一次明确对 Bot 说的话：{_single_line(active.get('last_text'), 120)}
 - 当前发言者：{self._group_member_identity_label(sender_id, sender_name, limit=24)}
+- 当前发言者身份锚点：{self._group_member_identity_anchor_note(sender_id, sender_name, limit=120) or "无显示名冲突"}
 - 当前消息：{_single_line(text, 180)}
 - 规则初判：trigger={_single_line(scene.get('trigger'), 40)} talking_to={_single_line(scene.get('talking_to'), 40)}
 
@@ -908,20 +909,53 @@ class EventDispatchMixin:
         at_targets: list[dict[str, str]] = []
         at_all = False
         reply_to_id = ""
+
+        def _component_attr(comp: Any, names: tuple[str, ...]) -> str:
+            for name in names:
+                try:
+                    value = getattr(comp, name, None)
+                except Exception:
+                    value = None
+                if value is None:
+                    continue
+                if isinstance(value, dict):
+                    for key in ("user_id", "qq", "id", "target", "name", "nickname", "card"):
+                        nested = value.get(key)
+                        if nested:
+                            return str(nested).strip()
+                    continue
+                text = str(value or "").strip()
+                if text:
+                    return text
+            return ""
+
+        def _is_bot_at(user_id: str, name: str) -> bool:
+            bot_name = str(getattr(self, "bot_name", "") or "").strip()
+            clean_name = str(name or "").strip().lstrip("@")
+            if self_id and user_id and user_id == self_id:
+                return True
+            if bot_name and clean_name and (clean_name == bot_name or bot_name in clean_name):
+                return True
+            return False
+
         for comp in self._event_components(event):
             class_name = comp.__class__.__name__.lower()
-            if class_name == "at":
-                qq = str(getattr(comp, "qq", "") or "").strip()
-                name = _single_line(getattr(comp, "name", "") or qq, 40)
+            if class_name == "at" or class_name.endswith("at"):
+                qq = _component_attr(comp, ("qq", "target", "user_id", "uin", "id", "at", "at_user", "target_id"))
+                name = _single_line(
+                    _component_attr(comp, ("name", "display_name", "nickname", "card", "text")) or qq,
+                    40,
+                )
                 if qq.lower() == "all":
                     at_all = True
                     continue
-                if qq:
-                    at_targets.append({"user_id": qq, "name": name or qq, "is_bot": bool(self_id and qq == self_id)})
+                if qq or _is_bot_at(qq, name):
+                    target_id = qq or self_id or "bot"
+                    at_targets.append({"user_id": target_id, "name": name or target_id, "is_bot": _is_bot_at(target_id, name)})
             elif class_name == "atall":
                 at_all = True
             elif class_name == "reply":
-                value = getattr(comp, "sender_id", None) or getattr(comp, "sender", None)
+                value = _component_attr(comp, ("sender_id", "sender", "user_id", "target_id", "reply_to", "sender_uin"))
                 if value:
                     reply_to_id = str(value).strip()
         return {"self_id": self_id, "at_targets": at_targets, "at_all": at_all, "reply_to_id": reply_to_id}
@@ -970,6 +1004,24 @@ class EventDispatchMixin:
             except Exception:
                 pass
         return result
+
+    def _is_silent_control_reply_text(self, text: str) -> bool:
+        cleaned = _single_line(text, 160)
+        if not cleaned:
+            return False
+        stripped = re.sub(r"^[\s\(\（\[\【]+|[\s\)\）\]\】。.!！?？]+$", "", cleaned).strip()
+        compact = re.sub(r"\s+", "", stripped)
+        if not compact:
+            return False
+        no_reply_markers = ("不回复", "无需回复", "不要回复", "不用回复", "别回复", "静默", "忽略")
+        context_markers = ("群友之间", "群友互动", "群聊背景", "不是对你", "不需要接话", "无需接话", "不要接话")
+        if any(marker in compact for marker in no_reply_markers) and any(marker in compact for marker in context_markers):
+            return True
+        if compact in {"不回复", "无需回复", "不要回复", "不用回复", "别回复", "静默", "忽略"}:
+            return True
+        if compact.startswith("不回复") and len(compact) <= 28:
+            return True
+        return False
 
     def _is_proactive_delivery_receipt_text(self, text: str) -> bool:
         cleaned = _single_line(text, 240)

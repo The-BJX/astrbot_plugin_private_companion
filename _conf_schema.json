@@ -1911,7 +1911,7 @@
   "enable_group_slang_learning": {
     "description": "启用群内黑话/梗学习",
     "type": "bool",
-    "hint": "从目标群消息中提取高频词、短梗和群内口头表达，作为群聊回复背景。",
+    "hint": "从目标群消息中提取高频词、短梗和群内口头表达，作为群聊回复背景。语义解释阶段会过滤低置信度和“语境不明”项。",
     "default": true,
     "condition": {
       "enable_group_companion": true
@@ -1947,7 +1947,7 @@
   "enable_group_slang_meanings": {
     "description": "启用群内黑话语义解释",
     "type": "bool",
-    "hint": "低频调用 LLM，根据群聊样例为常见词/梗补充含义和用法，供群聊回复参考。",
+    "hint": "低频调用 LLM，根据群聊样例为常见词/梗补充含义、用法、类型和置信度。证据不足的词会被省略，不再保存“语境不明”。",
     "default": true,
     "condition": {
       "enable_group_companion": true

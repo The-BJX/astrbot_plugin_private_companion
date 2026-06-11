@@ -483,6 +483,38 @@ class WorldbookMixin:
             return f"QQ:{uid}"
         return f"{name}[QQ:{uid}]"
 
+    def _group_member_identity_anchor_note(self, user_id: str, display_name: str = "", *, limit: int = 120) -> str:
+        uid = _single_line(user_id, 40)
+        if not uid:
+            return ""
+        display = _single_line(display_name, 40)
+        profile = self._worldbook_profile_by_user_id(uid)
+        stable_name = self._group_member_identity_name(uid, display, limit=30)
+        if not display or display == uid or display == stable_name:
+            return ""
+        note_parts = [
+            f"身份锚点：{stable_name}[QQ:{uid}] 当前群名片/显示名是“{display}”,这只是临时显示名,不能覆盖 QQ 号对应的稳定身份。"
+        ]
+        if isinstance(profile, dict):
+            identity_note = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), limit)
+            if identity_note:
+                note_parts.append(f"关系网备注：{identity_note}")
+        note_parts.append(f"若显示名像其他角色或群友名字,优先理解为{stable_name}在改名/玩梗/模仿,不要把 TA 误认为那个名字本人。")
+        return " ".join(note_parts)
+
+    def _format_display_name_rename_events(self, events: Any, *, limit: int = 3) -> str:
+        if not isinstance(events, list):
+            return ""
+        lines = []
+        for item in events[-max(1, limit):]:
+            if not isinstance(item, dict):
+                continue
+            old = _single_line(item.get("old"), 24)
+            new = _single_line(item.get("new"), 24)
+            if old and new and old != new:
+                lines.append(f"{old} -> {new}")
+        return "；".join(lines)
+
     def _group_member_identity_note(self, user_id: str, *, limit: int = 120) -> str:
         profile = self._worldbook_profile_by_user_id(user_id)
         if not isinstance(profile, dict):

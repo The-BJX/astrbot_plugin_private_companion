@@ -299,15 +299,17 @@ class PrivateReadingMixin:
 
     def _jm_cosmos_keywords_for_user(self, user: dict[str, Any] | None = None) -> list[str]:
         raw = str(self.jm_cosmos_default_keywords or "纯爱,恋爱,同人")
-        candidates: list[str] = []
+        liked_candidates: list[str] = []
+        base_candidates: list[str] = []
+        memory_candidates: list[str] = []
         state = self.data.get("jm_cosmos_integration") if isinstance(self.data.get("jm_cosmos_integration"), dict) else {}
         profile = state.get("preference_profile") if isinstance(state.get("preference_profile"), dict) else {}
         liked = profile.get("liked_terms") if isinstance(profile.get("liked_terms"), list) else []
         for item in liked[:8]:
             text = _single_line(item.get("term") if isinstance(item, dict) else item, 16)
             if text:
-                candidates.append(text)
-        candidates.extend(part.strip() for part in re.split(r"[,，、\n]+", raw) if part.strip())
+                liked_candidates.append(text)
+        base_candidates.extend(part.strip() for part in re.split(r"[,，、\n]+", raw) if part.strip())
         if isinstance(user, dict):
             memory = user.get("companion_memory")
             user_profile = memory.get("profile") if isinstance(memory, dict) else {}
@@ -316,7 +318,17 @@ class PrivateReadingMixin:
                 for item in interests:
                     text = _single_line(item, 12)
                     if text:
-                        candidates.append(text)
+                        memory_candidates.append(text)
+        buckets = [liked_candidates, base_candidates, memory_candidates]
+        for bucket in buckets:
+            random.shuffle(bucket)
+        candidates: list[str] = []
+        while any(buckets):
+            weighted_order = [0, 1, 2, 1, 0, 1, 2]
+            for idx in weighted_order:
+                if idx < len(buckets) and buckets[idx]:
+                    candidates.append(buckets[idx].pop(0))
+            buckets = [bucket for bucket in buckets if bucket]
         result: list[str] = []
         seen: set[str] = set()
         for keyword in candidates:
@@ -325,9 +337,73 @@ class PrivateReadingMixin:
                 continue
             seen.add(keyword)
             result.append(keyword)
-            if len(result) >= 5:
+            if len(result) >= 8:
                 break
         return result or ["纯爱"]
+
+    def _private_reading_album_fingerprint(self, value: Any) -> str:
+        text = _single_line(value, 120)
+        return re.sub(r"\s+", "", text).lower()
+
+    def _private_reading_excluded_album_ids(self) -> set[str]:
+        excluded: set[str] = set()
+        state = self.data.get("jm_cosmos_integration") if isinstance(self.data.get("jm_cosmos_integration"), dict) else {}
+
+        def add(value: Any) -> None:
+            album_id = _single_line(value, 80)
+            if album_id:
+                excluded.add(album_id)
+
+        for key in ("deleted_album_ids", "read_album_ids", "recent_album_ids"):
+            values = state.get(key) if isinstance(state.get(key), list) else []
+            for item in values:
+                add(item.get("album_id") if isinstance(item, dict) else item)
+        last_album = state.get("last_album") if isinstance(state.get("last_album"), dict) else {}
+        add(last_album.get("id") or last_album.get("album_id"))
+        items = self.data.get("bookshelf_items") if isinstance(self.data.get("bookshelf_items"), list) else []
+        for item in items:
+            if isinstance(item, dict) and item.get("type") == "jm_album":
+                add(item.get("album_id") or item.get("id"))
+        profile = state.get("preference_profile") if isinstance(state.get("preference_profile"), dict) else {}
+        history = profile.get("history") if isinstance(profile.get("history"), list) else []
+        for item in history:
+            if isinstance(item, dict):
+                add(item.get("album_id"))
+        return excluded
+
+    def _private_reading_deleted_title_fingerprints(self) -> set[str]:
+        state = self.data.get("jm_cosmos_integration") if isinstance(self.data.get("jm_cosmos_integration"), dict) else {}
+        values = state.get("deleted_titles") if isinstance(state.get("deleted_titles"), list) else []
+        return {
+            fingerprint
+            for fingerprint in (self._private_reading_album_fingerprint(item) for item in values)
+            if fingerprint
+        }
+
+    def _private_reading_note_read_album(self, album: dict[str, Any]) -> None:
+        album_id = _single_line(album.get("id") or album.get("album_id"), 80)
+        title = _single_line(album.get("title"), 120)
+        if not album_id and not title:
+            return
+        state = self.data.setdefault("jm_cosmos_integration", {})
+        if not isinstance(state, dict):
+            state = {}
+            self.data["jm_cosmos_integration"] = state
+        read_ids = state.setdefault("read_album_ids", [])
+        if not isinstance(read_ids, list):
+            read_ids = []
+            state["read_album_ids"] = read_ids
+        if album_id and album_id not in read_ids:
+            read_ids.append(album_id)
+            del read_ids[:-240]
+        recent = state.setdefault("recent_album_ids", [])
+        if not isinstance(recent, list):
+            recent = []
+            state["recent_album_ids"] = recent
+        if album_id:
+            recent[:] = [item for item in recent if str(item) != album_id]
+            recent.append(album_id)
+            del recent[:-80]
 
     def _private_reading_candidate_score(self, detail: dict[str, Any], keyword: str = "") -> float:
         state = self.data.get("jm_cosmos_integration") if isinstance(self.data.get("jm_cosmos_integration"), dict) else {}
@@ -1094,21 +1170,46 @@ class PrivateReadingMixin:
         keywords = self._jm_cosmos_keywords_for_user(user)
         random.shuffle(keywords)
         cover_dir = Path(self.data_dir) / "jm_cosmos_covers"
+        excluded_album_ids = self._private_reading_excluded_album_ids()
+        deleted_title_fingerprints = self._private_reading_deleted_title_fingerprints()
         for keyword in keywords:
+            candidates: list[dict[str, Any]] = []
+            pages = list(range(1, 6))
+            random.shuffle(pages)
+            pages = pages[: random.randint(2, 4)]
+            seen_candidate_ids: set[str] = set()
+            for page_no in pages:
+                try:
+                    results = await browser.search_albums(keyword, page_no)
+                except Exception as e:
+                    logger.debug(f"[PrivateCompanion] 夹层阅读搜索失败: {e}")
+                    results = []
+                for item in (results or []):
+                    if not isinstance(item, dict):
+                        continue
+                    album_id = _single_line(item.get("id"), 32)
+                    title_fp = self._private_reading_album_fingerprint(item.get("title"))
+                    if not album_id or album_id in excluded_album_ids or album_id in seen_candidate_ids:
+                        continue
+                    if title_fp and title_fp in deleted_title_fingerprints:
+                        continue
+                    seen_candidate_ids.add(album_id)
+                    candidates.append(item)
+                if len(candidates) >= 24:
+                    break
+            if not candidates:
+                continue
             try:
-                results = await browser.search_albums(keyword, 1)
-            except Exception as e:
-                logger.debug(f"[PrivateCompanion] 夹层阅读搜索失败: {e}")
-                results = []
-            candidates = [item for item in (results or []) if isinstance(item, dict)]
-            random.shuffle(candidates)
-            candidates.sort(
-                key=lambda item: self._private_reading_candidate_score(item, keyword) + random.random() * 0.25,
-                reverse=True,
-            )
-            for candidate in candidates[:5]:
+                random.shuffle(candidates)
+                candidates.sort(
+                    key=lambda item: self._private_reading_candidate_score(item, keyword) + random.random() * 1.35,
+                    reverse=True,
+                )
+            except Exception:
+                random.shuffle(candidates)
+            for candidate in candidates[: min(12, len(candidates))]:
                 album_id = _single_line(candidate.get("id"), 32)
-                if not album_id:
+                if not album_id or album_id in excluded_album_ids:
                     continue
                 try:
                     detail = await browser.get_album_detail(album_id)
@@ -1116,6 +1217,10 @@ class PrivateReadingMixin:
                     logger.debug(f"[PrivateCompanion] 夹层阅读详情失败: {e}")
                     detail = None
                 if not isinstance(detail, dict):
+                    continue
+                detail_title_fp = self._private_reading_album_fingerprint(detail.get("title") or candidate.get("title"))
+                if detail_title_fp and detail_title_fp in deleted_title_fingerprints:
+                    logger.debug("[PrivateCompanion] 夹层阅读候选已被用户删除过: album=%s", album_id)
                     continue
                 blocked_tag = self._jm_cosmos_detail_blocked_by_tags(detail)
                 if blocked_tag:
@@ -1227,6 +1332,7 @@ class PrivateReadingMixin:
                     "created_ts": _now_ts(),
                 }
                 self._remember_bookshelf_jm_album(result)
+                self._private_reading_note_read_album(result)
                 self._update_private_reading_preference_profile(result)
                 return result
         return None
