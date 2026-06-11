@@ -999,7 +999,7 @@
   "enable_bilibili_integration": {
     "description": "启用 B 站 Bot 协同",
     "type": "bool",
-    "hint": "检测到 astrbot_plugin_bilibili_bot 时，可读取其观看日志，并把适合的视频作为主动私聊分享素材。",
+    "hint": "检测到 astrbot_plugin_bilibili_bot 时，可读取其观看日志和 memory_api 视频记忆，并把适合的视频作为主动私聊分享素材。",
     "default": true
   },
   "enable_bilibili_boredom_watch": {
@@ -2553,7 +2553,7 @@
   "enable_photo_text_action": {
     "description": "允许主动拍照/生图",
     "type": "bool",
-    "hint": "开启后，Bot 可能在合适动机下调用 ComfyUI 工作流生成图片，拿到图片后再由 LLM 自然写成主动消息并一起发送。生成成功即计入图片额度，即使发送失败也不会立刻继续生图。",
+    "hint": "开启后，Bot 可能在合适动机下调用 ComfyUI、SDGen 或在线图片 API 生成图片，拿到图片后再由 LLM 自然写成主动消息并一起发送。生成成功即计入图片额度，即使发送失败也不会立刻继续生图。",
     "default": true
   },
   "photo_action_max_daily": {
@@ -2573,7 +2573,7 @@
   "photo_generation_backend": {
     "description": "主动生图后端",
     "type": "string",
-    "hint": "可填：auto、comfyui、external。auto 会优先尝试本地 ComfyUI，失败或未配置时再回退到在线图片 API。",
+    "hint": "可填：auto、comfyui、sdgen、external。auto 会优先尝试本地 ComfyUI，再尝试 astrbot_plugin_SDGen，最后回退到在线图片 API。",
     "default": "auto",
     "condition": {
       "enable_photo_text_action": true
@@ -2614,7 +2614,7 @@
   "enable_local_photo_load_guard": {
     "description": "电脑高负荷时延后本地生图",
     "type": "bool",
-    "hint": "开启后，本地 ComfyUI 生图前会读取 CPU/内存负载；负载偏高时跳过或延后本地生图。auto 模式下若在线图片 API 可用，会改走在线后端；只有本地 ComfyUI 时会延后本次主动行为。",
+    "hint": "开启后，本地 ComfyUI/SDGen 生图前会读取 CPU/内存负载；负载偏高时跳过或延后本地生图。auto 模式下若在线图片 API 可用，会改走在线后端；只有本地后端时会延后本次主动行为。",
     "default": true,
     "condition": {
       "enable_photo_text_action": true
@@ -2623,7 +2623,7 @@
   "local_photo_cpu_busy_percent": {
     "description": "本地生图 CPU 忙碌阈值",
     "type": "int",
-    "hint": "系统 CPU 使用率达到该百分比时，认为电脑正忙，暂缓本地 ComfyUI 生图。需要环境中可导入 psutil；不可用时会放行。",
+    "hint": "系统 CPU 使用率达到该百分比时，认为电脑正忙，暂缓本地 ComfyUI/SDGen 生图。需要环境中可导入 psutil；不可用时会放行。",
     "slider": {
       "min": 1,
       "max": 100,
@@ -2638,7 +2638,7 @@
   "local_photo_memory_busy_percent": {
     "description": "本地生图内存忙碌阈值",
     "type": "int",
-    "hint": "系统内存使用率达到该百分比时，认为电脑正忙，暂缓本地 ComfyUI 生图。",
+    "hint": "系统内存使用率达到该百分比时，认为电脑正忙，暂缓本地 ComfyUI/SDGen 生图。",
     "slider": {
       "min": 1,
       "max": 100,
@@ -2653,7 +2653,7 @@
   "local_photo_defer_minutes": {
     "description": "本地生图忙时延后分钟数",
     "type": "int",
-    "hint": "只有本地 ComfyUI 可用且电脑高负荷时，本次 photo_text 主动计划会保留并延后这么久再重试。",
+    "hint": "只有本地生图后端可用且电脑高负荷时，本次 photo_text 主动计划会保留并延后这么久再重试。",
     "slider": {
       "min": 1,
       "max": 240,
@@ -2909,6 +2909,26 @@
     "default": 90,
     "condition": {
       "enable_weather_context": true
+    }
+  },
+  "enable_yesterday_screen_diary_context": {
+    "description": "读取昨日屏幕观察日记",
+    "type": "bool",
+    "hint": "开启后，private_companion 每天只读取 screen_companion 的昨日观察日记脱敏摘要，作为今日状态和日程背景。不会读取今天实时屏幕，也会要求 Bot 不直接说“我昨天看到你”。",
+    "default": true
+  },
+  "screen_diary_context_max_chars": {
+    "description": "昨日屏幕日记上下文字数",
+    "type": "int",
+    "hint": "注入给状态/日程模型的昨日屏幕观察摘要最大字符数。建议保持较短，只保留活动类型和节奏，不保留窗口标题或隐私细节。",
+    "slider": {
+      "min": 200,
+      "max": 1600,
+      "step": 100
+    },
+    "default": 700,
+    "condition": {
+      "enable_yesterday_screen_diary_context": true
     }
   },
   "_section_99_legacy": {

@@ -295,6 +295,9 @@ class ProactiveMessageMixin:
         mood = _single_line(video.get("mood"), 24)
         comment = _single_line(video.get("comment"), 120)
         review = _single_line(video.get("review"), 180)
+        source = _single_line(video.get("source"), 40)
+        memory_context = video.get("memory_context") if isinstance(video.get("memory_context"), list) else []
+        memory_lines = [_single_line(item, 160) for item in memory_context if _single_line(item, 160)][:3]
         parts = [
             "B站视频分享线索：刚刷到一个视频",
             f"标题：{title}" if title else "",
@@ -304,6 +307,8 @@ class ProactiveMessageMixin:
             f"心情：{mood}" if mood else "",
             f"短评：{comment}" if comment else "",
             f"回味：{review}" if review else "",
+            f"来源：{source}" if source else "",
+            "BiliBot记忆：" + " / ".join(memory_lines) if memory_lines else "",
         ]
         return "\n".join(part for part in parts if part)
 
@@ -2744,6 +2749,17 @@ class ProactiveMessageMixin:
                 session_key=session_key,
             )
             return "ComfyUI", image_path, note
+        if preferred == "sdgen":
+            if not self._sdgen_photo_available():
+                return "SDGen", "", "SDGen 插件不可用或未配置"
+            busy_state = self._local_photo_generation_busy_state(force_refresh=True)
+            if busy_state:
+                return "SDGen", "", f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）"
+            image_path, note = await self._run_sdgen_photo_generation(
+                prompt_text,
+                session_key=session_key,
+            )
+            return "SDGen", image_path, note
         if preferred == "external":
             if not self._external_photo_available():
                 return "在线图片 API", "", "在线图片 API 后端不可用或未配置"
@@ -2771,6 +2787,20 @@ class ProactiveMessageMixin:
                     comfyui_note = f"未配置 {workflow_kind} 对应的 ComfyUI 工作流"
         else:
             comfyui_note = "ComfyUI 后端不可用或未配置"
+        if self._sdgen_photo_available():
+            busy_state = self._local_photo_generation_busy_state(force_refresh=True)
+            if busy_state:
+                sdgen_note = f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）"
+            else:
+                image_path, note = await self._run_sdgen_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                )
+                if image_path:
+                    return "SDGen", image_path, note
+                sdgen_note = note
+        else:
+            sdgen_note = "SDGen 插件不可用或未配置"
         if self._external_photo_available():
             image_path, note = await self._run_external_photo_generation(
                 prompt_text,
@@ -2778,8 +2808,8 @@ class ProactiveMessageMixin:
             )
             if image_path:
                 return "在线图片 API", image_path, note
-            return "在线图片 API", "", f"ComfyUI 失败：{comfyui_note}；在线图片 API 失败：{note}"
-        return "ComfyUI", "", comfyui_note
+            return "在线图片 API", "", f"ComfyUI 失败：{comfyui_note}；SDGen 失败：{sdgen_note}；在线图片 API 失败：{note}"
+        return "SDGen", "", f"ComfyUI 失败：{comfyui_note}；SDGen 失败：{sdgen_note}"
 
     async def _build_photo_scene_prompt(
         self, user: dict[str, Any], name: str, reason: str
@@ -2791,7 +2821,7 @@ class ProactiveMessageMixin:
         topic_hint = _single_line(user.get("planned_proactive_topic"), 60)
         motive_hint = _single_line(user.get("planned_proactive_motive"), 120)
         prompt = f"""
-请根据 AstrBot 默认人格和主动原因,生成一张要通过 ComfyUI 工作流制作的“社交媒体随手拍/自拍/生活碎片图”提示词。
+请根据 AstrBot 默认人格和主动原因,生成一张要通过生图后端制作的“社交媒体随手拍/自拍/生活碎片图”提示词。
 
 【人格】
 {persona}
@@ -2823,7 +2853,7 @@ class ProactiveMessageMixin:
 输出 JSON：
 {{
   "kind": "selfie 或 text2img；自拍/人像用 selfie,其他随手拍用 text2img",
-  "prompt": "给 ComfyUI 的中文生图提示词,包含主体、场景、光线、构图、情绪；不要写聊天口吻",
+  "prompt": "给生图后端的中文生图提示词,包含主体、场景、光线、构图、情绪；不要写聊天口吻",
   "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"
 }}
 
@@ -2936,6 +2966,78 @@ class ProactiveMessageMixin:
             return "", f"等待 ComfyUI 结果超时（{self.comfyui_photo_wait_seconds}s）"
         except Exception as e:
             logger.warning(f"[PrivateCompanion] photo_text 生图失败: {e}", exc_info=True)
+            return "", str(e)
+
+    def _find_sdgen_plugin(self) -> Any | None:
+        try:
+            getter = getattr(getattr(self, "context", None), "get_registered_star", None)
+            if callable(getter):
+                for name in ("SDGen", "astrbot_plugin_sdgen"):
+                    plugin = getter(name)
+                    if plugin is not None and callable(getattr(plugin, "_call_t2i_api", None)):
+                        return plugin
+        except Exception:
+            pass
+        for obj in gc.get_objects():
+            try:
+                cls = obj.__class__
+                module = str(getattr(cls, "__module__", ""))
+                if "astrbot_plugin_sdgen" not in module:
+                    continue
+                if callable(getattr(obj, "_call_t2i_api", None)):
+                    return obj
+            except Exception:
+                continue
+        return None
+
+    async def _run_sdgen_photo_generation(
+        self,
+        prompt_text: str,
+        *,
+        session_key: str,
+    ) -> tuple[str, str]:
+        plugin = self._find_sdgen_plugin()
+        if plugin is None:
+            return "", "SDGen 插件不可用"
+        checker = getattr(plugin, "_check_webui_available", None)
+        if callable(checker):
+            try:
+                available, status = await checker()
+                if not available:
+                    return "", f"Stable Diffusion WebUI 不可用（status={status}）"
+            except Exception as exc:
+                return "", f"检查 Stable Diffusion WebUI 失败：{_single_line(exc, 120)}"
+        try:
+            positive_prompt = prompt_text
+            build_prompt = getattr(plugin, "_build_positive_prompt", None)
+            if callable(build_prompt):
+                positive_prompt = build_prompt(prompt_text, "")
+            response = await plugin._call_t2i_api(positive_prompt)
+            images = response.get("images") if isinstance(response, dict) else None
+            if not isinstance(images, list) or not images:
+                return "", "SDGen 未返回图片"
+            image = str(images[0] or "").strip()
+            if not image:
+                return "", "SDGen 返回空图片"
+            config = getattr(plugin, "config", {}) or {}
+            try:
+                enable_upscale = bool(config.get("enable_upscale", False))
+            except Exception:
+                enable_upscale = False
+            processor = getattr(plugin, "_apply_image_processing", None)
+            if enable_upscale and callable(processor):
+                image = await processor(image)
+            if "," in image and image.lower().lstrip().startswith("data:image"):
+                image = image.split(",", 1)[1].strip()
+            image_bytes = base64.b64decode(image)
+            path = await self._save_external_generated_image(
+                image_bytes,
+                session_key=session_key,
+                ext=".png",
+            )
+            return path, "ok" if path else "保存 SDGen 图片失败"
+        except Exception as e:
+            logger.warning(f"[PrivateCompanion] SDGen 生图失败: {e}", exc_info=True)
             return "", str(e)
 
     def _external_image_endpoint(self) -> str:

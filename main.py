@@ -297,7 +297,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "3.3.2",
+    "3.4.0",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -486,7 +486,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         self.comfyui_selfie_workflow_name = self._cfg_str(c, "COMFYUI_SELFIE_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.comfyui_photo_wait_seconds = self._cfg_int(c, "comfyui_photo_wait_seconds", 90, 5, 600)
         self.photo_generation_backend = self._cfg_str(c, "photo_generation_backend", "auto", "auto").strip().lower()
-        if self.photo_generation_backend not in {"auto", "comfyui", "external"}:
+        if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external"}:
             self.photo_generation_backend = "auto"
         self.enable_local_photo_load_guard = self._cfg_bool(c, "enable_local_photo_load_guard", True)
         self.local_photo_cpu_busy_percent = self._cfg_int(c, "local_photo_cpu_busy_percent", 85, 1, 100)
@@ -506,6 +506,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         self.weather_lat = self._cfg_float(c, "weather_lat", 0.0, -90.0)
         self.weather_lon = self._cfg_float(c, "weather_lon", 0.0, -180.0)
         self.weather_refresh_minutes = self._cfg_int(c, "weather_refresh_minutes", 90, 10, 720)
+        self.enable_yesterday_screen_diary_context = self._cfg_bool(c, "enable_yesterday_screen_diary_context", True)
+        self.screen_diary_context_max_chars = self._cfg_int(c, "screen_diary_context_max_chars", 700, 200, 1600)
         self.detail_enhancement_lead_minutes = self._cfg_int(c, "detail_enhancement_lead_minutes", 3, 0, 180)
         self.enable_daily_diary = self._cfg_bool(c, "enable_daily_diary", True)
         self.daily_diary_time = self._cfg_str(c, "daily_diary_time", "23:10")

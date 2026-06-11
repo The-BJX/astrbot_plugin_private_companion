@@ -485,6 +485,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
     humanized_state = plugin._format_state_for_prompt(plugin.data.get("daily_state", {}))
     recent_diaries = plugin._recent_diary_context()
     yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
+    yesterday_screen_diary = plugin._format_yesterday_screen_diary_context_for_prompt()
     weather_info = plugin._weather_summary_text(plugin.data.get("daily_weather", {}))
     calendar_context = plugin._format_calendar_context_for_prompt()
     schedule_adjustments = plugin._format_schedule_adjustments_for_prompt()
@@ -512,6 +513,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
             calendar_context=calendar_context,
             recent_diaries=recent_diaries,
             yesterday_conversation=yesterday_conversation,
+            yesterday_screen_diary=yesterday_screen_diary,
             important_dates=plugin._format_important_dates_for_prompt(),
             weather_info=weather_info,
             daily_plan_item_count=plugin.daily_plan_item_count,
@@ -523,7 +525,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 1. 先看日期语境：今天是普通日、周末、节假日、假期,还是有明确例外（调休、补课、考试、值班）。
 2. 再看日程参考设定：年龄、身份、作息、生活背景决定今天的大主线。
 3. 再看拟人状态和天气：决定节奏快慢、出门意愿、情绪收放和户外时刻。
-4. 再看昨日完整对话摘要和今日互动造成的日程偏移：把它们作为身体、情绪、关系、未完成约定和梦境碎片的残留来源；用户今天明确介入过的事情必须产生合理后果,不要像没发生一样。
+4. 再看昨日完整对话摘要、昨日屏幕观察日记和今日互动造成的日程偏移：把它们作为身体、情绪、关系、未完成约定、作息节奏和梦境碎片的残留来源；用户今天明确介入过的事情必须产生合理后果,不要像没发生一样。
 5. 最后参考可做事项、最近日记、重要日期：只拿来补充细节,不要反客为主。
 
 【生成要求】
@@ -536,6 +538,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 7. 如果最近日记、重要日期或今日互动里提供了前一天/前几天的残留,要顺势衔接但不能复制：前一天疲惫,今天可以更慢或被某件小事缓解；前一天别扭,今天可以绕开、试探或和好；未完成事项可以延后、变形或被打断。
 7.0 如果“今日互动造成的日程偏移”不为空,要先判断它的强度和影响范围：强干涉会改变当前段、下一段甚至今日后续的节奏；中等干涉至少改变情绪、等待、分享欲、任务进度或主动策略；轻微回应也要留下短暂余味。不能只在 message_seed 里提一句就结束。
 7.1 如果昨日完整对话摘要里有饮食、作息、运动、天气暴露、情绪刺激、约定、礼物、争执、安慰、共同完成/未完成的事等线索,可以让它们以抽象后果影响今日：体力、胃口、身体小不适、心情余波、主动话题、出门意愿、梦境碎片或某个时段的小停顿。影响强度要跟摘要一致,可以很轻,也可以没有；不要为了戏剧性强行安排事故。
+7.1.1 如果昨日屏幕观察日记可用,只能把它当作用户昨日作息和活动类型的脱敏背景：例如昨天长时间编程、社交消息较多、视频放松、很晚仍在电脑前等。它可以影响今天的问候、体力判断、主动话题和是否显得担心,但不能直接引用窗口名、账号、具体聊天、页面标题,也不要说“我昨天看到你”。
 7.2 必须主动避开最近日程骨架的重复：不要连续几天都写同一套“醒来/洗漱/整理/学习或做事/休息/收尾/睡前”。如果某类活动无法避免,要换具体场景、地点、对象、阻碍、小意外、关系伏笔或情绪走向,让今天读起来像新的一天。
 7.3 不要把“草稿纸上画圆圈/随手涂鸦/笔尖划来划去/盯着同一张纸发呆”当作通用生活感反复使用。除非输入材料明确提到这件事,否则优先换成更具体的当日物件、地点、声音、气味、人物互动或真实占用时间的事项。
 7.4 如果“技能成长对日程的能力边界影响”不为空,必须让相关能力表现和技能等级连续一致,不要二分处理。Lv.1 可被基础概念绊住；Lv.2 可照着例子慢慢做；Lv.3 能独立推进常规任务但效率一般；Lv.4 常规任务不应卡死,只会检查细节或换思路；Lv.5 普通相关任务应熟练、能优化或教别人；Lv.6 可创造新做法或在未知条件下表现出明显优势。这里的任务可以是题目、创作、料理、训练、战斗、交涉、研究、手工或任何符合人格的活动。它主要约束“能不能做、会不会卡、卡多久、如何解决”,不是强行增加训练频率。
@@ -604,6 +607,9 @@ Bot 名字：{plugin.bot_name}
 昨日完整对话摘要：
 {yesterday_conversation}
 
+昨日屏幕观察日记：
+{yesterday_screen_diary}
+
 近期重要日期：
 {plugin._format_important_dates_for_prompt()}
 """.strip()
@@ -625,6 +631,7 @@ def build_detail_enhancement_prompt(
     calendar_context = plugin._format_calendar_context_for_prompt()
     schedule_adjustments = plugin._format_schedule_adjustments_for_prompt()
     user_habits = plugin._format_all_user_behavior_habits_for_schedule()
+    yesterday_screen_diary = plugin._format_yesterday_screen_diary_context_for_prompt()
     return f"""
 你现在是 Private Companion 的日程细化生成器,要把最新命中的时间区间放大来看。不要当成策划会,要像旁观角色真实度过了这一小段。
 
@@ -717,6 +724,9 @@ def build_detail_enhancement_prompt(
 
 【今日互动造成的日程偏移】
 {schedule_adjustments}
+
+【昨日屏幕观察日记】
+{yesterday_screen_diary}
 
 【用户行为习惯线索】
 {user_habits}

@@ -1,9 +1,12 @@
 # 更新日志
 
-## 3.3.2
+## 3.4.0
 
 - 修复 AstrBot 4.25.5 下插件主模型留空时未显式传入默认 Provider ID，导致 `Context.llm_generate()` 报缺少 `chat_provider_id` 的问题。
 - 修复插件识图模型留空时没有回退到 AstrBot 默认视觉模型的问题；私聊图片、合并消息图片和夹层阅读会按支持图片的 Provider 候选继续尝试。
+- 新增与屏幕陪伴插件的昨日观察日记联动：每天只读取昨日脱敏摘要，作为今日状态、粗日程和细化日程背景，不读取当天实时屏幕，也禁止直接复述窗口名或说“我昨天看到你”。
+- 优化 BiliBot 软联动：不改动 BiliBot 的前提下，陪伴插件会读取其 `memory_api` 最近视频记忆补充分享上下文；观看日志不可用时也可从视频记忆中兜底生成分享线索。
+- 新增主动生图 SDGen 后端：`photo_generation_backend` 支持 `sdgen`，可复用 `astrbot_plugin_SDGen` 的 Stable Diffusion WebUI 配置生成 `photo_text` 图片；`auto` 模式下顺序为 ComfyUI、SDGen、在线图片 API。
 
 ## 3.3.1
 

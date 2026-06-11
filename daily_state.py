@@ -1405,6 +1405,7 @@ class DailyStateMixin:
                 return state
             return self._compose_state_from_conditions(weather)
         weather = await self._ensure_weather_context(force=force)
+        await self._ensure_yesterday_screen_diary_context(force=force)
         if not skip_conversation_summary:
             await self._ensure_yesterday_conversation_summary(force=force)
         async with self._data_lock:
@@ -1503,6 +1504,9 @@ class DailyStateMixin:
             specs.append(("sleep", "能量延续", "昨天的低电量拖到今天早上", "安静", -10, 6))
         if "好梦" in diary_tags and random.random() < 0.3:
             specs.append(("dream", "梦境余温", "梦里留下了一点柔和的亮色", "柔和", 4, 5))
+        screen_diary_spec = self._screen_diary_state_condition_spec()
+        if screen_diary_spec is not None:
+            specs.append(screen_diary_spec)
 
         conditions = []
         for spec in specs:
@@ -2072,6 +2076,283 @@ class DailyStateMixin:
             return "暂无天气信息"
         text = _single_line(weather.get("prompt"), 120)
         return text or "暂无天气信息"
+
+    async def _ensure_yesterday_screen_diary_context(self, force: bool = False) -> dict[str, Any]:
+        today = _today_key()
+        yesterday = date.today() - timedelta(days=1)
+        source_date = _date_key(yesterday)
+        cached = self.data.get("screen_diary_context", {})
+        if (
+            isinstance(cached, dict)
+            and cached.get("date") == today
+            and cached.get("source_date") == source_date
+            and not force
+        ):
+            return cached
+        if not getattr(self, "enable_yesterday_screen_diary_context", True):
+            payload = {
+                "date": today,
+                "source_date": source_date,
+                "source": "disabled",
+                "summary": "",
+                "items": [],
+                "available": False,
+            }
+        else:
+            payload = self._load_yesterday_screen_diary_context(yesterday)
+        async with self._data_lock:
+            self.data["screen_diary_context"] = payload
+            self._save_data_sync()
+        return payload
+
+    def _load_yesterday_screen_diary_context(self, target_date: date) -> dict[str, Any]:
+        today = _today_key()
+        source_date = _date_key(target_date)
+        summary: dict[str, Any] = {}
+        diary_text = ""
+        source = "none"
+        plugin = None
+        try:
+            plugin = self._get_screen_companion_plugin()
+        except Exception:
+            plugin = None
+        if plugin is not None:
+            loader = getattr(plugin, "_load_diary_structured_summary", None)
+            if callable(loader):
+                try:
+                    raw_summary = loader(target_date)
+                    if isinstance(raw_summary, dict):
+                        summary = raw_summary
+                        source = "screen_companion_api"
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 读取屏幕昨日结构化日记失败: %s", exc)
+            if not summary:
+                diary_storage = str(getattr(plugin, "diary_storage", "") or "").strip()
+                summary = self._load_screen_diary_summary_file(target_date, diary_storage)
+                if summary:
+                    source = "screen_companion_file"
+            diary_storage = str(getattr(plugin, "diary_storage", "") or "").strip()
+            diary_text = self._load_screen_diary_markdown_file(target_date, diary_storage)
+        if not summary:
+            fallback_dirs = [
+                str(Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_screen_companion" / "diary"),
+                str(Path(__file__).resolve().parents[2] / "plugin_data" / "astrbot_plugin_screen_companion" / "diary"),
+            ]
+            for fallback_dir in fallback_dirs:
+                summary = self._load_screen_diary_summary_file(target_date, fallback_dir)
+                if summary:
+                    source = "screen_companion_file"
+                    if not diary_text:
+                        diary_text = self._load_screen_diary_markdown_file(target_date, fallback_dir)
+                    break
+                if not diary_text:
+                    diary_text = self._load_screen_diary_markdown_file(target_date, fallback_dir)
+        items = self._screen_diary_items_from_summary(summary)
+        if not items and diary_text:
+            items = self._screen_diary_items_from_markdown(diary_text)
+            if items and source == "none":
+                source = "screen_companion_markdown"
+        max_chars = max(200, _safe_int(getattr(self, "screen_diary_context_max_chars", 700), 700, 200, 1600))
+        summary_text = self._format_screen_diary_context_items(source_date, items, max_chars=max_chars)
+        return {
+            "date": today,
+            "source_date": source_date,
+            "source": source,
+            "summary": summary_text,
+            "items": items[:8],
+            "available": bool(summary_text),
+        }
+
+    def _load_screen_diary_summary_file(self, target_date: date, diary_dir: str = "") -> dict[str, Any]:
+        if not diary_dir:
+            return {}
+        path = Path(diary_dir) / f"diary_{target_date.strftime('%Y%m%d')}.summary.json"
+        if not path.exists():
+            return {}
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 读取屏幕日记摘要文件失败: %s", exc)
+            return {}
+
+    def _load_screen_diary_markdown_file(self, target_date: date, diary_dir: str = "") -> str:
+        if not diary_dir:
+            return ""
+        path = Path(diary_dir) / f"diary_{target_date.strftime('%Y%m%d')}.md"
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")[:4000]
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 读取屏幕日记正文失败: %s", exc)
+            return ""
+
+    def _screen_diary_activity_label(self, text: Any) -> str:
+        raw = str(text or "").lower()
+        if not raw:
+            return ""
+        rules = (
+            (("codex", "vscode", "visual studio", "pycharm", "idea", ".py", "插件", "编程", "代码", "终端", "powershell", "cmd"), "编程和插件调试"),
+            (("qq", "微信", "wechat", "telegram", "discord", "会话", "聊天", "社交"), "社交消息"),
+            (("chrome", "edge", "firefox", "浏览器", "网页", "搜索", "资料"), "查资料或网页浏览"),
+            (("bilibili", "youtube", "视频", "番剧", "直播"), "视频或直播放松"),
+            (("steam", "game", "游戏"), "游戏放松"),
+            (("word", "excel", "wps", "文档", "表格", "写作"), "文档整理"),
+            (("program manager", "桌面"), "桌面空档"),
+        )
+        for markers, label in rules:
+            if any(marker in raw for marker in markers):
+                return label
+        return "电脑前活动"
+
+    def _sanitize_screen_diary_text(self, text: Any, limit: int = 90) -> str:
+        raw = _single_line(text, limit * 2)
+        if not raw:
+            return ""
+        raw = re.sub(r"《[^》]{0,80}(?:》|$)", "相关窗口", raw)
+        raw = re.sub(r"[\"“”'][^\"“”']{1,80}[\"“”']", "相关内容", raw)
+        raw = re.sub(r"\bQQ\b|微信|WeChat|Telegram|Discord", "社交软件", raw, flags=re.IGNORECASE)
+        raw = raw.replace("你在", "用户在")
+        raw = raw.replace("我看到", "")
+        raw = re.sub(r"\s+", " ", raw).strip(" ，。；;")
+        return _single_line(raw, limit)
+
+    def _screen_diary_items_from_summary(self, summary: dict[str, Any]) -> list[str]:
+        if not isinstance(summary, dict) or not summary:
+            return []
+        items: list[str] = []
+        main_windows = summary.get("main_windows") if isinstance(summary.get("main_windows"), list) else []
+        labels: list[str] = []
+        for item in main_windows[:4]:
+            if not isinstance(item, dict):
+                continue
+            label = self._screen_diary_activity_label(item.get("window_title"))
+            if label and label not in labels and label != "桌面空档":
+                labels.append(label)
+        if labels:
+            items.append("主要节奏偏向：" + "、".join(labels[:3]))
+        longest = summary.get("longest_task") if isinstance(summary.get("longest_task"), dict) else {}
+        if longest:
+            label = self._screen_diary_activity_label(
+                f"{longest.get('window_title', '')} {longest.get('focus', '')}"
+            )
+            focus = self._sanitize_screen_diary_text(longest.get("focus"), 80)
+            if label:
+                items.append(f"最长专注大概落在{label}" + (f"，{focus}" if focus else ""))
+        repeated = summary.get("repeated_focuses") if isinstance(summary.get("repeated_focuses"), list) else []
+        repeated_labels: list[str] = []
+        for item in repeated[:3]:
+            if not isinstance(item, dict):
+                continue
+            label = self._screen_diary_activity_label(f"{item.get('window_title', '')} {item.get('note', '')}")
+            if label and label not in repeated_labels and label != "桌面空档":
+                repeated_labels.append(label)
+        if repeated_labels:
+            items.append("反复回到：" + "、".join(repeated_labels[:3]))
+        suggestions = summary.get("suggestion_items") if isinstance(summary.get("suggestion_items"), list) else []
+        for suggestion in suggestions[:2]:
+            cleaned = self._sanitize_screen_diary_text(suggestion, 100)
+            if cleaned and cleaned not in items:
+                items.append("留给今天的背景：" + cleaned)
+        return items[:6]
+
+    def _screen_diary_items_from_markdown(self, diary_text: str) -> list[str]:
+        raw = str(diary_text or "")
+        if not raw.strip():
+            return []
+        lines = []
+        in_overview = False
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## 今日观察"):
+                break
+            if stripped.startswith("## 今日概览"):
+                in_overview = True
+                continue
+            if in_overview and stripped.startswith("- "):
+                cleaned = self._sanitize_screen_diary_text(stripped[2:], 100)
+                label = self._screen_diary_activity_label(cleaned)
+                if label and label != "电脑前活动":
+                    cleaned = f"{label}：" + cleaned
+                if cleaned:
+                    lines.append(cleaned)
+            if len(lines) >= 5:
+                break
+        if not lines:
+            body = self._sanitize_screen_diary_text(raw, 220)
+            if body:
+                lines.append(body)
+        return lines[:5]
+
+    def _screen_diary_state_condition_spec(self) -> tuple[str, str, str, str, int, int, str] | None:
+        payload = self.data.get("screen_diary_context", {})
+        if not isinstance(payload, dict) or not payload.get("available"):
+            return None
+        text = str(payload.get("summary") or "")
+        if not text:
+            return None
+        if any(token in text for token in ("编程", "调试", "查资料")):
+            return (
+                "user_yesterday_screen_diary",
+                "昨日节奏残留",
+                "昨天用户在电脑前专注处理代码或资料,今天对方可能还带着一点用脑后的疲惫",
+                "留意,克制",
+                -3,
+                10,
+                "来自昨日屏幕观察日记的脱敏节奏摘要",
+            )
+        if any(token in text for token in ("视频", "直播", "游戏")):
+            return (
+                "user_yesterday_screen_diary",
+                "昨日节奏残留",
+                "昨天用户有一段偏放松的电脑时间,今天可以把话题放得轻一点",
+                "松弛",
+                1,
+                8,
+                "来自昨日屏幕观察日记的脱敏节奏摘要",
+            )
+        if any(token in text for token in ("社交消息", "聊天")):
+            return (
+                "user_yesterday_screen_diary",
+                "昨日节奏残留",
+                "昨天用户处理过不少社交消息,今天靠近时更适合少一点压迫感",
+                "轻一点",
+                -1,
+                8,
+                "来自昨日屏幕观察日记的脱敏节奏摘要",
+            )
+        return None
+
+    def _format_screen_diary_context_items(self, source_date: str, items: list[str], *, max_chars: int) -> str:
+        if not items:
+            return ""
+        lines = [
+            f"昨日屏幕观察日记（{source_date}，已脱敏，仅作背景）：",
+        ]
+        seen: set[str] = set()
+        for item in items:
+            cleaned = _single_line(item, 130)
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            lines.append(f"- {cleaned}")
+        lines.append("使用边界：只把它当作昨日生活节奏背景，影响今天的体力、作息和话题倾向；不要直接说“我昨天看到你”，不要复述窗口名、账号、聊天内容或具体隐私。")
+        text = "\n".join(lines)
+        return text[:max_chars]
+
+    def _format_yesterday_screen_diary_context_for_prompt(self) -> str:
+        if not getattr(self, "enable_yesterday_screen_diary_context", True):
+            return "未启用。"
+        payload = self.data.get("screen_diary_context", {})
+        if not isinstance(payload, dict) or payload.get("date") != _today_key():
+            return "暂无可用的昨日屏幕观察日记。"
+        max_chars = max(200, _safe_int(getattr(self, "screen_diary_context_max_chars", 700), 700, 200, 1600))
+        text = str(payload.get("summary") or "").strip()
+        if len(text) > max_chars:
+            text = text[:max_chars]
+        return text or "暂无可用的昨日屏幕观察日记。"
 
     async def _fetch_own_weather_prompt(self) -> dict[str, str]:
         if not self.weather_api_key:
@@ -3276,6 +3557,7 @@ class DailyStateMixin:
 
     async def _generate_daily_plan(self) -> dict[str, Any]:
         await self._ensure_yesterday_conversation_summary()
+        await self._ensure_yesterday_screen_diary_context()
         await self._maybe_settle_skill_growth(force=True)
         return await generate_daily_plan(self)
 

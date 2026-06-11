@@ -2251,6 +2251,30 @@ class ProactiveEngineMixin:
             and self.external_image_api_model
         )
 
+    def _sdgen_photo_available(self) -> bool:
+        if not self.enable_photo_text_action:
+            return False
+        try:
+            getter = getattr(getattr(self, "context", None), "get_registered_star", None)
+            if callable(getter):
+                for name in ("SDGen", "astrbot_plugin_sdgen"):
+                    plugin = getter(name)
+                    if plugin is not None and callable(getattr(plugin, "_call_t2i_api", None)):
+                        return True
+        except Exception:
+            pass
+        for obj in gc.get_objects():
+            try:
+                cls = obj.__class__
+                module = str(getattr(cls, "__module__", ""))
+                if "astrbot_plugin_sdgen" not in module:
+                    continue
+                if callable(getattr(obj, "_call_t2i_api", None)):
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _local_photo_generation_load_state(self, *, force_refresh: bool = False) -> dict[str, Any]:
         now = _now_ts()
         if not self.enable_local_photo_load_guard:
@@ -2309,7 +2333,13 @@ class ProactiveEngineMixin:
             )
         if self.photo_generation_backend == "external":
             return ""
-        if not self._comfyui_photo_available():
+        if self.photo_generation_backend == "sdgen":
+            local_available = self._sdgen_photo_available()
+        else:
+            local_available = self._comfyui_photo_available() or (
+                self.photo_generation_backend == "auto" and self._sdgen_photo_available()
+            )
+        if not local_available:
             return ""
         state = self._local_photo_generation_busy_state(force_refresh=force_refresh)
         if not state:
@@ -2339,12 +2369,18 @@ class ProactiveEngineMixin:
                 return False
             if self._local_photo_generation_busy_state():
                 return False
+        elif self.photo_generation_backend == "sdgen":
+            if not self._sdgen_photo_available():
+                return False
+            if self._local_photo_generation_busy_state():
+                return False
         elif self.photo_generation_backend == "external":
             if not self._external_photo_available():
                 return False
         else:
             comfyui_available = self._comfyui_photo_available() and not self._local_photo_generation_busy_state()
-            if not (comfyui_available or self._external_photo_available()):
+            sdgen_available = self._sdgen_photo_available() and not self._local_photo_generation_busy_state()
+            if not (comfyui_available or sdgen_available or self._external_photo_available()):
                 return False
         if user and self.photo_action_max_daily > 0:
             today = datetime.now().strftime("%Y-%m-%d")

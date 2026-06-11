@@ -1917,6 +1917,7 @@ class PrivateCompanionPageApi:
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
+            "enable_yesterday_screen_diary_context",
             "enable_creative_writing",
             "creative_hidden_mode",
         ]
@@ -2114,6 +2115,7 @@ class PrivateCompanionPageApi:
             "private_image_self_recognition_hint",
             "enable_private_image_vision_cache",
             "private_image_vision_cache_max_items",
+            "screen_diary_context_max_chars",
             "enable_segmented_proactive_reply",
             "segmented_proactive_scope",
             "segmented_proactive_threshold",
@@ -2746,6 +2748,7 @@ class PrivateCompanionPageApi:
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
+            "enable_yesterday_screen_diary_context",
             "enable_creative_writing",
             "creative_hidden_mode",
         }
@@ -2997,7 +3000,7 @@ class PrivateCompanionPageApi:
             return mode if mode in {"inject", "transcribe"} else "inject"
         if key == "photo_generation_backend":
             mode = str(value or "auto").strip().lower()
-            return mode if mode in {"auto", "comfyui", "external"} else "auto"
+            return mode if mode in {"auto", "comfyui", "sdgen", "external"} else "auto"
         if key == "segmented_proactive_split_mode":
             mode = str(value or "regex").strip().lower()
             return mode if mode in {"regex", "words"} else "regex"
@@ -3454,10 +3457,15 @@ class PrivateCompanionPageApi:
             watch_log = str(getattr(self.plugin, "_bilibili_watch_log_file", lambda: "")())
         except Exception:
             watch_log = ""
+        try:
+            memory_api_available = bool(getattr(self.plugin, "_bilibili_memory_api_available", lambda: False)())
+        except Exception:
+            memory_api_available = False
         return {
             "enabled": bool(getattr(self.plugin, "enable_bilibili_integration", False)),
             "boredom_watch_enabled": bool(getattr(self.plugin, "enable_bilibili_boredom_watch", False)),
             "available": available,
+            "memory_api_available": memory_api_available,
             "watch_log": watch_log,
             "last_boredom_watch_at": self.plugin._format_timestamp_elapsed(state.get("last_boredom_watch_at", 0)),
             "last_status": state.get("last_boredom_watch_status", ""),

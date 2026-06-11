@@ -284,17 +284,49 @@ class NewsExplorationMixin:
             return False
 
     def _find_bilibili_bot_instance(self) -> Any | None:
+        try:
+            getter = getattr(getattr(self, "context", None), "get_registered_star", None)
+            if callable(getter):
+                for name in ("astrbot_plugin_bilibili_ai_bot", "astrbot_plugin_bilibili_bot"):
+                    obj = getter(name)
+                    if obj is not None and (
+                        callable(getattr(obj, "_run_proactive", None)) or hasattr(obj, "memory_api")
+                    ):
+                        return obj
+        except Exception:
+            pass
         for obj in gc.get_objects():
             try:
                 cls = obj.__class__
                 module = str(getattr(cls, "__module__", ""))
                 if "astrbot_plugin_bilibili" not in module:
                     continue
-                if callable(getattr(obj, "_run_proactive", None)) and hasattr(obj, "_proactive_task"):
+                if (callable(getattr(obj, "_run_proactive", None)) and hasattr(obj, "_proactive_task")) or hasattr(obj, "memory_api"):
                     return obj
             except Exception:
                 continue
         return None
+
+    def _find_bilibili_memory_api(self) -> Any | None:
+        bili = self._find_bilibili_bot_instance()
+        api = getattr(bili, "memory_api", None) if bili is not None else None
+        if api is not None and callable(getattr(api, "get_recent_memories", None)):
+            return api
+        for obj in gc.get_objects():
+            try:
+                cls = obj.__class__
+                module = str(getattr(cls, "__module__", ""))
+                if "astrbot_plugin_bilibili" not in module:
+                    continue
+                api = getattr(obj, "memory_api", None)
+                if api is not None and callable(getattr(api, "get_recent_memories", None)):
+                    return api
+            except Exception:
+                continue
+        return None
+
+    def _bilibili_memory_api_available(self) -> bool:
+        return self._find_bilibili_memory_api() is not None
 
     def _find_bilibili_runtime_objects(self) -> list[Any]:
         found: list[Any] = []
@@ -331,34 +363,135 @@ class NewsExplorationMixin:
             logger.debug(f"[PrivateCompanion] 读取 B 站观看日志失败: {e}")
         return []
 
-    def _latest_bilibili_video_candidate(self) -> dict[str, Any] | None:
-        logs = self._load_bilibili_watch_log()
-        if not logs:
-            return None
-        for item in reversed(logs[-20:]):
-            bvid = _single_line(item.get("bvid"), 32)
-            title = _single_line(item.get("title"), 80)
+    def _load_bilibili_recent_video_memories(self, *, hours: int = 72, limit: int = 12) -> list[dict[str, Any]]:
+        api = self._find_bilibili_memory_api()
+        if api is None:
+            return []
+        try:
+            memories = api.get_recent_memories(
+                source="bilibili",
+                memory_types={"video"},
+                hours=hours,
+                limit=limit,
+            )
+            if isinstance(memories, list):
+                return [item for item in memories if isinstance(item, dict)]
+        except Exception as e:
+            logger.debug(f"[PrivateCompanion] 读取 BiliBot 视频记忆失败: {e}")
+        return []
+
+    def _bilibili_memory_bvid(self, item: dict[str, Any]) -> str:
+        bvid = _single_line(item.get("bvid") or item.get("video_bvid"), 40)
+        if bvid:
+            return bvid
+        text = str(item.get("text") or "")
+        match = re.search(r"\bBV[0-9A-Za-z]{8,16}\b", text)
+        return _single_line(match.group(0), 40) if match else ""
+
+    def _bilibili_memory_title(self, item: dict[str, Any]) -> str:
+        title = _single_line(item.get("video_title") or item.get("title"), 80)
+        if title:
+            return title
+        text = str(item.get("text") or "")
+        match = re.search(r"《([^》]{1,80})》", text)
+        return _single_line(match.group(1), 80) if match else ""
+
+    def _bilibili_memory_context_for_bvid(self, bvid: str, *, limit: int = 3) -> list[str]:
+        safe_bvid = _single_line(bvid, 40)
+        if not safe_bvid:
+            return []
+        contexts: list[str] = []
+        for item in self._load_bilibili_recent_video_memories(limit=18):
+            if self._bilibili_memory_bvid(item) != safe_bvid:
+                continue
+            text = _single_line(item.get("text"), 180)
+            if text and text not in contexts:
+                contexts.append(text)
+            if len(contexts) >= limit:
+                break
+        return contexts
+
+    def _bilibili_video_candidate_from_memory(self) -> dict[str, Any] | None:
+        for item in self._load_bilibili_recent_video_memories():
+            bvid = self._bilibili_memory_bvid(item)
+            title = self._bilibili_memory_title(item)
             if not bvid or not title:
                 continue
-            score = _safe_int(item.get("score"), 0, 0, 10)
-            comment = _single_line(item.get("comment"), 120)
-            review = _single_line(item.get("review"), 180)
-            if score < self.bilibili_share_min_score:
-                continue
+            text = _single_line(item.get("text"), 220)
             return {
-                "key": f"{bvid}:{_single_line(item.get('time'), 20)}",
+                "key": f"{bvid}:{_single_line(item.get('time'), 20)}:memory",
                 "bvid": bvid,
                 "title": title,
-                "up_name": _single_line(item.get("up_name"), 40),
-                "score": score,
-                "mood": _single_line(item.get("mood"), 24),
-                "comment": comment,
-                "review": review,
-                "pic": _single_line(item.get("pic"), 240),
+                "up_name": "",
+                "score": self.bilibili_share_min_score,
+                "mood": "",
+                "comment": text,
+                "review": text,
+                "pic": "",
                 "time": _single_line(item.get("time"), 24),
-                "actions": list(item.get("actions") or []) if isinstance(item.get("actions"), list) else [],
+                "actions": [],
+                "source": "memory_api",
+                "memory_context": [text] if text else [],
             }
         return None
+
+    def _latest_bilibili_video_candidate(self) -> dict[str, Any] | None:
+        logs = self._load_bilibili_watch_log()
+        if logs:
+            for item in reversed(logs[-20:]):
+                bvid = _single_line(item.get("bvid"), 32)
+                title = _single_line(item.get("title"), 80)
+                if not bvid or not title:
+                    continue
+                score = _safe_int(item.get("score"), 0, 0, 10)
+                comment = _single_line(item.get("comment"), 120)
+                review = _single_line(item.get("review"), 180)
+                if score < self.bilibili_share_min_score:
+                    continue
+                return {
+                    "key": f"{bvid}:{_single_line(item.get('time'), 20)}",
+                    "bvid": bvid,
+                    "title": title,
+                    "up_name": _single_line(item.get("up_name"), 40),
+                    "score": score,
+                    "mood": _single_line(item.get("mood"), 24),
+                    "comment": comment,
+                    "review": review,
+                    "pic": _single_line(item.get("pic"), 240),
+                    "time": _single_line(item.get("time"), 24),
+                    "actions": list(item.get("actions") or []) if isinstance(item.get("actions"), list) else [],
+                    "source": "watch_log",
+                    "memory_context": self._bilibili_memory_context_for_bvid(bvid),
+                }
+        return self._bilibili_video_candidate_from_memory()
+
+    def _record_bilibili_share_to_memory(self, user_id: str, candidate: dict[str, Any]) -> None:
+        api = self._find_bilibili_memory_api()
+        if api is None or not callable(getattr(api, "record", None)):
+            return
+        bvid = _single_line(candidate.get("bvid"), 40)
+        title = _single_line(candidate.get("title"), 80)
+        if not bvid or not title:
+            return
+        async def _record() -> None:
+            try:
+                await api.record(
+                    f"陪伴插件准备把视频《{title}》轻轻分享给 QQ 用户 {user_id}，链接 {bvid}",
+                    user_id=str(user_id),
+                    username="PrivateCompanion",
+                    source="private_companion",
+                    memory_type="video",
+                    level="today",
+                    importance=4,
+                    extra={"bvid": bvid, "video_title": title},
+                )
+            except Exception as e:
+                logger.debug(f"[PrivateCompanion] 写入 BiliBot 分享记忆失败: {e}")
+        try:
+            asyncio.create_task(_record())
+        except RuntimeError:
+            pass
+
 
     def _bot_currently_bored_enough_for_bilibili(self) -> bool:
         now_dt = datetime.now()
@@ -458,6 +591,7 @@ class NewsExplorationMixin:
             )
             if not accepted:
                 continue
+            self._record_bilibili_share_to_memory(str(user_id), candidate)
             user["last_bilibili_share_key"] = key
             user["last_bilibili_share_at"] = now
             changed = True
