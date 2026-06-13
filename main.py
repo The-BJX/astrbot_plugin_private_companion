@@ -299,7 +299,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "3.5.1",
+    "3.6.0",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -338,6 +338,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.check_interval_seconds = self._cfg_int(c, "check_interval_seconds", 60, 30)
         self.idle_minutes = self._cfg_int(c, "idle_minutes", 60, 5)
         self.min_interval_minutes = self._cfg_int(c, "min_interval_minutes", 120, 10)
+        self.timer_pre_silence_minutes = self._cfg_int(c, "timer_pre_silence_minutes", 20, 0, 240)
         self.max_daily_messages = self._cfg_int(c, "max_daily_messages", 8, 0, 12)
         self.inbound_message_debounce_seconds = self._cfg_float(c, "inbound_message_debounce_seconds", 3.0, 0.0)
         self.enable_recall_enhancement = self._cfg_bool(c, "enable_recall_enhancement", True)
@@ -1683,6 +1684,18 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             inbound_text = _single_line(combined_text.replace("\n", " "), 260)
         if self._user_asks_recalled_messages(inbound_text):
             injection_parts.append(self._format_recalled_messages_for_natural_query(event, limit=5))
+        if buffered_images and buffered_image_vision and self._private_image_user_has_specific_vision_request(inbound_text):
+            contextual_vision = _single_line(
+                await self._transcribe_private_inbound_images(
+                    buffered_images,
+                    umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                    user_text=inbound_text,
+                    force_contextual=True,
+                ),
+                600,
+            )
+            if contextual_vision:
+                buffered_image_vision = contextual_vision
         if buffered_images:
             direct_image_mounted = False
             if buffered_image_mode == "direct" and self._event_main_provider_supports_image(event) and not buffered_images_include_gif:
@@ -1784,6 +1797,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     await self._transcribe_private_inbound_images(
                         reply_image_sources,
                         umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                        user_text=inbound_text,
+                        force_contextual=self._private_image_user_has_specific_vision_request(inbound_text),
                     ),
                     600,
                 )

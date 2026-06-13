@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import random
 import re
+import struct
+import subprocess
+import sys
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +125,11 @@ class TtsEnhancementMixin:
             "main_user_mention_voice_prompt",
             self._cfg_str(config, "admin_mention_keyword_voice_prompt", ""),
         )
+        self.enable_tts_local_playback = self._cfg_bool(config, "enable_tts_local_playback", False)
+        self.enable_tts_live_subtitle_sync = self._cfg_bool(config, "enable_tts_live_subtitle_sync", False)
+        self.tts_live_subtitle_url = self._cfg_str(config, "tts_live_subtitle_url", "http://127.0.0.1:18081/show", "http://127.0.0.1:18081/show")
+        self.tts_local_playback_min_interval_seconds = self._cfg_float(config, "tts_local_playback_min_interval_seconds", 0.0, 0.0)
+        self._tts_local_playback_last_at = 0.0
         self._tts_auto_voice_last_at: dict[str, float] = {}
 
     def _tts_provider_kind(self, tts_provider: Any = None, provider_settings: dict[str, Any] | None = None) -> str:
@@ -578,6 +589,177 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
         except TypeError:
             return await provider.text_chat(prompt=prompt)
 
+    def _open_tts_audio_file_local(self, audio_path: str) -> None:
+        path = str(audio_path or "").strip()
+        if not path:
+            return
+        if sys.platform.startswith("win"):
+            self._play_tts_audio_file_windows_silent(path)
+            return
+        if sys.platform == "darwin":
+            subprocess.run(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return
+        subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+    def _play_tts_audio_file_windows_silent(self, path: str) -> None:
+        if Path(path).suffix.lower() == ".wav":
+            import winsound
+            playable_path = self._prepare_windows_wav_for_playback(path)
+            winsound.PlaySound(playable_path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+            return
+        if self._run_windows_media_player_script(path, use_wpf=True):
+            return
+        if self._run_windows_media_player_script(path, use_wpf=False):
+            return
+        raise RuntimeError("Windows 后台播放器均未能播放该音频")
+
+    def _prepare_windows_wav_for_playback(self, path: str) -> str:
+        source = Path(path)
+        try:
+            data = source.read_bytes()
+            if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+                return path
+            riff_size = struct.unpack_from("<I", data, 4)[0]
+            pos = 12
+            fmt_chunk: bytes | None = None
+            data_start = 0
+            data_size = 0
+            while pos + 8 <= len(data):
+                chunk_id = data[pos:pos + 4]
+                chunk_size = struct.unpack_from("<I", data, pos + 4)[0]
+                chunk_start = pos + 8
+                remaining = max(0, len(data) - chunk_start)
+                actual_size = min(chunk_size, remaining)
+                if chunk_id == b"fmt ":
+                    fmt_chunk = data[chunk_start:chunk_start + actual_size]
+                elif chunk_id == b"data":
+                    data_start = chunk_start
+                    data_size = actual_size
+                    break
+                if chunk_size > remaining:
+                    break
+                pos = chunk_start + chunk_size + (chunk_size % 2)
+            if not fmt_chunk or not data_start or data_size <= 0:
+                return path
+            if riff_size == len(data) - 8:
+                declared_data_size = struct.unpack_from("<I", data, data_start - 4)[0]
+                if declared_data_size == data_size:
+                    return path
+            fixed = source.with_name(f"{source.stem}.playback.wav")
+            payload = data[data_start:data_start + data_size]
+            riff_payload_size = 4 + (8 + len(fmt_chunk)) + (8 + len(payload))
+            with fixed.open("wb") as f:
+                f.write(b"RIFF")
+                f.write(struct.pack("<I", riff_payload_size))
+                f.write(b"WAVE")
+                f.write(b"fmt ")
+                f.write(struct.pack("<I", len(fmt_chunk)))
+                f.write(fmt_chunk)
+                f.write(b"data")
+                f.write(struct.pack("<I", len(payload)))
+                f.write(payload)
+            return str(fixed)
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 修正 WAV 播放头失败，使用原文件: %s", _single_line(exc, 120))
+            return path
+
+    def _run_windows_media_player_script(self, path: str, *, use_wpf: bool) -> bool:
+        if use_wpf:
+            script = (
+                "$p = [System.IO.Path]::GetFullPath($args[0]); "
+                "Add-Type -AssemblyName PresentationCore; "
+                "$player = New-Object System.Windows.Media.MediaPlayer; "
+                "$player.Open([Uri]::new($p)); "
+                "$deadline = (Get-Date).AddSeconds(10); "
+                "while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 50 }; "
+                "$duration = if ($player.NaturalDuration.HasTimeSpan) { $player.NaturalDuration.TimeSpan.TotalMilliseconds } else { 5000 }; "
+                "$player.Play(); "
+                "Start-Sleep -Milliseconds ([Math]::Min([Math]::Max([int]$duration + 300, 800), 90000)); "
+                "$player.Close()"
+            )
+            args = ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script, path]
+        else:
+            script = (
+                "$p = [System.IO.Path]::GetFullPath($args[0]); "
+                "$player = New-Object -ComObject WMPlayer.OCX; "
+                "$player.settings.volume = 100; "
+                "$player.URL = $p; "
+                "$player.controls.play(); "
+                "$deadline = (Get-Date).AddSeconds(90); "
+                "while ($player.playState -notin 1,8 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }; "
+                "$player.close()"
+            )
+            args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, path]
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=95,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode == 0:
+            return True
+        logger.debug(
+            "[PrivateCompanion] Windows 静默播放方式失败: mode=%s code=%s err=%s",
+            "wpf" if use_wpf else "wmp",
+            result.returncode,
+            _single_line(result.stderr or result.stdout, 160),
+        )
+        return False
+
+    async def _post_tts_live_subtitle(self, text: str) -> None:
+        if not bool(getattr(self, "enable_tts_live_subtitle_sync", False)):
+            return
+        cleaned = _single_line(text, 500)
+        if not cleaned:
+            return
+        url = str(getattr(self, "tts_live_subtitle_url", "") or "").strip() or "http://127.0.0.1:18081/show"
+
+        def _post() -> None:
+            payload = json.dumps({"text": cleaned}, ensure_ascii=False).encode("utf-8")
+            request = urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                response.read(256)
+
+        try:
+            await asyncio.to_thread(_post)
+            logger.info("[PrivateCompanion] 已同步 TTS 文本到直播打字机字幕: %s", _single_line(cleaned, 80))
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] TTS 直播字幕同步失败: %s", _single_line(exc, 120))
+
+    async def _after_tts_audio_generated(
+        self,
+        audio_path: str,
+        spoken_text: str,
+        *,
+        source: str = "",
+        subtitle_text: str = "",
+    ) -> None:
+        is_live_reply = source == "bili_live_auto_reply"
+        visible_text = subtitle_text or spoken_text
+        subtitle_task = (
+            asyncio.create_task(self._post_tts_live_subtitle(visible_text))
+            if is_live_reply
+            else None
+        )
+        if is_live_reply and bool(getattr(self, "enable_tts_local_playback", False)):
+            interval = max(0.0, float(getattr(self, "tts_local_playback_min_interval_seconds", 0.0) or 0.0))
+            now = time.time()
+            if interval <= 0 or now - float(getattr(self, "_tts_local_playback_last_at", 0.0) or 0.0) >= interval:
+                self._tts_local_playback_last_at = now
+                try:
+                    await asyncio.to_thread(self._open_tts_audio_file_local, audio_path)
+                    logger.info("[PrivateCompanion] 已触发 TTS 本机播放: %s", _single_line(audio_path, 160))
+                except Exception as exc:
+                    logger.warning("[PrivateCompanion] TTS 本机播放失败: %s", _single_line(exc, 120))
+        if subtitle_task is not None:
+            await subtitle_task
+
     async def _process_tts_tags(self, text: str, event_or_provider: Any, provider_settings: dict[str, Any] | None = None, config: dict[str, Any] | None = None, fallback_plain: str = "") -> list[Any]:
         if hasattr(event_or_provider, "get_result"):
             event = event_or_provider
@@ -661,6 +843,13 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
             logger.warning("[PrivateCompanion] TTS强化检查语音路径失败: %s", _single_line(exc, 120))
             return None
         final_ref = str(audio_path)
+        asyncio.create_task(
+            self._after_tts_audio_generated(
+                str(audio_path),
+                sanitized,
+                source="private_companion",
+            )
+        )
         if provider_settings.get("use_file_service", False):
             callback_api_base = str((config or {}).get("callback_api_base", "") or "").strip()
             if callback_api_base:

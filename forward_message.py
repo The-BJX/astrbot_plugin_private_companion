@@ -150,6 +150,73 @@ class ForwardMessageMixin:
                 return str(value).strip()
         return ""
 
+    def _decode_possible_json_text(self, value: Any) -> Any:
+        text = html.unescape(str(value or "")).strip()
+        if not text:
+            return None
+        text = text.replace("\\/", "/")
+        text = text.replace("\\u0026", "&").replace("\\u003d", "=").replace("\\u003f", "?")
+        if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+            try:
+                text = json.loads(text)
+            except Exception:
+                pass
+        if isinstance(text, str) and text.strip().startswith(("{", "[")):
+            try:
+                return json.loads(text)
+            except Exception:
+                return None
+        return None
+
+    def _extract_forward_id_from_rich_value(self, value: Any, *, depth: int = 0) -> str:
+        if value is None or depth > 8:
+            return ""
+        if isinstance(value, list):
+            for item in value:
+                found = self._extract_forward_id_from_rich_value(item, depth=depth + 1)
+                if found:
+                    return found
+            return ""
+        if isinstance(value, dict):
+            app = str(value.get("app") or value.get("type") or "").lower()
+            prompt = str(value.get("prompt") or value.get("desc") or "").lower()
+            looks_forward_card = (
+                "multimsg" in app
+                or "forward" in app
+                or "聊天记录" in prompt
+                or "转发消息" in prompt
+            )
+            for key in ("resid", "forward_id", "id"):
+                raw = value.get(key)
+                if raw and (looks_forward_card or key != "id"):
+                    return str(raw).strip()
+            for key in ("meta", "detail", "data", "extra", "config"):
+                found = self._extract_forward_id_from_rich_value(value.get(key), depth=depth + 1)
+                if found:
+                    return found
+            for child in value.values():
+                found = self._extract_forward_id_from_rich_value(child, depth=depth + 1)
+                if found:
+                    return found
+            return ""
+        if isinstance(value, str):
+            parsed = self._decode_possible_json_text(value)
+            if parsed is not None:
+                found = self._extract_forward_id_from_rich_value(parsed, depth=depth + 1)
+                if found:
+                    return found
+            normalized = value.replace("\\/", "/")
+            if "聊天记录" in normalized or "转发消息" in normalized or "multimsg" in normalized:
+                for pattern in (
+                    r'"resid"\s*:\s*"([^"]+)"',
+                    r'"forward_id"\s*:\s*"([^"]+)"',
+                    r'"id"\s*:\s*"([^"]+)"',
+                ):
+                    match = re.search(pattern, normalized)
+                    if match:
+                        return html.unescape(match.group(1)).strip()
+        return ""
+
     def _extract_image_url_from_segment_data(self, seg_data: dict[str, Any]) -> str:
         if not isinstance(seg_data, dict):
             return ""
@@ -315,6 +382,9 @@ class ForwardMessageMixin:
             found = self._extract_forward_id_from_segment_data(message_obj)
             if found:
                 return found
+        found = self._extract_forward_id_from_rich_value(message_obj)
+        if found:
+            return found
         for key in ("message", "messages", "content", "data"):
             found = self._extract_forward_id_from_message_obj(message_obj.get(key))
             if found:
@@ -392,6 +462,7 @@ class ForwardMessageMixin:
     async def _extract_forward_from_reply(self, event: AstrMessageEvent, reply_seg: Any) -> tuple[str, dict[str, Any]]:
         message_id = self._extract_reply_message_id(reply_seg)
         if not message_id:
+            logger.info("[PrivateCompanion] 引用合并消息读取跳过: Reply 段没有 message_id")
             return "", {}
         message_obj = None
         try:
@@ -402,9 +473,29 @@ class ForwardMessageMixin:
             except Exception:
                 message_obj = None
         if not message_obj:
+            logger.info("[PrivateCompanion] 引用合并消息读取失败: get_msg 无返回 message_id=%s", message_id)
             return "", {}
         raw_message = message_obj.get("message") if isinstance(message_obj, dict) else message_obj
-        return self._extract_forward_id_from_message_obj(raw_message), self._extract_forward_payload_from_message_obj(raw_message)
+        try:
+            setattr(event, "_private_companion_reply_raw_message", raw_message)
+        except Exception:
+            pass
+        forward_id = self._extract_forward_id_from_message_obj(raw_message)
+        forward_payload = self._extract_forward_payload_from_message_obj(raw_message)
+        if forward_id or forward_payload:
+            logger.info(
+                "[PrivateCompanion] 引用合并消息已解析: message_id=%s id=%s inline=%s",
+                message_id,
+                _single_line(forward_id, 40) or "inline",
+                bool(forward_payload),
+            )
+        else:
+            logger.info(
+                "[PrivateCompanion] 引用消息未解析到合并转发: message_id=%s shape=%s",
+                message_id,
+                self._forward_payload_shape(raw_message),
+            )
+        return forward_id, forward_payload
 
     async def _extract_image_sources_from_reply(self, event: AstrMessageEvent, reply_seg: Any) -> list[str]:
         message_id = self._extract_reply_message_id(reply_seg)
@@ -453,7 +544,19 @@ class ForwardMessageMixin:
         forward_id = ""
         forward_payload: dict[str, Any] = {}
         reply_seg = None
-        for item in self._message_chain_items(message_obj):
+        chain_items = self._message_chain_items(message_obj)
+        event_items = self._event_components(event)
+        if event_items:
+            seen_ids: set[int] = set()
+            merged_items = []
+            for item in [*chain_items, *event_items]:
+                item_id = id(item)
+                if item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                merged_items.append(item)
+            chain_items = merged_items
+        for item in chain_items:
             type_name = self._component_type_name(item)
             data = self._component_data(item)
             if "forward" in type_name:
@@ -518,6 +621,15 @@ class ForwardMessageMixin:
                 or node_data.get("uin")
                 or ""
             ).strip()
+            node_self_id = str(node.get("self_id") or node_data.get("self_id") or "").strip()
+            event_self_id = ""
+            event_self_id_func = getattr(self, "_event_self_id", None)
+            if callable(event_self_id_func):
+                try:
+                    event_self_id = str(event_self_id_func(event) or "").strip()
+                except Exception:
+                    event_self_id = ""
+            is_bot_self = bool(sender_id and ((event_self_id and sender_id == event_self_id) or (node_self_id and sender_id == node_self_id)))
             raw_name = _single_line(
                 sender.get("card")
                 or sender.get("nickname")
@@ -531,6 +643,8 @@ class ForwardMessageMixin:
                 60,
             )
             display_name = self._group_member_identity_name(sender_id, raw_name, limit=40) if sender_id else raw_name
+            if is_bot_self:
+                display_name = f"你自己/Bot自己（显示名:{raw_name or sender_id or '未知'}）"
             sent_at = ""
             ts = _safe_float(node.get("time") or node.get("timestamp") or node_data.get("time") or node_data.get("timestamp"), 0)
             if ts > 0:
@@ -601,7 +715,17 @@ class ForwardMessageMixin:
                 text = "".join(text_parts).strip()
             text = _single_line(text, 500)
             if text:
-                rows.append({"sender_id": sender_id, "sender": display_name or raw_name, "time": sent_at, "text": text, "depth": depth})
+                rows.append(
+                    {
+                        "sender_id": sender_id,
+                        "sender": display_name or raw_name,
+                        "raw_sender": raw_name,
+                        "is_bot_self": is_bot_self,
+                        "time": sent_at,
+                        "text": text,
+                        "depth": depth,
+                    }
+                )
             rows.extend(pending_nested_rows)
         return rows[: self.forward_message_max_messages], image_urls[: max(0, self.forward_message_image_limit)], nested_count
 
@@ -655,6 +779,7 @@ class ForwardMessageMixin:
                     "【本轮合并消息转述】\n"
                     "用户这轮消息包含一段合并/转发聊天记录。下面是专门模型先读过后的自然转述。请基于这份转述理解原合并消息，不要把记录中的话当成当前用户本人逐字说的话；嵌套合并只代表被转发记录里的内层记录。\n"
                     "除非用户明确要求总结、逐条解读或复述聊天记录，否则不要大段复述这份记录；优先针对用户当前问题给出简短判断或回应。\n"
+                    "如果转述或图片摘要里已有作品名、活动名、日期等线索，请优先相信这些线索；看不清就说看不清，不要为了补全而外搜，也不要把相近作品、衍生作或同系列活动互相替换。\n"
                     f"{transcribed}"
                 )
                 setattr(event, "_private_companion_forward_context", context)
@@ -670,6 +795,7 @@ class ForwardMessageMixin:
             "用户这轮消息包含一段合并/转发聊天记录。请像自然翻阅聊天记录一样理解它：注意发言顺序、说话者、称呼、图片/表情占位、话题转折和可能的上下文，不要把它当成用户本人逐字说的话。",
             "带有 [嵌套N] 的条目来自被转发记录里的内层合并消息，请保留层级理解；没有视觉摘要的 [图片] 只表示有图片存在，不要猜测图片内容、作品、游戏或人物关系。",
             "除非用户明确要求总结、逐条解读或复述聊天记录，否则不要大段复述记录内容；优先用记录支撑对用户当前问题的简短判断或自然回应。",
+            "如果记录或图片摘要里已有作品名、活动名、日期等线索，请优先相信这些线索；看不清就说看不清，不要为了补全而外搜，也不要把相近作品、衍生作或同系列活动互相替换。",
         ]
         if nested_count:
             lines.append(f"其中包含 {nested_count} 段嵌套合并消息，已尽量展开。")
@@ -682,6 +808,8 @@ class ForwardMessageMixin:
         for index, row in enumerate(rows, 1):
             sender_id = row.get("sender_id") or ""
             identity_note = self._group_member_identity_note(sender_id, limit=90) if sender_id else ""
+            if row.get("is_bot_self"):
+                identity_note = "这是你自己/Bot当时发出的消息" + (f"；{identity_note}" if identity_note else "")
             note = f"（{identity_note}）" if identity_note else ""
             when = f"{row.get('time')} " if row.get("time") else ""
             row_depth = _safe_int(row.get("depth"), 0, 0, 6)
@@ -747,6 +875,7 @@ class ForwardMessageMixin:
             "格式：第N张：<图片类型>；内容=<可见文字/主体/动作/关键细节,50字内>；表达=<用户可能借图表达的情绪、态度、疑问、用途或梗,45字内>。\n"
             "完整性规则：每张图都要同时保留客观内容和表达意图；这是在原有基础上的增强,不是二选一。"
             "若是照片/截图/漫画/聊天记录,内容描述更细一点；若是表情包/贴纸/GIF,表达意图和情绪梗分析更多一点。看不清就写看不清；不要猜测人物关系。"
+            "若图中有游戏/作品/角色/活动/节日/日期等文字,必须尽量照抄可见原文；不能把同系列作品或相近活动名互换,不能用联网印象补全看不清的内容。"
             "如果同一张动态 GIF 被抽成多帧,请把连续帧当作同一个动态表情包理解,概括动作/表情变化。"
         )
         attempts = 0
@@ -839,6 +968,188 @@ class ForwardMessageMixin:
         logger.info("[PrivateCompanion] 合并消息图片视觉失败: 所有候选 provider 均不可用或失败 attempts=%s", attempts)
         return ""
 
+    async def _reply_raw_message_for_event(self, event: AstrMessageEvent) -> tuple[str, Any]:
+        cached = getattr(event, "_private_companion_reply_raw_message", None)
+        if cached is not None:
+            return "", cached
+        for item in self._event_components(event):
+            type_name = self._component_type_name(item)
+            if type_name != "reply" and "reply" not in type_name:
+                continue
+            message_id = self._extract_reply_message_id(item)
+            if not message_id:
+                continue
+            message_obj = None
+            try:
+                message_obj = await self._call_platform_action(event, "get_msg", message_id=int(message_id))
+            except Exception:
+                try:
+                    message_obj = await self._call_platform_action(event, "get_msg", message_id=message_id)
+                except Exception:
+                    message_obj = None
+            if not message_obj:
+                continue
+            raw_message = message_obj.get("message") if isinstance(message_obj, dict) else message_obj
+            try:
+                setattr(event, "_private_companion_reply_raw_message", raw_message)
+            except Exception:
+                pass
+            return message_id, raw_message
+        return "", None
+
+    def _extract_reply_rich_card_info(self, message_obj: Any) -> dict[str, Any]:
+        texts: list[str] = []
+        links: list[str] = []
+        images: list[str] = []
+        seen_values: set[str] = set()
+
+        def normalize_card_text(value: Any) -> str:
+            text = html.unescape(str(value or "")).strip()
+            text = text.replace("\\/", "/")
+            text = text.replace("\\u0026", "&").replace("\\u003d", "=").replace("\\u003f", "?")
+            text = text.replace("\\\\", "\\")
+            return text
+
+        def looks_like_image_source(value: str) -> bool:
+            text = normalize_card_text(value)
+            if not text:
+                return False
+            if text.startswith(("http://", "https://", "file://", "data:")):
+                return bool(re.search(r"\.(?:png|jpe?g|gif|webp|bmp)(?:[?#].*)?$", text, re.I) or "/bfs/" in text or "image" in text.lower())
+            return bool(
+                re.search(r"(?:^|[A-Za-z]:\\|/).+\.(?:png|jpe?g|gif|webp|bmp)$", text, re.I)
+            )
+
+        def add_text(value: Any) -> None:
+            text = _single_line(normalize_card_text(value), 160)
+            if text and text not in seen_values and not text.startswith(("http://", "https://")):
+                seen_values.add(text)
+                texts.append(text)
+
+        def add_link(value: Any) -> None:
+            text = normalize_card_text(value)
+            if text and text.startswith(("http://", "https://")) and text not in links:
+                links.append(text)
+
+        def add_image(value: Any) -> None:
+            text = normalize_card_text(value)
+            if text and looks_like_image_source(text) and text not in images:
+                images.append(text)
+
+        def visit(value: Any, *, key_hint: str = "", depth: int = 0) -> None:
+            if value is None or depth > 8:
+                return
+            if isinstance(value, list):
+                for item in value:
+                    visit(item, key_hint=key_hint, depth=depth + 1)
+                return
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    key_text = str(key or "").lower()
+                    if isinstance(child, str):
+                        if any(token in key_text for token in ("image", "img", "pic", "picture", "cover", "preview", "thumb", "icon", "file", "path")):
+                            add_image(child)
+                        if any(token in key_text for token in ("url", "jump", "link", "uri")):
+                            add_link(child)
+                        if any(token in key_text for token in ("title", "desc", "summary", "content", "text", "prompt", "tag")):
+                            add_text(child)
+                    visit(child, key_hint=key_text, depth=depth + 1)
+                return
+            raw = str(value or "").strip()
+            if not raw:
+                return
+            unescaped = normalize_card_text(raw)
+            compact = unescaped.strip()
+            if compact.startswith(("{", "[")):
+                try:
+                    visit(json.loads(compact), key_hint=key_hint, depth=depth + 1)
+                    return
+                except Exception:
+                    pass
+            quoted_json = compact
+            if (quoted_json.startswith('"') and quoted_json.endswith('"')) or (quoted_json.startswith("'") and quoted_json.endswith("'")):
+                try:
+                    visit(json.loads(quoted_json), key_hint=key_hint, depth=depth + 1)
+                    return
+                except Exception:
+                    pass
+            for url in re.findall(r"https?://[^\s\"'<>\\)）]+", unescaped):
+                add_link(url)
+                if looks_like_image_source(url):
+                    add_image(url)
+            for file_path in re.findall(r"[A-Za-z]:\\[^\s\"'<>|]+?\.(?:png|jpe?g|gif|webp|bmp)", unescaped, re.I):
+                add_image(file_path)
+            for file_uri in re.findall(r"file://[^\s\"'<>]+?\.(?:png|jpe?g|gif|webp|bmp)", unescaped, re.I):
+                add_image(file_uri)
+            for cq_match in re.finditer(r"\[CQ:image,([^\]]+)\]", unescaped):
+                fields: dict[str, str] = {}
+                for part in cq_match.group(1).split(","):
+                    if "=" not in part:
+                        continue
+                    key, val = part.split("=", 1)
+                    fields[key.strip()] = normalize_card_text(val)
+                for key in ("url", "file", "path"):
+                    candidate = fields.get(key)
+                    if candidate:
+                        if looks_like_image_source(candidate):
+                            add_image(candidate)
+                        elif candidate.startswith(("http://", "https://")):
+                            add_link(candidate)
+            for image_match in re.findall(
+                r'"(?:image|img|pic|picture|cover|preview|thumb|icon|src|url|file|path)"\s*:\s*"([^"]+)"',
+                unescaped,
+                re.I,
+            ):
+                normalized_image = normalize_card_text(image_match)
+                if looks_like_image_source(normalized_image):
+                    add_image(normalized_image)
+                elif normalized_image.startswith(("http://", "https://")):
+                    add_link(normalized_image)
+            if key_hint in {"data"} and ("bilibili" in unescaped or "哔哩" in unescaped or "明日方舟" in unescaped):
+                for text_match in re.findall(r'"(?:title|desc|summary|content|text|prompt)"\s*:\s*"([^"]{2,160})"', unescaped):
+                    add_text(text_match)
+
+        visit(message_obj)
+        return {"texts": texts[:8], "links": links[:8], "images": images[:6]}
+
+    async def _format_reply_rich_card_context_for_prompt(self, event: AstrMessageEvent) -> str:
+        message_id, raw_message = await self._reply_raw_message_for_event(event)
+        if raw_message is None:
+            return ""
+        info = self._extract_reply_rich_card_info(raw_message)
+        texts = [item for item in info.get("texts", []) if item]
+        links = [item for item in info.get("links", []) if item]
+        images = [item for item in info.get("images", []) if item]
+        if not (texts or links or images):
+            return ""
+        image_vision_text = await self._transcribe_forward_message_images(event, images)
+        lines = [
+            "【本轮引用卡片/动态】",
+            "用户这轮是在问被引用的富卡片、动态或插件消息。下面是从被引用消息结构中抽出的内容；请优先依据这些内容和图片摘要回答，不要用搜索结果或历史话题替换当前引用内容。",
+            "如果图片摘要或卡片文字里已有作品名、活动名、日期等线索，请照原样理解；看不清就说看不清，不要把同系列作品或相近活动互相替换。",
+        ]
+        if message_id:
+            lines.append(f"引用消息ID：{message_id}")
+        if texts:
+            lines.append("卡片文字：" + "；".join(texts[:5]))
+        if links:
+            lines.append("卡片链接：" + "；".join(links[:4]))
+        if images:
+            lines.append(f"卡片图片数：{len(images)}")
+        if image_vision_text:
+            lines.append("引用卡片图片视觉摘要：")
+            lines.append(image_vision_text)
+        logger.info(
+            "[PrivateCompanion] 已注入引用卡片上下文: message_id=%s texts=%s links=%s images=%s vision=%s preview=%s",
+            message_id or "-",
+            len(texts),
+            len(links),
+            len(images),
+            bool(image_vision_text),
+            _single_line(" | ".join([*texts[:3], *links[:2]]), 240),
+        )
+        return "\n".join(lines)
+
     async def _transcribe_forward_message_rows(
         self,
         rows: list[dict[str, Any]],
@@ -855,7 +1166,14 @@ class ForwardMessageMixin:
             row_depth = _safe_int(row.get("depth"), 0, 0, 6)
             indent = "  " * row_depth
             nested_label = f"[嵌套{row_depth}] " if row_depth else ""
-            line = f"{indent}{index}. {nested_label}{when}{row.get('sender') or '未知用户'}: {row.get('text') or ''}"
+            sender_id = _single_line(row.get("sender_id"), 40)
+            identity_note = ""
+            if row.get("is_bot_self"):
+                identity_note = "这是你自己/Bot当时发出的消息"
+            elif sender_id:
+                identity_note = self._group_member_identity_note(sender_id, limit=90)
+            note = f"（{identity_note}）" if identity_note else ""
+            line = f"{indent}{index}. {nested_label}{when}{row.get('sender') or '未知用户'}{note}: {row.get('text') or ''}"
             used += len(line)
             if used > max(800, self.forward_message_max_chars):
                 raw_lines.append("……后续节点因长度限制已省略。")
@@ -870,6 +1188,7 @@ class ForwardMessageMixin:
             "4. 带有 [嵌套N] 的条目来自内层合并消息，转述时要说明它是内层记录，不要和外层聊天混成同一层。\n"
             "5. 不要替 Bot 回复用户，不要输出寒暄，只输出转述内容。\n"
             "6. 如果内容很短，可以简短转述；如果内容较长，用条理清楚的段落或要点。\n\n"
+            "7. 对作品名、游戏名、活动名、节日名、日期和数字保持原样；如果图片摘要或聊天节点已经给出这些线索，不要把它们改写成相近作品、衍生作或其他活动。\n\n"
             f"合并消息转述任务信息：节点数={len(rows)}，图片占位数={len(image_urls)}，嵌套合并数={nested_count}。\n"
             "聊天记录节点：\n"
             + "\n".join(raw_lines)
@@ -898,6 +1217,10 @@ class ForwardMessageMixin:
         context = await self._format_forward_message_context_for_prompt(event, req)
         if context:
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{context}".strip()
+            return
+        rich_card_context = await self._format_reply_rich_card_context_for_prompt(event)
+        if rich_card_context:
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{rich_card_context}".strip()
         elif should_log_probe:
             logger.info("[PrivateCompanion] 合并消息请求未生成上下文: text=%s", message_text or "(empty)")
 

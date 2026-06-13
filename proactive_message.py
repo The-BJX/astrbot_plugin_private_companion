@@ -2327,6 +2327,10 @@ class ProactiveMessageMixin:
         if not self.enable_qq_presence_sync:
             return
         await asyncio.sleep(2)
+        try:
+            await self._ensure_current_detail_presence_status()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 启动同步当前 QQ 状态失败: %s", exc)
         async with self._data_lock:
             state = self.data.get("qq_presence_state", {})
             if not isinstance(state, dict) or str(state.get("date") or "") == _today_key():
@@ -3425,6 +3429,7 @@ class ProactiveMessageMixin:
         *,
         extra_components: list[Any] | None = None,
         quote_message_id: str = "",
+        disable_segmenting: bool = False,
     ) -> None:
         trigger_message_id = _single_line(quote_message_id, 120)
         if self._contains_inline_image_tag(text):
@@ -3436,6 +3441,7 @@ class ProactiveMessageMixin:
             text,
             image_path="",
             extra_components=None,
+            disable_segmenting=disable_segmenting,
         )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else ""
@@ -3475,6 +3481,7 @@ class ProactiveMessageMixin:
         *,
         extra_components: list[Any] | None = None,
         quote_message_id: str = "",
+        disable_segmenting: bool = False,
     ) -> None:
         trigger_message_id = _single_line(quote_message_id, 120)
         if image_path or extra_components:
@@ -3484,6 +3491,7 @@ class ProactiveMessageMixin:
                 image_path,
                 extra_components=extra_components,
                 quote_message_id=quote_message_id,
+                disable_segmenting=disable_segmenting,
             )
             return
         if text:
@@ -3492,6 +3500,7 @@ class ProactiveMessageMixin:
             text,
             image_path=image_path,
             extra_components=extra_components,
+            disable_segmenting=disable_segmenting,
         )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else text
@@ -3603,8 +3612,8 @@ class ProactiveMessageMixin:
             if not conv_id:
                 logger.debug("[PrivateCompanion] 当前私聊没有活动对话,跳过主动消息存档: %s", umo)
                 return
-            user_msg_obj = UserMessageSegment(content=[TextPart(text=user_prompt)])
-            assistant_msg_obj = AssistantMessageSegment(content=[TextPart(text=assistant_response)])
+            user_msg_obj = UserMessageSegment(content=str(user_prompt or ""))
+            assistant_msg_obj = AssistantMessageSegment(content=str(assistant_response or ""))
             await self.context.conversation_manager.add_message_pair(
                 cid=conv_id,
                 user_message=user_msg_obj,

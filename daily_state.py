@@ -698,6 +698,7 @@ class DailyStateMixin:
             and str(state.get("mode") or "") == mode
             and str(state.get("custom_text") or "") == custom_text
             and bool(state.get("ok", False))
+            and _now_ts() - _safe_float(state.get("updated_at"), 0) < 10 * 60
         ):
             return
         if mode in {"custom", "自定义", "自定义状态"}:
@@ -5471,6 +5472,38 @@ class DailyStateMixin:
             return self._normalize_internal_motive_text("刚才的话题还有一点后续内容,适合稍后补充")
         return self._choose_proactive_motive(reason, user, action="message")
 
+    def _timer_source_implies_user_unavailable(self, source_text: str, payload: dict[str, Any] | None = None) -> bool:
+        text = f"{source_text or ''} {_single_line((payload or {}).get('topic'), 80)} {_single_line((payload or {}).get('motive'), 120)}"
+        if not text.strip():
+            return False
+        rest_tokens = (
+            "睡觉",
+            "睡会",
+            "睡一会",
+            "午睡",
+            "补觉",
+            "休息",
+            "躺会",
+            "躺一会",
+            "眯一会",
+            "小憩",
+            "闭眼",
+            "一起睡",
+            "一起休息",
+        )
+        wake_tokens = (
+            "叫我",
+            "叫醒",
+            "喊我",
+            "喊醒",
+            "起床",
+            "醒来",
+            "准时",
+            "到点",
+            "提醒我",
+        )
+        return any(token in text for token in rest_tokens) and any(token in text for token in wake_tokens)
+
     def _get_active_llm_timer(self, user: dict[str, Any]) -> dict[str, Any] | None:
         raw = user.get("llm_timer_event")
         if not isinstance(raw, dict) or not raw:
@@ -5514,6 +5547,17 @@ class DailyStateMixin:
             summary_parts.append(f"当时留下来的那句线索是：{seed}")
         if motive:
             summary_parts.append(f"当时心里的余味：{motive}")
+        deferred = event.get("deferred_context")
+        if isinstance(deferred, dict) and deferred:
+            deferred_topic = _single_line(deferred.get("topic"), 40)
+            deferred_motive = _single_line(deferred.get("motive"), 80)
+            deferred_reason = _single_line(deferred.get("reason"), 30)
+            deferred_text = deferred_topic or deferred_motive or deferred_reason
+            if deferred_text:
+                summary_parts.append(
+                    f"这段静默期间原本还有一个主动念头被攒到了现在：{deferred_text}。"
+                    "本次回复必须先完成预约/叫醒本意，再把这个念头当成一句顺带内容自然接上；不要单独展开成长篇。"
+                )
         if now < scheduled_ts:
             summary_parts.append(f"现在离约好的时间还差 {self._format_duration_brief(scheduled_ts - now)}。")
         return " ".join(summary_parts)
@@ -5571,6 +5615,7 @@ class DailyStateMixin:
                 "trigger_umo": _single_line(trigger_umo, 160),
                 "trigger_ts": _now_ts() if trigger_message_id else 0,
                 "chain": list(payload.get("chain") or []) if isinstance(payload.get("chain"), list) else [],
+                "silence_until_due": self._timer_source_implies_user_unavailable(source_text, payload),
             }
             user["llm_timer_event"] = timer_event
             user["next_proactive_at"] = scheduled_ts
@@ -6363,6 +6408,7 @@ class DailyStateMixin:
                     image_path,
                     extra_components=extra_components,
                     quote_message_id=proactive_quote_message_id,
+                    disable_segmenting=reason == "creative_share",
                 )
                 logger.info(
                     "[PrivateCompanion] 主动发送完成: user=%s reason=%s action=%s",

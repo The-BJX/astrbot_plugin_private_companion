@@ -1521,7 +1521,14 @@ class EventDispatchMixin:
             return True
         return False
 
-    def _split_proactive_text(self, text: str, *, image_path: str = "", extra_components: list[Any] | None = None) -> list[str]:
+    def _split_proactive_text(
+        self,
+        text: str,
+        *,
+        image_path: str = "",
+        extra_components: list[Any] | None = None,
+        disable_segmenting: bool = False,
+    ) -> list[str]:
         normalized = str(text or "").strip()
         if not normalized:
             return []
@@ -1532,6 +1539,8 @@ class EventDispatchMixin:
             except Exception:
                 pass
         if image_path or extra_components:
+            return [normalized]
+        if disable_segmenting:
             return [normalized]
         if not self.enable_segmented_proactive_reply:
             return [normalized]

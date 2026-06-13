@@ -384,16 +384,17 @@ class PrivateImageMixin:
         clean_keys = [str(item).strip() for item in image_keys if str(item or "").strip()]
         if not clean_keys:
             return ""
-        raw = "v2|" + _single_line(scope, 40) + "|" + str(provider_id or "") + "|" + "|".join(clean_keys)
+        prompt_sig = hashlib.sha1(str(prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:16] if prompt else ""
+        raw = "v3|" + _single_line(scope, 40) + "|" + str(provider_id or "") + "|" + prompt_sig + "|" + "|".join(clean_keys)
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
 
-    def _get_private_image_vision_cache(self, cache_key: str, *, provider_id: str = "", image_keys: list[str] | None = None, scope: str = "private_image") -> str:
+    def _get_private_image_vision_cache(self, cache_key: str, *, provider_id: str = "", image_keys: list[str] | None = None, scope: str = "private_image", allow_image_key_fallback: bool = True) -> str:
         if not bool(getattr(self, "enable_private_image_vision_cache", True)):
             return ""
         cache = self._private_image_vision_cache_store()
         clean_image_keys = [str(item).strip() for item in (image_keys or []) if str(item or "").strip()]
 
-        def use_item(key: str, item: dict[str, Any], *, fallback: bool = False) -> str:
+        def use_item(key: str, item: dict[str, Any], *, fallback: bool = False, detail: str = "") -> str:
             text = _single_line(item.get("text"), 900 if scope == "forward_image" else 600)
             if not text:
                 cache.pop(key, None)
@@ -404,7 +405,7 @@ class PrivateImageMixin:
                 item.setdefault("migrated_from", key)
                 cache[cache_key] = item
                 cache.pop(key, None)
-            self._record_cache_metric(f"image_vision:{scope}", hit=True, detail="fallback" if fallback else "direct")
+            self._record_cache_metric(f"image_vision:{scope}", hit=True, detail=detail or ("fallback" if fallback else "direct"))
             return text
 
         item = cache.get(cache_key)
@@ -413,22 +414,30 @@ class PrivateImageMixin:
             if text:
                 return text
 
-        if clean_image_keys:
+        if allow_image_key_fallback and clean_image_keys:
             expected_provider = _single_line(provider_id, 160)
             expected_scope = _single_line(scope, 40)
+            provider_fallback: tuple[str, dict[str, Any]] | None = None
             for key, item in list(cache.items()):
                 if key == cache_key or not isinstance(item, dict):
                     continue
                 cached_keys = [str(value).strip() for value in item.get("image_keys", []) if str(value or "").strip()]
                 if cached_keys != clean_image_keys:
                     continue
-                cached_provider = _single_line(item.get("provider_id"), 160)
-                if expected_provider and cached_provider and cached_provider != expected_provider:
-                    continue
                 cached_scope = _single_line(item.get("scope"), 40)
                 if cached_scope and expected_scope and cached_scope != expected_scope:
                     continue
+                cached_provider = _single_line(item.get("provider_id"), 160)
+                if expected_provider and cached_provider and cached_provider != expected_provider:
+                    if provider_fallback is None:
+                        provider_fallback = (key, item)
+                    continue
                 text = use_item(key, item, fallback=True)
+                if text:
+                    return text
+            if provider_fallback is not None:
+                key, item = provider_fallback
+                text = use_item(key, item, fallback=True, detail="provider_fallback")
                 if text:
                     return text
 
@@ -442,25 +451,53 @@ class PrivateImageMixin:
         if not cache_key or not cleaned:
             return
         cache = self._private_image_vision_cache_store()
+        clean_image_keys = [str(item) for item in image_keys[:4] if str(item or "").strip()]
+        clean_scope = _single_line(scope, 40)
+        clean_provider = _single_line(provider_id, 160)
+        prompt_sig = hashlib.sha1(str(prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:16] if prompt else ""
+        removed_variants = 0
+        for old_key, old_item in list(cache.items()):
+            if old_key == cache_key or not isinstance(old_item, dict):
+                continue
+            old_keys = [str(value).strip() for value in old_item.get("image_keys", []) if str(value or "").strip()]
+            old_scope = _single_line(old_item.get("scope"), 40)
+            old_provider = _single_line(old_item.get("provider_id"), 160)
+            old_prompt_sig = _single_line(old_item.get("prompt_sig"), 32)
+            same_reusable_image = old_keys == clean_image_keys and old_scope == clean_scope
+            same_provider_variant = same_reusable_image and old_provider == clean_provider
+            stale_prompt_variant = same_provider_variant and old_prompt_sig != prompt_sig
+            duplicate_provider_variant = same_reusable_image and old_provider and old_provider != clean_provider and _safe_int(old_item.get("hits"), 0, 0) == 0
+            if stale_prompt_variant or duplicate_provider_variant:
+                cache.pop(old_key, None)
+                removed_variants += 1
         cache[cache_key] = {
             "text": cleaned,
-            "provider_id": _single_line(provider_id, 160),
-            "image_keys": [str(item) for item in image_keys[:4]],
-            "scope": _single_line(scope, 40),
-            "prompt_sig": hashlib.sha1(str(prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:16] if prompt else "",
+            "provider_id": clean_provider,
+            "image_keys": clean_image_keys,
+            "scope": clean_scope,
+            "prompt_sig": prompt_sig,
             "created_ts": _now_ts(),
             "last_hit_ts": 0,
             "hits": 0,
         }
+        if removed_variants:
+            self._record_cache_metric(f"image_vision:{scope}", hit=True, detail=f"dedupe:{removed_variants}")
         max_items = int(getattr(self, "private_image_vision_cache_max_items", 300) or 0)
         if max_items > 0 and len(cache) > max_items:
             stale = sorted(
                 cache.items(),
-                key=lambda item: _safe_float((item[1] if isinstance(item[1], dict) else {}).get("last_hit_ts"), 0)
-                or _safe_float((item[1] if isinstance(item[1], dict) else {}).get("created_ts"), 0),
+                key=lambda item: (
+                    _safe_int((item[1] if isinstance(item[1], dict) else {}).get("hits"), 0, 0),
+                    _safe_float((item[1] if isinstance(item[1], dict) else {}).get("last_hit_ts"), 0)
+                    or _safe_float((item[1] if isinstance(item[1], dict) else {}).get("created_ts"), 0),
+                ),
             )
+            evicted = 0
             for key, _ in stale[: max(1, len(cache) - max_items)]:
                 cache.pop(key, None)
+                evicted += 1
+            if evicted:
+                self._record_cache_metric(f"image_vision:{scope}", hit=False, detail=f"evict:{evicted}")
         try:
             self._save_data_sync()
         except Exception as exc:
@@ -1098,7 +1135,30 @@ class PrivateImageMixin:
             "如果归属无法判断,不要强行认定属于任何一方。"
         )
 
-    async def _transcribe_private_inbound_images(self, image_sources: list[str], *, umo: str = "") -> str:
+    def _private_image_user_has_specific_vision_request(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "")).lower()
+        if not compact:
+            return False
+        request_tokens = (
+            "看清", "仔细看", "放大", "左上", "左下", "右上", "右下", "中间", "背景", "文字", "台词",
+            "写了什么", "写的啥", "几个人", "几个", "是谁", "像谁", "是不是", "有没有", "哪里", "哪儿",
+            "识别", "判断", "分析", "帮我看", "图里", "截图里", "画面里", "细节", "表情", "动作",
+        )
+        return any(token in compact for token in request_tokens)
+
+    def _private_image_query_prompt_suffix(self, user_text: str) -> str:
+        user_text = _single_line(user_text, 240)
+        if not user_text:
+            return ""
+        return (
+            "\n\n【本轮用户看图要求】\n"
+            f"用户这次带着新的具体要求问这张图：{user_text}\n"
+            "请在 4 行摘要里优先补足与这个要求直接相关的可见细节；"
+            "如果用户要求识别文字、数量、位置、人物、动作、表情或截图内容,必须在“可见内容”中回答到这些点。"
+            "不知道就写无法判断,不要用旧摘要概括带过。"
+        )
+
+    async def _transcribe_private_inbound_images(self, image_sources: list[str], *, umo: str = "", user_text: str = "", force_contextual: bool = False) -> str:
         sources = await self._prepare_private_image_sources_for_model(
             [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:4],
             namespace="private_vision",
@@ -1136,19 +1196,28 @@ class PrivateImageMixin:
             if provider is None or not self._provider_supports_image(provider):
                 continue
             attempts += 1
-            prompt = default_prompt
+            contextual = bool(force_contextual or self._private_image_user_has_specific_vision_request(user_text))
+            prompt = default_prompt + self._private_image_query_prompt_suffix(user_text if contextual else "")
             self_recognition_prompt = self._private_image_self_recognition_prompt()
             if self_recognition_prompt and self_recognition_prompt not in prompt:
                 prompt = f"{prompt}\n\n{self_recognition_prompt}"
-            cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt, scope="private_image")
-            cached_text = self._get_private_image_vision_cache(cache_key, provider_id=provider_id, image_keys=image_keys, scope="private_image")
+            scope = "private_image_query" if contextual else "private_image"
+            cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt, scope=scope)
+            cached_text = self._get_private_image_vision_cache(
+                cache_key,
+                provider_id=provider_id,
+                image_keys=image_keys,
+                scope=scope,
+                allow_image_key_fallback=not contextual,
+            )
             if cached_text:
                 cached_text = self._private_image_downgrade_conflicting_ownership(cached_text)
                 intent_line = self._private_image_intent_line(cached_text)
                 ownership_line = self._private_image_ownership_line(cached_text)
                 logger.info(
-                    "[PrivateCompanion] 私聊图片视觉转述命中缓存: provider=%s images=%s intent=%s ownership=%s preview=%s",
+                    "[PrivateCompanion] 私聊图片视觉转述命中缓存: provider=%s scope=%s images=%s intent=%s ownership=%s preview=%s",
                     provider_id,
+                    scope,
                     len(image_urls),
                     intent_line or "无",
                     ownership_line or "无",
@@ -1178,16 +1247,17 @@ class PrivateImageMixin:
                 )
                 self._clear_private_image_provider_failure(provider_id, provider_source)
                 logger.info(
-                    "[PrivateCompanion] 私聊图片视觉转述完成: provider=%s source=%s images=%s chars=%s intent=%s ownership=%s preview=%s",
+                    "[PrivateCompanion] 私聊图片视觉转述完成: provider=%s source=%s scope=%s images=%s chars=%s intent=%s ownership=%s preview=%s",
                     provider_id,
                     provider_source,
+                    scope,
                     len(image_urls),
                     len(text),
                     intent_line or "无",
                     ownership_line or "无",
                     _single_line(cleaned_text, 220),
                 )
-                self._set_private_image_vision_cache(cache_key, cleaned_text, provider_id=provider_id, image_keys=image_keys, prompt=prompt, scope="private_image")
+                self._set_private_image_vision_cache(cache_key, cleaned_text, provider_id=provider_id, image_keys=image_keys, prompt=prompt, scope=scope)
                 return cleaned_text
             except Exception as exc:
                 self._record_llm_usage(

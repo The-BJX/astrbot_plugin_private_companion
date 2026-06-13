@@ -355,6 +355,13 @@ class ProactiveEngineMixin:
         if not self._user_enabled_for_proactive(str(user_id), user):
             self._clear_pending_proactive_plan(user)
             return False
+        timer_event = self._get_active_llm_timer(user)
+        timer_scheduled = _safe_float(timer_event.get("scheduled_ts"), 0) if isinstance(timer_event, dict) else 0.0
+        if timer_scheduled > now and scheduled < timer_scheduled:
+            if self._in_llm_timer_silence_window(user, now=now):
+                self._remember_silenced_candidate_for_timer(user, candidate, now=now)
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动")
+            return False
         if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动")
             return False
@@ -396,6 +403,142 @@ class ProactiveEngineMixin:
             user[context_key] = context
         return True
 
+    def _llm_timer_pre_silence_seconds(self) -> float:
+        return max(0.0, float(getattr(self, "timer_pre_silence_minutes", 20) or 0) * 60.0)
+
+    def _upcoming_llm_timer_ts(self, user: dict[str, Any], *, now: float | None = None) -> float:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict):
+            return 0.0
+        scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
+        check_now = _now_ts() if now is None else now
+        return scheduled_ts if scheduled_ts > check_now else 0.0
+
+    def _in_llm_timer_pre_silence_window(self, user: dict[str, Any], *, now: float | None = None) -> bool:
+        lead = self._llm_timer_pre_silence_seconds()
+        if lead <= 0:
+            return False
+        check_now = _now_ts() if now is None else now
+        timer_ts = self._upcoming_llm_timer_ts(user, now=check_now)
+        return timer_ts > 0 and 0 < timer_ts - check_now <= lead
+
+    def _in_llm_timer_silence_window(self, user: dict[str, Any], *, now: float | None = None) -> bool:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict):
+            return False
+        check_now = _now_ts() if now is None else now
+        scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
+        if scheduled_ts <= check_now:
+            return False
+        if bool(event.get("silence_until_due")):
+            return True
+        return self._in_llm_timer_pre_silence_window(user, now=check_now)
+
+    def _remember_silenced_plan_for_timer(self, user: dict[str, Any], *, now: float | None = None) -> None:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict):
+            return
+        planned_source = str(user.get("planned_proactive_source") or "")
+        if planned_source == "timer":
+            return
+        topic = _single_line(user.get("planned_proactive_topic"), 80)
+        motive = _single_line(user.get("planned_proactive_motive"), 160)
+        reason = _single_line(user.get("planned_proactive_reason"), 40)
+        action = _single_line(user.get("planned_proactive_action"), 32)
+        if not any((topic, motive, reason)):
+            return
+        existing = event.get("deferred_context")
+        if isinstance(existing, dict) and existing:
+            return
+        event["deferred_context"] = {
+            "created_at": now or _now_ts(),
+            "reason": reason,
+            "action": action,
+            "topic": topic,
+            "motive": self._normalize_internal_motive_text(motive),
+            "source": planned_source,
+        }
+
+    def _remember_silenced_candidate_for_timer(
+        self,
+        user: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> None:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict):
+            return
+        existing = event.get("deferred_context")
+        if isinstance(existing, dict) and existing:
+            return
+        topic = _single_line(candidate.get("topic"), 80)
+        motive = _single_line(candidate.get("motive"), 160)
+        reason = _single_line(candidate.get("reason"), 40)
+        action = _single_line(candidate.get("action"), 32)
+        if not any((topic, motive, reason)):
+            return
+        event["deferred_context"] = {
+            "created_at": now or _now_ts(),
+            "reason": reason,
+            "action": action,
+            "topic": topic,
+            "motive": self._normalize_internal_motive_text(motive),
+            "source": _single_line(candidate.get("source"), 40),
+        }
+
+    def _promote_due_llm_timer_plan(self, user: dict[str, Any], *, now: float | None = None) -> bool:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict):
+            return False
+        check_now = _now_ts() if now is None else now
+        scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
+        if scheduled_ts <= 0 or scheduled_ts > check_now:
+            return False
+        user["next_proactive_at"] = scheduled_ts
+        user["planned_proactive_reason"] = _single_line(event.get("reason"), 40) or "check_in"
+        user["planned_proactive_action"] = _single_line(event.get("action"), 24) or "message"
+        user["planned_proactive_source"] = "timer"
+        user["planned_proactive_motive"] = self._normalize_internal_motive_text(_single_line(event.get("motive"), 140))
+        user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
+        user["planned_event_chain"] = list(event.get("chain") or []) if isinstance(event.get("chain"), list) else []
+        user["planned_opener_mode"] = ""
+        user["planned_followup_kind"] = ""
+        user["planned_proactive_quota_exempt"] = False
+        self._set_planned_proactive_trigger(
+            user,
+            message_id=_single_line(event.get("trigger_message_id"), 120),
+            umo=_single_line(event.get("trigger_umo"), 160),
+            created_at=_safe_float(event.get("trigger_ts"), 0),
+        )
+        return True
+
+    def _promote_upcoming_llm_timer_plan(self, user: dict[str, Any], *, now: float | None = None) -> bool:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict):
+            return False
+        check_now = _now_ts() if now is None else now
+        scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
+        if scheduled_ts <= check_now:
+            return False
+        user["next_proactive_at"] = scheduled_ts
+        user["planned_proactive_reason"] = _single_line(event.get("reason"), 40) or "check_in"
+        user["planned_proactive_action"] = _single_line(event.get("action"), 24) or "message"
+        user["planned_proactive_source"] = "timer"
+        user["planned_proactive_motive"] = self._normalize_internal_motive_text(_single_line(event.get("motive"), 140))
+        user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
+        user["planned_event_chain"] = list(event.get("chain") or []) if isinstance(event.get("chain"), list) else []
+        user["planned_opener_mode"] = ""
+        user["planned_followup_kind"] = ""
+        user["planned_proactive_quota_exempt"] = False
+        self._set_planned_proactive_trigger(
+            user,
+            message_id=_single_line(event.get("trigger_message_id"), 120),
+            umo=_single_line(event.get("trigger_umo"), 160),
+            created_at=_safe_float(event.get("trigger_ts"), 0),
+        )
+        return True
+
     def _should_send(self, user: dict[str, Any]) -> tuple[bool, str]:
         self._recover_stale_proactive_sending(user)
         user_id = str(user.get("user_id") or user.get("id") or "")
@@ -424,6 +567,9 @@ class ProactiveEngineMixin:
         now = _now_ts()
         planned_reason = str(user.get("planned_proactive_reason") or "")
         due_timer_active = self._has_due_llm_timer(user, now=now)
+        if due_timer_active and str(user.get("planned_proactive_source") or "") != "timer":
+            self._promote_due_llm_timer_plan(user, now=now)
+            planned_reason = str(user.get("planned_proactive_reason") or "")
         next_at = _safe_float(user.get("next_proactive_at"), 0)
         if next_at <= 0:
             self._schedule_next_proactive(user, now=now)
@@ -431,6 +577,14 @@ class ProactiveEngineMixin:
         if self._promote_earlier_daily_greeting_event(user, now=now):
             planned_reason = str(user.get("planned_proactive_reason") or "")
             next_at = _safe_float(user.get("next_proactive_at"), 0)
+        if (
+            not due_timer_active
+            and str(user.get("planned_proactive_source") or "") != "timer"
+            and self._in_llm_timer_silence_window(user, now=now)
+        ):
+            self._remember_silenced_plan_for_timer(user, now=now)
+            self._promote_upcoming_llm_timer_plan(user, now=now)
+            return False, "用户预约静默窗口"
         if now < next_at:
             return False, "未到候选主动时间"
         if self._is_proactive_plan_stale(user, now=now) and not due_timer_active:
@@ -1273,6 +1427,9 @@ class ProactiveEngineMixin:
     def _pick_pending_followup_event(
         self, user: dict[str, Any], now: float | None = None
     ) -> dict[str, Any] | None:
+        now = now or _now_ts()
+        if self._in_llm_timer_silence_window(user, now=now):
+            return None
         opener_event = self._build_suspended_opener_followup_event(user, now=now)
         if isinstance(opener_event, dict):
             return opener_event
@@ -1285,7 +1442,7 @@ class ProactiveEngineMixin:
         scheduled = _safe_float(raw.get("_scheduled_ts"), 0)
         if scheduled <= 0:
             return None
-        if scheduled <= (now or _now_ts()):
+        if scheduled <= now:
             return raw
         return raw
 

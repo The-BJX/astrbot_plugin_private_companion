@@ -474,11 +474,16 @@ const configLabels = {
   schedule_worldview_prompt: "世界观/生活背景",
   roleplay_user_profile_prompt: "用户与关系补充",
   max_daily_messages: "每日主动上限",
+  timer_pre_silence_minutes: "预约前静默窗口",
   enable_tts_enhancement: "TTS强化",
   tts_generation_mode: "TTS生成路径",
   tts_voice_language: "TTS语音语种",
   tts_conversion_provider_id: "TTS转换模型Provider ID",
   tts_extra_prompt: "TTS补充规则",
+  enable_tts_local_playback: "TTS生成后本机播放",
+  enable_tts_live_subtitle_sync: "同步到直播打字机字幕",
+  tts_live_subtitle_url: "直播字幕推送地址",
+  tts_local_playback_min_interval_seconds: "本机播放最小间隔秒数",
   auto_voice_enabled: "自动语音转换",
   auto_voice_full_conversion_enabled: "自动语音完整转换",
   auto_voice_probability: "自动语音触发概率(%)",
@@ -561,6 +566,7 @@ const configLabels = {
   passive_topic_memory_hours: "话题抑制记忆小时",
   idle_minutes: "空闲门槛分钟",
   min_interval_minutes: "最小主动间隔分钟",
+  timer_pre_silence_minutes: "预约前静默窗口",
   check_interval_seconds: "后台检查间隔秒",
   enabled: "群聊总开关",
   group_count: "群记录总数",
@@ -705,12 +711,17 @@ const configDescriptions = {
   screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
+  timer_pre_silence_minutes: "已有明确自预约/定时主动时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。",
   max_daily_messages: "每个私聊对象每天最多收到多少条插件主动消息。",
   passive_topic_memory_hours: "记录最近被动回复主题的时间窗口，用来判断短时间内是否又在重复同类话题。",
   tts_generation_mode: "hybrid：有 <tts> 就直接处理，没有时按自动语音规则转换；direct：只让主模型自己写 <tts>；convert：普通回复后统一交给转换模型生成 TTS 格式。适合实现“中文显示文本 + 外语语音块”。",
   tts_voice_language: "控制真正送入 TTS 的语音正文语种。可让聊天文本保留中文，<tts> 内使用日语或英语朗读；日语模式会尽量避免明显非日语文本直接进入 TTS。",
   tts_conversion_provider_id: "用于 convert 路径、hybrid 自动语音和语种修正。留空时显式 <tts> 标签仍可直接由 TTS provider 处理。",
   tts_extra_prompt: "只填写本人格或声线的额外要求。基础格式、语种和 provider 自适应规则会自动生成，留空最稳。",
+  enable_tts_local_playback: "开启后，TTS 音频生成成功时会在运行 AstrBot 的电脑上直接播放。默认关闭，避免群聊自动语音频繁出声。",
+  enable_tts_live_subtitle_sync: "开启后，TTS 生成音频时会把朗读文本同步推送到“我会直播圈米养你”的打字机字幕 overlay。",
+  tts_live_subtitle_url: "直播插件字幕 overlay 的 /show 接口地址。默认对应 127.0.0.1:18081/show。",
+  tts_local_playback_min_interval_seconds: "两次 TTS 本机播放之间的最小间隔。0 表示不限制。",
   auto_voice_enabled: "开启后，hybrid 路径可按概率把纯文本短回复转换为语音。",
   auto_voice_full_conversion_enabled: "开启后，自动语音尽量把整条回复完整转换成一段语音。",
   auto_voice_probability: "普通纯文本回复参与自动语音转换的概率，填写 0-100。",
@@ -748,7 +759,7 @@ const configDescriptions = {
   enable_private_image_vision_cache: "开启后，同一张图片或表情包会按内容哈希复用上次视觉摘要，避免重复调用识图模型；不会缓存最终聊天回复。",
   private_image_vision_cache_max_items: "最多保留多少条图片视觉摘要缓存。达到上限后会清理最久未命中的旧缓存，0 表示不限制。",
   segmented_proactive_threshold: "纯文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
-  segmented_proactive_scope: "插件主动只影响插件主动消息；全部 LLM 回复会额外拆普通模型纯文本回复，首段随主链立即发送，剩余片段后台按间隔补发。图片、语音、AT 或工具转述等复杂消息不会拆。",
+  segmented_proactive_scope: "插件主动只影响插件主动消息；全部 LLM 回复会额外拆普通模型纯文本回复，首段随主链立即发送，剩余片段后台按间隔补发。图片、语音、AT 或工具转述等复杂消息不会拆；创作分享会自动保持整段。",
   segmented_proactive_min_segment_chars: "分段后短于或等于该字数的片段会并入相邻消息，避免“哈哈”“我也觉得”这类附和语单独发出。",
   segmented_proactive_max_segments: "一次主动消息最多拆成几条。默认 3，过高会显得刷屏。",
   segmented_proactive_split_mode: "regex 使用正则切句；words 使用分段词列表，更适合清理句号、空格等固定分隔符。网址会自动保护，不会被按点号或斜杠拆开。",
@@ -949,7 +960,7 @@ const featureSettingGroups = {
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
-  enable_tts_enhancement: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt", "auto_voice_enabled", "auto_voice_full_conversion_enabled", "auto_voice_probability", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
+  enable_tts_enhancement: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt", "enable_tts_local_playback", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_full_conversion_enabled", "auto_voice_probability", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_creative_writing: ["creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects"],
   creative_hidden_mode: ["creative_share_probability"],
 };
@@ -1070,6 +1081,11 @@ const featureSettingSections = {
       title: "自动语音",
       note: "hybrid 模式下，符合条件的纯文本回复可按概率转换为语音。",
       keys: ["auto_voice_enabled", "auto_voice_probability", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "auto_voice_full_conversion_enabled"],
+    },
+    {
+      title: "本机与直播联动",
+      note: "TTS 音频生成后可在运行 AstrBot 的电脑播放，并同步推送到直播插件打字机字幕。",
+      keys: ["enable_tts_local_playback", "tts_local_playback_min_interval_seconds", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url"],
     },
     {
       title: "主用户触发",
@@ -6096,6 +6112,7 @@ function syncFeatureProviderInput(select) {
 function collectFeatureDetailPayload(featureKey, root = document) {
   const features = { [featureKey]: Boolean(state.featureDraft[featureKey]) };
   const settings = {};
+  const overviewSettings = state.overview?.settings || {};
   root.querySelectorAll("[data-feature-param]").forEach((input) => {
     const key = input.dataset.featureParam;
     if (!key) return;
@@ -6107,7 +6124,9 @@ function collectFeatureDetailPayload(featureKey, root = document) {
     } else {
       value = input.value;
     }
-    if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) {
+    if (Object.prototype.hasOwnProperty.call(overviewSettings, key)) {
+      settings[key] = value;
+    } else if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) {
       features[key] = Boolean(value);
       state.featureDraft[key] = Boolean(value);
     } else {

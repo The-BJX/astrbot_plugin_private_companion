@@ -601,6 +601,17 @@
     },
     "default": 120
   },
+  "timer_pre_silence_minutes": {
+    "description": "预约前静默窗口（分钟）",
+    "type": "int",
+    "hint": "已有明确自预约/定时主动时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句，只保留到点后的预约消息。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。设为 0 只关闭普通预约的临近静默。",
+    "slider": {
+      "min": 0,
+      "max": 240,
+      "step": 5
+    },
+    "default": 20
+  },
   "check_interval_seconds": {
     "description": "检查间隔（秒）",
     "type": "int",
@@ -2993,6 +3004,43 @@
       "enable_tts_enhancement": true
     }
   },
+  "enable_tts_local_playback": {
+    "description": "TTS生成后本机播放",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，TTS 音频生成成功时会在运行 AstrBot 的电脑上直接播放。默认关闭，避免群聊自动语音频繁出声。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "enable_tts_live_subtitle_sync": {
+    "description": "同步到直播打字机字幕",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，TTS 生成音频时会把朗读文本同步推送到“我会直播圈米养你”的打字机字幕 overlay。需要直播插件字幕服务已启用并运行。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "tts_live_subtitle_url": {
+    "description": "直播字幕推送地址",
+    "type": "string",
+    "default": "http://127.0.0.1:18081/show",
+    "hint": "直播插件字幕 overlay 的 /show 接口地址。默认对应 astrbot_plugin_live_stream_companion 的 subtitle_host/subtitle_port。",
+    "condition": {
+      "enable_tts_live_subtitle_sync": true
+    }
+  },
+  "tts_local_playback_min_interval_seconds": {
+    "description": "本机播放最小间隔秒数",
+    "type": "float",
+    "default": 0,
+    "min": 0,
+    "hint": "两次 TTS 本机播放之间的最小间隔。0 表示不限制；如果群聊自动语音较多，建议设置几秒避免连续出声。",
+    "condition": {
+      "enable_tts_local_playback": true
+    }
+  },
   "auto_voice_enabled": {
     "description": "自动语音转换",
     "type": "bool",
@@ -3215,7 +3263,7 @@
   "enable_segmented_proactive_reply": {
     "description": "主动文本分段发送",
     "type": "bool",
-    "hint": "开启后，较短且无图片/附加组件的主动文本会按配置切分为多条短消息发送。默认关闭，避免主动消息显得过于打扰。",
+    "hint": "开启后，较短且无图片/附加组件的主动文本会按配置切分为多条短消息发送。创作分享会自动保持整段，避免小说片段被拆碎。默认关闭，避免主动消息显得过于打扰。",
     "default": false
   },
   "segmented_proactive_scope": {
