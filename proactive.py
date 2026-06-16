@@ -287,9 +287,39 @@ class ProactiveMixin:
         override = self._user_profile_override_int(user, "proactive_daily_limit")
         if override is not None:
             return override
+        max_daily_messages = self._runtime_max_daily_messages()
         if self._private_user_role(user) == "friend":
-            return min(self.max_daily_messages, 2) if self.max_daily_messages > 0 else 0
-        return max(0, self.max_daily_messages)
+            return min(max_daily_messages, 2) if max_daily_messages > 0 else 0
+        return max(0, max_daily_messages)
+
+    def _runtime_max_daily_messages(self) -> int:
+        runtime_value = _safe_int(getattr(self, "max_daily_messages", 8), 8, 0, 12)
+        if runtime_value > 0:
+            return runtime_value
+        config = getattr(self, "config", None)
+        getter = getattr(config, "get", None)
+        if callable(getter):
+            try:
+                configured_value = _safe_int(getter("max_daily_messages", runtime_value), runtime_value, 0, 12)
+                if configured_value > 0:
+                    self.max_daily_messages = configured_value
+                    return configured_value
+            except Exception:
+                pass
+        return runtime_value
+
+    def _format_daily_limit_disabled_reason(self, user: dict[str, Any]) -> str:
+        override = user.get("proactive_daily_limit", -1) if isinstance(user, dict) else -1
+        runtime_value = _safe_int(getattr(self, "max_daily_messages", 0), 0, 0, 12)
+        config_value = runtime_value
+        config = getattr(self, "config", None)
+        getter = getattr(config, "get", None)
+        if callable(getter):
+            try:
+                config_value = _safe_int(getter("max_daily_messages", runtime_value), runtime_value, 0, 12)
+            except Exception:
+                config_value = runtime_value
+        return f"每日上限为 0（用户覆盖={override}，运行中全局={runtime_value}，配置全局={config_value}）"
 
     def _effective_user_idle_minutes(self, user: dict[str, Any]) -> int:
         override = self._user_profile_override_int(user, "proactive_idle_minutes")

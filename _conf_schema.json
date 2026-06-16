@@ -214,9 +214,9 @@
     "_special": "select_provider"
   },
   "VOICE_PROMPT_PROVIDER_ID": {
-    "description": "主动语音文案模型（留空跟随陪伴通用模型）",
+    "description": "主动语音文案文本模型（留空跟随陪伴通用模型）",
     "type": "string",
-    "hint": "用于主动 voice 的短句生成和 TTS 格式修复。适合短文本口语能力好、能遵守 <tts> 或日语规则的模型。",
+    "hint": "这是文本模型，只用于主动 voice 的短句生成和 TTS 格式修复，不是语音合成模型选择器。真正发声使用 AstrBot 当前会话配置的 TTS provider；阿里云百炼/CosyVoice 等语音合成模型请在 AstrBot 的 TTS 配置中设置。",
     "default": "",
     "_special": "select_provider"
   },
@@ -2995,11 +2995,11 @@
     }
   },
   "tts_conversion_provider_id": {
-    "description": "TTS转换模型Provider ID",
+    "description": "TTS文本转换模型Provider ID",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于 convert 路径、hybrid 自动语音和语种修正。留空时会尽量用保守兜底，不影响显式 <tts> 标签解析。",
+    "hint": "这是文本模型，用于 convert 路径、hybrid 自动语音和语种修正，不是语音合成模型。留空时会尽量用保守兜底，不影响显式 <tts> 标签解析；真正合成音频仍使用 AstrBot 当前会话的 TTS provider。",
     "condition": {
       "enable_tts_enhancement": true
     }
@@ -3299,6 +3299,25 @@
       "enable_segmented_proactive_reply": true
     }
   },
+  "segmented_proactive_chat_scope": {
+    "description": "分段会话范围",
+    "type": "string",
+    "hint": "控制分段功能在哪类会话生效。全部：私聊和群聊都可分段；仅私聊：群聊保持整条；仅群聊：私聊保持整条。",
+    "options": [
+      "all",
+      "private",
+      "group"
+    ],
+    "labels": [
+      "全部",
+      "仅私聊",
+      "仅群聊"
+    ],
+    "default": "all",
+    "condition": {
+      "enable_segmented_proactive_reply": true
+    }
+  },
   "segmented_proactive_threshold": {
     "description": "主动文本不分段字数阈值",
     "type": "int",
@@ -3337,6 +3356,15 @@
       "step": 1
     },
     "default": 3,
+    "condition": {
+      "enable_segmented_proactive_reply": true
+    }
+  },
+  "segmented_proactive_send_as_forward": {
+    "description": "分段后以合并消息发送",
+    "type": "bool",
+    "hint": "开启后，文本被切成多段时会优先打包成合并转发消息发送，减少刷屏；平台不支持或发送失败时会自动回退为普通逐条分段。默认关闭。",
+    "default": false,
     "condition": {
       "enable_segmented_proactive_reply": true
     }

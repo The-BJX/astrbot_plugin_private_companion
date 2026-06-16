@@ -1297,20 +1297,28 @@ class ProactiveMessageMixin:
         text = str(exc or "").lower()
         return "database is locked" in text or "sqlite3.operationalerror" in text or "sqlalche.me/e/20/e3q8" in text
 
-    async def _acquire_framework_session_lock_for_event(self, event: AstrMessageEvent, *, label: str = "llm") -> None:
+    async def _acquire_framework_session_lock_for_event(
+        self,
+        event: AstrMessageEvent,
+        *,
+        label: str = "llm",
+        private_only: bool = True,
+    ) -> None:
         if bool(getattr(event, "private_companion_framework_session_lock_acquired", False)):
             return
         if bool(getattr(event, "private_companion_proactive_framework", False)):
             return
-        if not bool(getattr(event, "is_private_chat", lambda: False)()):
+        is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
+        if private_only and not is_private_chat:
             return
         session_key = self._framework_session_key_from_event(event)
         lock = self._framework_session_lock(session_key)
         if lock.locked():
             logger.info(
-                "[PrivateCompanion] 同一私聊会话已有主链请求在执行,本轮排队等待: label=%s session=%s",
+                "[PrivateCompanion] 同一会话已有主链请求在执行,本轮排队等待: label=%s session=%s private=%s",
                 label,
                 _single_line(session_key, 120),
+                is_private_chat,
             )
         await lock.acquire()
         try:
@@ -1345,14 +1353,14 @@ class ProactiveMessageMixin:
                 setattr(event, "private_companion_framework_session_lock", None)
                 lock.release()
                 logger.warning(
-                    "[PrivateCompanion] 私聊主链会话锁超时释放: label=%s session=%s",
+                    "[PrivateCompanion] 主链会话锁超时释放: label=%s session=%s",
                     label,
                     _single_line(session_key, 120),
                 )
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            logger.debug("[PrivateCompanion] 私聊主链会话锁看门狗异常: %s", _single_line(exc, 120))
+            logger.debug("[PrivateCompanion] 主链会话锁看门狗异常: %s", _single_line(exc, 120))
 
     def _release_framework_session_lock_for_event(self, event: AstrMessageEvent, *, label: str = "llm") -> None:
         if not bool(getattr(event, "private_companion_framework_session_lock_acquired", False)):
@@ -1371,10 +1379,38 @@ class ProactiveMessageMixin:
         if isinstance(lock, asyncio.Lock) and lock.locked():
             lock.release()
             logger.debug(
-                "[PrivateCompanion] 已释放私聊主链会话锁: label=%s session=%s",
+                "[PrivateCompanion] 已释放主链会话锁: label=%s session=%s",
                 label,
                 _single_line(session_key, 120),
             )
+
+    def _release_framework_session_lock_later(
+        self,
+        event: AstrMessageEvent,
+        *,
+        label: str = "llm",
+        delay_seconds: float = 60.0,
+    ) -> None:
+        if not bool(getattr(event, "private_companion_framework_session_lock_acquired", False)):
+            return
+        old_task = getattr(event, "private_companion_framework_session_delayed_release_task", None)
+        if isinstance(old_task, asyncio.Task) and not old_task.done():
+            old_task.cancel()
+
+        async def _delayed_release() -> None:
+            try:
+                await asyncio.sleep(max(0.0, float(delay_seconds or 0.0)))
+                self._release_framework_session_lock_for_event(event, label=label)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 主链会话锁延迟释放异常: %s", _single_line(exc, 120))
+
+        task = asyncio.create_task(_delayed_release())
+        try:
+            setattr(event, "private_companion_framework_session_delayed_release_task", task)
+        except Exception:
+            pass
 
     async def _get_current_conversation_safely(self, umo: str, *, label: str = "conversation") -> Any:
         async def _read():
@@ -2871,6 +2907,7 @@ class ProactiveMessageMixin:
                 component = Record(file=final_ref)
             except TypeError:
                 component = Record.fromFileSystem(str(audio_path))
+        self._annotate_tts_record_component(component, spoken_text, source_text=spoken_text)
         return [component], str(audio_path)
 
     def _get_tts_prompt_text(self, target: str) -> str:
@@ -2878,15 +2915,7 @@ class ProactiveMessageMixin:
             builder = getattr(self, "_build_tts_rule_prompt", None)
             if callable(builder):
                 return str(builder("generic") or "").strip()
-        try:
-            config = self.context.get_config(target) if target else self.context.get_config()
-        except Exception:
-            try:
-                config = self.context.get_config()
-            except Exception:
-                return ""
-        provider_settings = dict(config.get("provider_tts_settings", {}) or {})
-        return str(provider_settings.get("tts_prompt", "") or "").strip()
+        return ""
 
     def _voice_requirement_profile(self, target: str) -> dict[str, Any]:
         persona = self._get_default_persona_prompt()
@@ -3003,7 +3032,7 @@ class ProactiveMessageMixin:
         return ""
 
     def _strip_tts_markup(self, text: str) -> str:
-        stripped = re.sub(r"</?tts>", "", str(text or ""), flags=re.IGNORECASE)
+        stripped = re.sub(r"</?t{2,}s\b[^>]*>", "", str(text or ""), flags=re.IGNORECASE)
         stripped = stripped.replace("\r", "\n")
         lines = [line.strip() for line in stripped.splitlines() if line.strip()]
         return _single_line(" ".join(lines), 120)
@@ -3711,6 +3740,241 @@ class ProactiveMessageMixin:
         cleaned = re.sub(r"^(?:[。！？!?；;，,、：:]+[\s\u3000]*)+", "", cleaned).strip()
         return cleaned
 
+    def _forward_sender_id_for_segments(self, event: Any | None = None) -> str:
+        if event is not None:
+            try:
+                sender_id = _single_line(self._event_self_id(event), 40)
+                if sender_id:
+                    return sender_id
+            except Exception:
+                pass
+        for sender_id in self._known_bot_self_ids():
+            if sender_id:
+                return sender_id
+        return "0"
+
+    def _forward_nodes_for_segments(self, segments: list[str], *, event: Any | None = None) -> list[dict[str, Any]]:
+        sender_name = _single_line(getattr(self, "bot_name", ""), 40) or "PrivateCompanion"
+        sender_id = self._forward_sender_id_for_segments(event)
+        nodes: list[dict[str, Any]] = []
+        for segment in segments:
+            text = str(segment or "").strip()
+            if not text:
+                continue
+            nodes.append(
+                {
+                    "type": "node",
+                    "data": {
+                        "name": sender_name,
+                        "uin": sender_id,
+                        "content": [{"type": "text", "data": {"text": text}}],
+                    },
+                }
+            )
+        return nodes
+
+    def _clean_forward_segment_texts(self, segments: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for segment in segments:
+            text = re.sub(r"</?t{2,}s\b[^>]*>", "", str(segment or ""), flags=re.IGNORECASE).strip()
+            if text:
+                cleaned.append(text)
+        return cleaned
+
+    def _onebot_forward_action_result_ok(self, result: Any) -> bool:
+        if result is None:
+            return False
+        if isinstance(result, dict):
+            status = str(result.get("status") or result.get("result") or "").strip().lower()
+            if status in {"failed", "fail", "error", "nok"}:
+                return False
+            retcode = result.get("retcode", result.get("code", None))
+            if retcode is not None:
+                try:
+                    return int(retcode) == 0
+                except Exception:
+                    return False
+            data = result.get("data")
+            if isinstance(data, dict) and any(data.get(key) for key in ("message_id", "forward_id", "res_id", "resid")):
+                return True
+            return any(result.get(key) for key in ("message_id", "forward_id", "res_id", "resid"))
+        return bool(result)
+
+    async def _call_onebot_forward_action(self, client: Any, action: str, **params: Any) -> bool:
+        for attr in ("call_action", "call_api", "api"):
+            func = getattr(client, attr, None)
+            if not callable(func):
+                continue
+            try:
+                result = func(action, **params)
+                if hasattr(result, "__await__"):
+                    result = await result
+                if self._onebot_forward_action_result_ok(result):
+                    return True
+            except TypeError:
+                try:
+                    result = func(action, params)
+                    if hasattr(result, "__await__"):
+                        result = await result
+                    if self._onebot_forward_action_result_ok(result):
+                        return True
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        func = getattr(client, action, None)
+        if callable(func):
+            try:
+                result = func(**params)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return self._onebot_forward_action_result_ok(result)
+            except Exception:
+                return False
+        return False
+
+    async def _send_segmented_forward_message(
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        segments: list[str],
+        event: Any | None = None,
+        source: str = "",
+    ) -> bool:
+        if not getattr(self, "segmented_proactive_send_as_forward", False):
+            return False
+        target_type = str(target_type or "").strip().lower()
+        target_id = _single_line(target_id, 80)
+        if target_type not in {"private", "group"} or not target_id:
+            return False
+        raw_segments = [str(item or "").strip() for item in segments if str(item or "").strip()]
+        if len(raw_segments) <= 1:
+            return False
+        if getattr(self, "enable_tts_enhancement", False) and any(re.search(r"</?t{2,}s\b", item, flags=re.IGNORECASE) for item in raw_segments):
+            logger.info("[PrivateCompanion] 分段合并消息跳过 TTS 内容: source=%s target=%s:%s", source or "unknown", target_type, target_id)
+            return False
+        cleaned_segments = self._clean_forward_segment_texts(raw_segments)
+        if len(cleaned_segments) <= 1:
+            return False
+        hit = self._forbidden_recall_hit("\n".join(cleaned_segments))
+        if hit:
+            logger.warning(
+                "[PrivateCompanion] 分段合并消息命中违禁词，已拦截发送: source=%s target=%s:%s word=%s",
+                source or "unknown",
+                target_type,
+                target_id,
+                _single_line(hit, 40),
+            )
+            return True
+        client = self._resolve_aiocqhttp_client()
+        if client is None:
+            return False
+        nodes = self._forward_nodes_for_segments(cleaned_segments, event=event)
+        if len(nodes) <= 1:
+            return False
+        target_value: Any = target_id
+        try:
+            target_value = int(target_id)
+        except Exception:
+            pass
+        if target_type == "group":
+            attempts = [
+                ("send_group_forward_msg", {"group_id": target_value, "messages": nodes}),
+                ("send_group_forward_msg", {"group_id": target_value, "nodes": nodes}),
+                ("send_forward_msg", {"group_id": target_value, "messages": nodes}),
+                ("send_forward_msg", {"group_id": target_value, "nodes": nodes}),
+            ]
+        else:
+            attempts = [
+                ("send_private_forward_msg", {"user_id": target_value, "messages": nodes}),
+                ("send_private_forward_msg", {"user_id": target_value, "nodes": nodes}),
+                ("send_forward_msg", {"user_id": target_value, "messages": nodes}),
+                ("send_forward_msg", {"user_id": target_value, "nodes": nodes}),
+            ]
+        for action, params in attempts:
+            if await self._call_onebot_forward_action(client, action, **params):
+                logger.info(
+                    "[PrivateCompanion] 分段消息已合并转发发送: source=%s target=%s:%s segments=%s",
+                    source or "unknown",
+                    target_type,
+                    target_id,
+                    len(cleaned_segments),
+                )
+                return True
+        logger.info(
+            "[PrivateCompanion] 分段合并转发发送不可用，回退普通分段: source=%s target=%s:%s segments=%s",
+            source or "unknown",
+            target_type,
+            target_id,
+            len(cleaned_segments),
+        )
+        return False
+
+    async def _send_segmented_proactive_forward_message(self, umo: str, segments: list[str], *, source: str = "proactive") -> bool:
+        session = self._parse_message_session(umo)
+        if not session:
+            return False
+        target_id = _single_line(getattr(session, "session_id", ""), 80)
+        if not target_id:
+            return False
+        target_type = "group" if self._message_type_for_session(session) == MessageType.GROUP_MESSAGE else "private"
+        return await self._send_segmented_forward_message(
+            target_type=target_type,
+            target_id=target_id,
+            segments=segments,
+            source=source,
+        )
+
+    async def _send_segmented_event_forward_message(self, event: AstrMessageEvent, segments: list[str], *, source: str = "decorating_result") -> bool:
+        try:
+            if bool(getattr(event, "is_private_chat", lambda: False)()):
+                user_id = _single_line(event.get_sender_id(), 80)
+                if user_id:
+                    return await self._send_segmented_forward_message(
+                        target_type="private",
+                        target_id=user_id,
+                        segments=segments,
+                        event=event,
+                        source=source,
+                    )
+        except Exception:
+            pass
+        group_id = self._extract_group_id_from_event(event)
+        if group_id:
+            return await self._send_segmented_forward_message(
+                target_type="group",
+                target_id=group_id,
+                segments=segments,
+                event=event,
+                source=source,
+            )
+        return False
+
+    def _segmented_chat_scope_allows(self, chat_type: str) -> bool:
+        scope = str(getattr(self, "segmented_proactive_chat_scope", "all") or "all").strip().lower()
+        if scope not in {"all", "private", "group"}:
+            scope = "all"
+        chat_type = str(chat_type or "").strip().lower()
+        return scope == "all" or scope == chat_type
+
+    def _segmented_scope_allows_umo(self, umo: str) -> bool:
+        session = self._parse_message_session(umo)
+        if not session:
+            return self._segmented_chat_scope_allows("private")
+        chat_type = "group" if self._message_type_for_session(session) == MessageType.GROUP_MESSAGE else "private"
+        return self._segmented_chat_scope_allows(chat_type)
+
+    def _segmented_scope_allows_event(self, event: AstrMessageEvent) -> bool:
+        try:
+            if bool(getattr(event, "is_private_chat", lambda: False)()):
+                return self._segmented_chat_scope_allows("private")
+        except Exception:
+            pass
+        if self._extract_group_id_from_event(event):
+            return self._segmented_chat_scope_allows("group")
+        return self._segmented_chat_scope_allows("private")
+
     async def _send_chain_components(self, umo: str, chain: list[Any]) -> None:
         hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(chain))
         if hit:
@@ -3770,7 +4034,7 @@ class ProactiveMessageMixin:
             text,
             image_path="",
             extra_components=None,
-            disable_segmenting=disable_segmenting,
+            disable_segmenting=disable_segmenting or not self._segmented_scope_allows_umo(umo),
         )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else ""
@@ -3782,16 +4046,23 @@ class ProactiveMessageMixin:
                 await self._send_chain_components(umo, self._with_optional_reply([Plain(outbound_text)], quote_message_id))
                 quote_message_id = ""
         else:
-            for index, segment in enumerate(segments):
-                recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
-                if recalled_message_id:
-                    logger.info("[PrivateCompanion] 触发消息已撤回，停止主动分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
-                    return
-                chain = self._with_optional_reply([Plain(segment)], quote_message_id) if index == 0 else [Plain(segment)]
-                await self._send_chain_components(umo, chain)
+            recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
+            if recalled_message_id:
+                logger.info("[PrivateCompanion] 触发消息已撤回，取消主动合并分段发送: umo=%s message_id=%s", umo, recalled_message_id)
+                return
+            if await self._send_segmented_proactive_forward_message(umo, segments, source="proactive_media_text"):
                 quote_message_id = ""
-                if index < len(segments) - 1:
-                    await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
+            else:
+                for index, segment in enumerate(segments):
+                    recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
+                    if recalled_message_id:
+                        logger.info("[PrivateCompanion] 触发消息已撤回，停止主动分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
+                        return
+                    chain = self._with_optional_reply([Plain(segment)], quote_message_id) if index == 0 else [Plain(segment)]
+                    await self._send_chain_components(umo, chain)
+                    quote_message_id = ""
+                    if index < len(segments) - 1:
+                        await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
         has_media = bool((extra_components or []) or (image_path and os.path.exists(image_path)))
         if has_media:
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
@@ -3829,7 +4100,7 @@ class ProactiveMessageMixin:
             text,
             image_path=image_path,
             extra_components=extra_components,
-            disable_segmenting=disable_segmenting,
+            disable_segmenting=disable_segmenting or not self._segmented_scope_allows_umo(umo),
         )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else text
@@ -3844,6 +4115,12 @@ class ProactiveMessageMixin:
                     quote_message_id,
                 ),
             )
+            return
+        recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
+        if recalled_message_id:
+            logger.info("[PrivateCompanion] 触发消息已撤回，取消主动合并分段发送: umo=%s message_id=%s", umo, recalled_message_id)
+            return
+        if await self._send_segmented_proactive_forward_message(umo, segments, source="proactive_text"):
             return
         for index, segment in enumerate(segments):
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
@@ -3918,7 +4195,17 @@ class ProactiveMessageMixin:
         if image_path:
             attachment_notes.append("随消息发送了一张图片")
         if extra_components:
-            attachment_notes.append(f"随消息发送了 {len(extra_components)} 个附加消息组件")
+            tts_notes: list[str] = []
+            note_builder = getattr(self, "_tts_component_log_note", None)
+            for comp in extra_components:
+                if isinstance(comp, Record) and callable(note_builder):
+                    note = _single_line(note_builder(comp), 220)
+                    if note:
+                        tts_notes.append(note)
+            if tts_notes:
+                attachment_notes.extend(tts_notes[:3])
+            else:
+                attachment_notes.append(f"随消息发送了 {len(extra_components)} 个附加消息组件")
         if attachment_notes:
             suffix = "（" + ",".join(attachment_notes) + "）"
             message_text = f"{message_text}{suffix}" if message_text else suffix

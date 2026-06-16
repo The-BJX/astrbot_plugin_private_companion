@@ -5096,6 +5096,7 @@ input[type="search"] {
 }
 
 .proactive-task,
+.proactive-runtime,
 .proactive-task-empty {
   display: grid;
   gap: 10px;
@@ -5104,6 +5105,64 @@ input[type="search"] {
   border-radius: 8px;
   padding: 12px;
   background: var(--surface);
+}
+
+.proactive-runtime.ok {
+  background: linear-gradient(135deg, #fff, rgba(226, 241, 236, 0.94) 150%);
+}
+
+.proactive-runtime.warn,
+.proactive-task.failed,
+.proactive-task.dropped {
+  background: linear-gradient(135deg, #fff, rgba(243, 228, 225, 0.95) 150%);
+}
+
+.proactive-task.deferred,
+.proactive-task.cancelled {
+  background: linear-gradient(135deg, #fff, rgba(247, 239, 215, 0.95) 150%);
+}
+
+.proactive-task.audit.sent {
+  background: linear-gradient(135deg, #fff, rgba(226, 241, 236, 0.88) 150%);
+}
+
+.proactive-task-section-title {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.proactive-user-state-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.proactive-user-state {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.proactive-user-state.running {
+  background: linear-gradient(135deg, #fff, rgba(226, 241, 236, 0.9) 150%);
+}
+
+.proactive-user-state b {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.proactive-user-state span {
+  color: var(--muted);
 }
 
 .proactive-task-empty {

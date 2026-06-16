@@ -565,6 +565,9 @@ class ProactiveEngineMixin:
             return self._should_send_simulation(user)
         daily_limit = self._effective_user_daily_limit(user)
         if daily_limit <= 0:
+            reason_formatter = getattr(self, "_format_daily_limit_disabled_reason", None)
+            if callable(reason_formatter):
+                return False, reason_formatter(user)
             return False, "每日上限为 0"
         now = _now_ts()
         due_timer_active = self._has_due_llm_timer(user, now=now)
@@ -697,6 +700,81 @@ class ProactiveEngineMixin:
                 item["note"] = _single_line(note, 160)
                 item["updated_ts"] = _now_ts()
                 break
+
+    def _proactive_audit_log(self) -> list[dict[str, Any]]:
+        raw = self.data.setdefault("proactive_audit_log", [])
+        if not isinstance(raw, list):
+            raw = []
+            self.data["proactive_audit_log"] = raw
+        return raw
+
+    def _append_proactive_audit(
+        self,
+        user_id: str,
+        user: dict[str, Any],
+        *,
+        status: str,
+        note: str = "",
+        reason: str = "",
+        action: str = "",
+        text: str = "",
+    ) -> str:
+        now = _now_ts()
+        audit_id = uuid.uuid4().hex[:12]
+        item = {
+            "id": audit_id,
+            "created_ts": now,
+            "updated_ts": now,
+            "user_id": str(user_id or user.get("user_id") or user.get("id") or ""),
+            "status": _single_line(status, 32) or "unknown",
+            "note": _single_line(note, 180),
+            "source": _single_line(user.get("planned_proactive_source"), 40) or "proactive",
+            "reason": _single_line(reason or user.get("planned_proactive_reason"), 40),
+            "action": _single_line(action or user.get("planned_proactive_action"), 60) or "message",
+            "topic": _single_line(user.get("planned_proactive_topic"), 100),
+            "motive": _single_line(user.get("planned_proactive_motive"), 180),
+            "scheduled_ts": _safe_float(user.get("next_proactive_at"), 0),
+            "candidate_id": _single_line(user.get("planned_candidate_id"), 40),
+            "umo": _single_line(user.get("umo"), 180),
+            "text_preview": _single_line(_strip_internal_message_blocks(text), 180) if text else "",
+        }
+        log = self._proactive_audit_log()
+        log.append(item)
+        del log[:-160]
+        return audit_id
+
+    def _update_proactive_audit(
+        self,
+        audit_id: str,
+        *,
+        status: str,
+        note: str = "",
+        text: str = "",
+        image_path: str = "",
+        extra_count: int | None = None,
+        action: str = "",
+        reason: str = "",
+    ) -> None:
+        if not audit_id:
+            return
+        for item in reversed(self._proactive_audit_log()):
+            if str(item.get("id") or "") != str(audit_id):
+                continue
+            item["status"] = _single_line(status, 32) or item.get("status") or "unknown"
+            item["updated_ts"] = _now_ts()
+            if note:
+                item["note"] = _single_line(note, 180)
+            if text:
+                item["text_preview"] = _single_line(_strip_internal_message_blocks(text), 180)
+            if image_path:
+                item["image_path"] = _single_line(image_path, 260)
+            if extra_count is not None:
+                item["extra_count"] = max(0, int(extra_count))
+            if action:
+                item["action"] = _single_line(action, 60)
+            if reason:
+                item["reason"] = _single_line(reason, 40)
+            break
 
     def _recover_stale_proactive_sending(self, user: dict[str, Any], *, now: float | None = None) -> bool:
         if not user.get("proactive_sending"):

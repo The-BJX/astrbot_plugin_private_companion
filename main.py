@@ -12,6 +12,7 @@ import os
 import random
 import re
 import shutil
+import sqlite3
 import sys
 import time
 import unicodedata
@@ -300,7 +301,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "3.8.1",
+    "3.8.2",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -587,6 +588,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.segmented_proactive_scope = self._cfg_str(c, "segmented_proactive_scope", "proactive_only", "proactive_only")
         if self.segmented_proactive_scope not in {"proactive_only", "all_llm"}:
             self.segmented_proactive_scope = "proactive_only"
+        self.segmented_proactive_chat_scope = self._cfg_str(c, "segmented_proactive_chat_scope", "all", "all").lower()
+        if self.segmented_proactive_chat_scope not in {"all", "private", "group"}:
+            self.segmented_proactive_chat_scope = "all"
         self.segmented_proactive_threshold = self._cfg_int(c, "segmented_proactive_threshold", 500, 20, 500)
         self.segmented_proactive_min_segment_chars = self._cfg_int(c, "segmented_proactive_min_segment_chars", 8, 1, 40)
         self.segmented_proactive_max_segments = self._cfg_int(c, "segmented_proactive_max_segments", 3, 1, 8)
@@ -613,6 +617,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.segmented_proactive_interval_min = self._cfg_float(c, "segmented_proactive_interval_min", 1.5, 0.1)
         self.segmented_proactive_interval_max = self._cfg_float(c, "segmented_proactive_interval_max", 3.5, 0.1)
         self.segmented_proactive_log_base = self._cfg_float(c, "segmented_proactive_log_base", 1.8, 1.1)
+        self.segmented_proactive_send_as_forward = self._cfg_bool(c, "segmented_proactive_send_as_forward", False)
         if self.segmented_proactive_interval_max < self.segmented_proactive_interval_min:
             self.segmented_proactive_interval_max = self.segmented_proactive_interval_min
         self.proactive_prompt_template = self._cfg_str(c, "proactive_prompt_template", "")
@@ -990,10 +995,154 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.page_api = None
         self._register_page_api_if_available()
 
+    def _sqlite_wal_candidate_paths(self) -> list[Path]:
+        data_root = Path(get_astrbot_data_path())
+        candidates = [
+            data_root / "data_v4.db",
+            data_root / "plugin_data" / "astrbot_plugin_livingmemory" / "conversations.db",
+            data_root / "plugin_data" / "astrbot_plugin_livingmemory" / "livingmemory.db",
+            data_root / "plugin_data" / "astrbot_plugin_livingmemory" / "livingmemory_graph_documents.db",
+            data_root / "knowledge_base" / "kb.db",
+        ]
+        seen: set[str] = set()
+        paths: list[Path] = []
+        for path in candidates:
+            try:
+                resolved = str(path.resolve())
+            except Exception:
+                resolved = str(path)
+            if resolved in seen or not path.exists() or not path.is_file():
+                continue
+            seen.add(resolved)
+            paths.append(path)
+        return paths
+
+    def _apply_sqlite_wal_to_file(self, db_path: Path) -> str:
+        conn = sqlite3.connect(str(db_path), timeout=15.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=15000")
+            mode_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA wal_autocheckpoint=1000")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.commit()
+            return str(mode_row[0] if mode_row else "")
+        finally:
+            conn.close()
+
+    def _apply_sqlite_pragmas_to_dbapi_connection(self, dbapi_connection: Any) -> None:
+        try:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA busy_timeout=15000")
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA wal_autocheckpoint=1000")
+            finally:
+                cursor.close()
+        except Exception:
+            try:
+                dbapi_connection.execute("PRAGMA busy_timeout=15000")
+                dbapi_connection.execute("PRAGMA journal_mode=WAL")
+                dbapi_connection.execute("PRAGMA synchronous=NORMAL")
+                dbapi_connection.execute("PRAGMA wal_autocheckpoint=1000")
+            except Exception:
+                pass
+
+    def _iter_possible_sqlalchemy_engines(self) -> list[Any]:
+        roots = [
+            getattr(self, "context", None),
+            getattr(getattr(self, "context", None), "conversation_manager", None),
+        ]
+        engines: list[Any] = []
+        seen_objects: set[int] = set()
+
+        def _visit(obj: Any, depth: int = 0) -> None:
+            if obj is None or depth > 3:
+                return
+            obj_id = id(obj)
+            if obj_id in seen_objects:
+                return
+            seen_objects.add(obj_id)
+            cls_name = obj.__class__.__name__.lower()
+            module_name = str(getattr(obj.__class__, "__module__", "")).lower()
+            if "sqlalchemy" in module_name and "engine" in cls_name:
+                engines.append(obj)
+            for attr in (
+                "engine", "_engine", "async_engine", "_async_engine", "sync_engine",
+                "db", "_db", "store", "_store", "session_maker", "_session_maker",
+                "conversation_manager",
+            ):
+                try:
+                    child = getattr(obj, attr, None)
+                except Exception:
+                    continue
+                if child is not None and child is not obj:
+                    _visit(child, depth + 1)
+
+        for root in roots:
+            _visit(root)
+        unique: list[Any] = []
+        seen_engines: set[int] = set()
+        for engine in engines:
+            target = getattr(engine, "sync_engine", engine)
+            if id(target) in seen_engines:
+                continue
+            seen_engines.add(id(target))
+            unique.append(target)
+        return unique
+
+    def _install_sqlite_wal_engine_hooks(self) -> int:
+        try:
+            from sqlalchemy import event as sqlalchemy_event
+        except Exception:
+            return 0
+        installed = 0
+        for engine in self._iter_possible_sqlalchemy_engines():
+            if bool(getattr(engine, "_private_companion_sqlite_wal_hooked", False)):
+                continue
+            try:
+                url = str(getattr(engine, "url", "") or "").lower()
+                if url and "sqlite" not in url:
+                    continue
+            except Exception:
+                pass
+
+            def _on_connect(dbapi_connection, _connection_record, plugin_self=self):
+                plugin_self._apply_sqlite_pragmas_to_dbapi_connection(dbapi_connection)
+
+            try:
+                sqlalchemy_event.listen(engine, "connect", _on_connect)
+                setattr(engine, "_private_companion_sqlite_wal_hooked", True)
+                installed += 1
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] SQLite WAL engine hook 安装失败: %s", _single_line(exc, 120))
+        return installed
+
+    async def _apply_sqlite_wal_optimizations(self) -> None:
+        applied: list[str] = []
+        failed: list[str] = []
+        for path in self._sqlite_wal_candidate_paths():
+            try:
+                mode = await asyncio.to_thread(self._apply_sqlite_wal_to_file, path)
+                applied.append(f"{path.name}:{mode or 'unknown'}")
+            except Exception as exc:
+                failed.append(f"{path.name}:{_single_line(exc, 80)}")
+        hooks = self._install_sqlite_wal_engine_hooks()
+        if applied or hooks:
+            logger.info(
+                "[PrivateCompanion] SQLite WAL 并发优化已应用: files=%s engine_hooks=%s",
+                "，".join(applied) or "无",
+                hooks,
+            )
+        if failed:
+            logger.warning("[PrivateCompanion] SQLite WAL 并发优化部分失败: %s", "；".join(failed))
+
     async def initialize(self):
         if not self.enabled:
             logger.info("[PrivateCompanion] 插件总开关已关闭,不启动主动消息循环")
             return
+        await self._apply_sqlite_wal_optimizations()
         self._schedule_default_persona_prompt_refresh()
         async with self._data_lock:
             if self._prime_enabled_user_schedules():
@@ -1102,13 +1251,18 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
 
     @filter.on_decorating_result()
     async def stop_passive_input_status_before_private_send(self, event: AstrMessageEvent):
-        """私聊 LLM 回复进入发送前阶段时停止持续输入状态。"""
+        """LLM 回复进入发送前阶段时释放会话锁；私聊额外停止持续输入状态。"""
         if not self.enabled:
             return
-        if not bool(getattr(event, "is_private_chat", lambda: False)()):
+        if bool(getattr(event, "is_private_chat", lambda: False)()):
+            self._stop_passive_input_status_loop(event)
+            self._release_framework_session_lock_for_event(event, label="decorating_result")
             return
-        self._stop_passive_input_status_loop(event)
-        self._release_framework_session_lock_for_event(event, label="decorating_result")
+        self._release_framework_session_lock_later(
+            event,
+            label="decorating_result_group_grace",
+            delay_seconds=75.0,
+        )
 
     @filter.on_decorating_result()
     async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent):
@@ -1125,6 +1279,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 continue
             original = str(getattr(comp, "text", "") or "")
             cleaned = _strip_outbound_control_blocks(original)
+            if not bool(getattr(self, "enable_tts_enhancement", False)):
+                cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
             if cleaned != original:
                 changed = True
                 try:
@@ -1287,6 +1443,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return
         if self.segmented_proactive_scope != "all_llm":
             return
+        if not self._segmented_scope_allows_event(event):
+            return
         result = event.get_result()
         if result is None or not result.chain or not result.is_llm_result():
             return
@@ -1314,6 +1472,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             _single_line(segments[0], 120),
             _single_line(text, 420),
         )
+        if await self._send_segmented_event_forward_message(event, segments, source="decorating_result"):
+            empty_result = self._build_result_from_chain([])
+            try:
+                empty_result.stop_event()
+            except Exception:
+                pass
+            event.set_result(empty_result)
+            event.stop_event()
+            return
         quote_message_id = self._group_current_reply_quote_message_id(event)
         first_chain = self._with_optional_reply([Plain(segments[0])], quote_message_id)
         event.set_result(self._build_result_from_chain(first_chain))
@@ -1730,6 +1897,16 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not hasattr(req, "system_prompt"):
             return
         self._remember_external_llm_request_for_token_stats(event, req)
+        is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
+        group_id_for_lock = ""
+        if not is_private_chat and self.enable_group_companion:
+            group_id_for_lock = self._extract_group_id_from_event(event)
+            if group_id_for_lock and self._group_enabled_for_event(group_id_for_lock):
+                await self._acquire_framework_session_lock_for_event(
+                    event,
+                    label="group_llm_request",
+                    private_only=False,
+                )
         if (
             bool(getattr(event, "private_companion_deferred_private_image_only", False))
             and not bool(getattr(event, "private_companion_deferred_private_image_only_ready", False))
@@ -1743,7 +1920,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                         pass
         await self.apply_tts_enhancement_request(event, req)
         await self._append_forward_message_context_to_request(event, req)
-        is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
         if not is_private_chat and self.enable_group_reality_promise_guard:
             await self._append_capability_boundary_to_request(event, req)
         if not is_private_chat:
@@ -2219,7 +2395,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 release_now = True
                 return
             if not bool(getattr(event, "is_private_chat", lambda: False)()):
-                release_now = True
                 return
             original_text = str(resp.completion_text or "").strip()
             if not original_text:

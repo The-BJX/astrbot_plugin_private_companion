@@ -2041,6 +2041,7 @@ class PrivateCompanionPageApi:
             "enable_companion_reply_planner",
             "enable_intent_emotion_analysis",
             "enable_response_self_review",
+            "enable_llm_timer_scheduling",
             "enable_passive_topic_suppression",
             "enable_relationship_state_machine",
             "enable_dialogue_episode_memory",
@@ -2055,6 +2056,11 @@ class PrivateCompanionPageApi:
             "enable_skill_growth_simulation",
             "enable_message_debounce",
             "enable_recall_enhancement",
+            "enable_recall_cancel_reply",
+            "enable_recall_message_cache",
+            "enable_recall_transcribe_command",
+            "enable_forbidden_word_recall",
+            "enable_semantic_message_debounce",
             "enable_environment_perception",
             "enable_holiday_perception",
             "enable_platform_perception",
@@ -2073,6 +2079,7 @@ class PrivateCompanionPageApi:
             "enable_group_wakeup_enhancement",
             "enable_group_high_intensity_mode",
             "enable_private_image_self_recognition",
+            "enable_private_image_gif_enhancement",
             "enable_group_conversation_followup",
             "enable_group_interjection",
             "enable_group_repeat_follow",
@@ -2280,6 +2287,7 @@ class PrivateCompanionPageApi:
             "enable_almanac_perception",
             "default_nickname",
             "default_style",
+            "enable_llm_timer_scheduling",
             "schedule_persona_prompt",
             "schedule_worldview_prompt",
             "roleplay_user_profile_prompt",
@@ -2357,9 +2365,11 @@ class PrivateCompanionPageApi:
             "screen_diary_context_max_chars",
             "enable_segmented_proactive_reply",
             "segmented_proactive_scope",
+            "segmented_proactive_chat_scope",
             "segmented_proactive_threshold",
             "segmented_proactive_min_segment_chars",
             "segmented_proactive_max_segments",
+            "segmented_proactive_send_as_forward",
             "segmented_proactive_split_mode",
             "segmented_proactive_regex",
             "segmented_proactive_split_words",
@@ -2546,6 +2556,35 @@ class PrivateCompanionPageApi:
         else:
             add("info", "主模型留空", "会回退到 AstrBot 默认模型；建议为陪伴插件单独配置主模型")
 
+        tts_summary = self._tts_runtime_summary(users)
+        if tts_summary.get("enhancement_enabled"):
+            if tts_summary.get("provider_available"):
+                add(
+                    "ok",
+                    "TTS 语音链路可用",
+                    f"模式 {tts_summary.get('mode')}，语种 {tts_summary.get('language')}，真实 TTS provider：{tts_summary.get('provider_label')}",
+                )
+            elif tts_summary.get("settings_enabled"):
+                add(
+                    "warn",
+                    "TTS 配置已开但 provider 不可用",
+                    f"会话 {tts_summary.get('umo') or '-'} 已启用 TTS 设置，但当前取不到可用 TTS provider",
+                    "在 AstrBot 会话 TTS 配置里选择并启用真实语音合成 provider",
+                )
+            else:
+                add(
+                    "warn",
+                    "TTS 强化已开但会话 TTS 未启用",
+                    "本插件只能处理 <tts> 标签和文本转换；真正合成音频需要 AstrBot 当前会话启用 TTS provider",
+                    "到 AstrBot 配置中为目标会话启用 TTS provider",
+                )
+        else:
+            add(
+                "info",
+                "TTS 强化未开启",
+                "VOICE_PROMPT_PROVIDER_ID / TTS文本转换模型都是文本模型；语音合成模型请在 AstrBot TTS provider 中配置",
+            )
+
         if enabled_users:
             add("ok", "私聊对象已就绪", f"已启用 {enabled_users} 个私聊对象")
         else:
@@ -2688,6 +2727,48 @@ class PrivateCompanionPageApi:
             add("warn", "长期记忆整理过于频繁", f"当前 {refresh_minutes} 分钟，可能增加模型调用量", "建议设置为 120 分钟以上")
 
         return items
+
+    def _tts_runtime_summary(self, users: dict[str, Any]) -> dict[str, Any]:
+        enabled_user = None
+        for item in users.values():
+            if isinstance(item, dict) and item.get("enabled", True) and item.get("umo"):
+                enabled_user = item
+                if self.plugin._private_user_role(item, str(item.get("user_id") or "")) == "owner":
+                    break
+        umo = self._single_line((enabled_user or {}).get("umo"), 180) if isinstance(enabled_user, dict) else ""
+        config: dict[str, Any] = {}
+        provider_settings: dict[str, Any] = {}
+        provider = None
+        context = getattr(self.plugin, "context", None)
+        if context is not None:
+            getter = getattr(context, "get_config", None)
+            if callable(getter):
+                try:
+                    config = getter(umo) if umo else getter()
+                    if not isinstance(config, dict):
+                        config = {}
+                except Exception:
+                    config = {}
+            provider_settings = dict((config or {}).get("provider_tts_settings", {}) or {})
+            provider_getter = getattr(context, "get_using_tts_provider", None)
+            if callable(provider_getter):
+                try:
+                    provider = provider_getter(umo) if umo else provider_getter()
+                except Exception:
+                    provider = None
+        provider_label = ""
+        if provider is not None:
+            provider_id = self._provider_id(provider)
+            provider_label = self._provider_name(provider, provider_id) if provider_id else getattr(provider, "__class__", type(provider)).__name__
+        return {
+            "enhancement_enabled": bool(getattr(self.plugin, "enable_tts_enhancement", False)),
+            "mode": self._single_line(getattr(self.plugin, "tts_generation_mode", ""), 24) or "hybrid",
+            "language": self.plugin._tts_language_label() if hasattr(self.plugin, "_tts_language_label") else "",
+            "umo": umo,
+            "settings_enabled": bool(provider_settings.get("enable", False)),
+            "provider_available": provider is not None,
+            "provider_label": self._single_line(provider_label, 80) or "未知 provider",
+        }
 
     @staticmethod
     def _presets() -> dict[str, dict[str, Any]]:
@@ -2978,6 +3059,7 @@ class PrivateCompanionPageApi:
             "enable_companion_reply_planner",
             "enable_intent_emotion_analysis",
             "enable_response_self_review",
+            "enable_llm_timer_scheduling",
             "enable_passive_topic_suppression",
             "enable_relationship_state_machine",
             "enable_dialogue_episode_memory",
@@ -2992,6 +3074,11 @@ class PrivateCompanionPageApi:
             "enable_skill_growth_simulation",
             "enable_message_debounce",
             "enable_recall_enhancement",
+            "enable_recall_cancel_reply",
+            "enable_recall_message_cache",
+            "enable_recall_transcribe_command",
+            "enable_forbidden_word_recall",
+            "enable_semantic_message_debounce",
             "enable_environment_perception",
             "enable_holiday_perception",
             "enable_platform_perception",
@@ -3009,6 +3096,7 @@ class PrivateCompanionPageApi:
             "enable_group_wakeup_enhancement",
             "enable_group_high_intensity_mode",
             "enable_private_image_self_recognition",
+            "enable_private_image_gif_enhancement",
             "enable_group_conversation_followup",
             "enable_group_interjection",
             "enable_group_repeat_follow",
@@ -3157,9 +3245,11 @@ class PrivateCompanionPageApi:
             "private_image_vision_cache_max_items",
             "enable_segmented_proactive_reply",
             "segmented_proactive_scope",
+            "segmented_proactive_chat_scope",
             "segmented_proactive_threshold",
             "segmented_proactive_min_segment_chars",
             "segmented_proactive_max_segments",
+            "segmented_proactive_send_as_forward",
             "segmented_proactive_split_mode",
             "segmented_proactive_regex",
             "segmented_proactive_split_words",
@@ -3362,6 +3452,21 @@ class PrivateCompanionPageApi:
             }
             mode = aliases.get(mode, mode)
             return mode if mode in {"proactive_only", "all_llm"} else "proactive_only"
+        if key == "segmented_proactive_chat_scope":
+            mode = str(value or "all").strip().lower()
+            aliases = {
+                "全部": "all",
+                "all_chat": "all",
+                "both": "all",
+                "私聊": "private",
+                "仅私聊": "private",
+                "private_only": "private",
+                "群聊": "group",
+                "仅群聊": "group",
+                "group_only": "group",
+            }
+            mode = aliases.get(mode, mode)
+            return mode if mode in {"all", "private", "group"} else "all"
         if key == "segmented_proactive_interval_method":
             mode = str(value or "log").strip().lower()
             return mode if mode in {"log", "random"} else "log"
@@ -3668,6 +3773,7 @@ class PrivateCompanionPageApi:
             "enable_private_image_gif_enhancement",
             "enable_private_image_vision_cache",
             "enable_segmented_proactive_reply",
+            "segmented_proactive_send_as_forward",
             "enable_segmented_proactive_content_cleanup",
             "enable_humanized_states",
             "inject_passive_states",
@@ -4964,10 +5070,40 @@ class PrivateCompanionPageApi:
         items: list[dict[str, Any]] = []
         source_counts: dict[str, int] = {}
         status_counts: dict[str, int] = {}
+        audit_items: list[dict[str, Any]] = []
+        audit_status_counts: dict[str, int] = {}
+        user_states: list[dict[str, Any]] = []
 
         for user_id, user in users.items():
             if not isinstance(user, dict):
                 continue
+            if bool(user.get("enabled", True)):
+                user_summary_for_state = self._user_summary(str(user_id), user)
+                effective_limit = (
+                    self.plugin._effective_user_daily_limit(user)
+                    if hasattr(self.plugin, "_effective_user_daily_limit")
+                    else getattr(self.plugin, "max_daily_messages", 0)
+                )
+                next_for_state = self._float(user.get("next_proactive_at"))
+                user_states.append(
+                    {
+                        "user_id": str(user_id),
+                        "user_label": user_summary_for_state.get("display_name") or str(user_id),
+                        "user_role": user_summary_for_state.get("relationship_role") or "",
+                        "user_role_label": user_summary_for_state.get("relationship_role_label") or "",
+                        "sent_today": self._int(user.get("sent_today")),
+                        "effective_daily_limit": effective_limit,
+                        "next_proactive_ts": next_for_state,
+                        "next_proactive": self.plugin._format_timestamp_elapsed(next_for_state),
+                        "proactive_sending": bool(user.get("proactive_sending")),
+                        "last_skip_ts": self._float(user.get("last_proactive_skip_at")),
+                        "last_skip": self.plugin._format_timestamp_elapsed(user.get("last_proactive_skip_at", 0)),
+                        "last_skip_reason": self._single_line(user.get("last_proactive_skip_reason"), 160),
+                        "last_skip_prefix": self._single_line(user.get("last_proactive_skip_prefix"), 20),
+                        "last_sent_ts": self._float(user.get("last_sent")),
+                        "last_sent": self.plugin._format_timestamp_elapsed(user.get("last_sent", 0)),
+                    }
+                )
             scheduled_ts = self._float(user.get("next_proactive_at"))
             timer_event = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
             if scheduled_ts <= 0 and timer_event:
@@ -5019,11 +5155,73 @@ class PrivateCompanionPageApi:
             )
 
         items.sort(key=lambda item: self._float(item.get("scheduled_ts")))
+        raw_audit = data.get("proactive_audit_log") if isinstance(data.get("proactive_audit_log"), list) else []
+        for raw in raw_audit:
+            if not isinstance(raw, dict):
+                continue
+            user_id = str(raw.get("user_id") or "")
+            user = users.get(user_id) if isinstance(users.get(user_id), dict) else {}
+            user_summary = self._user_summary(user_id, user) if user_id else {}
+            status = self._single_line(raw.get("status"), 32) or "unknown"
+            audit_status_counts[status] = audit_status_counts.get(status, 0) + 1
+            audit_items.append(
+                {
+                    "id": self._single_line(raw.get("id"), 40),
+                    "user_id": user_id,
+                    "user_label": user_summary.get("display_name") or user_id,
+                    "user_role": user_summary.get("relationship_role") or "",
+                    "user_role_label": user_summary.get("relationship_role_label") or "",
+                    "status": status,
+                    "source": self._single_line(raw.get("source"), 40),
+                    "reason": self._single_line(raw.get("reason"), 40),
+                    "action": self._single_line(raw.get("action"), 60),
+                    "topic": self._single_line(raw.get("topic"), 100),
+                    "motive": self._single_line(raw.get("motive"), 180),
+                    "note": self._single_line(raw.get("note"), 180),
+                    "text_preview": self._single_line(raw.get("text_preview"), 180),
+                    "scheduled_ts": self._float(raw.get("scheduled_ts")),
+                    "scheduled": self.plugin._format_timestamp_elapsed(raw.get("scheduled_ts", 0)),
+                    "created_ts": self._float(raw.get("created_ts")),
+                    "created": self.plugin._format_timestamp_elapsed(raw.get("created_ts", 0)),
+                    "updated_ts": self._float(raw.get("updated_ts")),
+                    "updated": self.plugin._format_timestamp_elapsed(raw.get("updated_ts", 0)),
+                    "candidate_id": self._single_line(raw.get("candidate_id"), 40),
+                    "has_image": bool(self._single_line(raw.get("image_path"), 260)),
+                    "extra_count": self._int(raw.get("extra_count")),
+                }
+            )
+        audit_items.sort(key=lambda item: self._float(item.get("updated_ts") or item.get("created_ts")), reverse=True)
+        runtime = data.get("proactive_runtime") if isinstance(data.get("proactive_runtime"), dict) else {}
+        last_tick_started = self._float(runtime.get("last_tick_started_at")) if runtime else 0
+        last_tick_finished = self._float(runtime.get("last_tick_finished_at")) if runtime else 0
+        tick_age = now - max(last_tick_started, last_tick_finished) if max(last_tick_started, last_tick_finished) > 0 else -1
+        expected_interval = max(30, self._int(getattr(self.plugin, "check_interval_seconds", 60)))
         return {
             "total": len(items),
             "source_counts": source_counts,
             "status_counts": status_counts,
             "items": items[:80],
+            "audit_total": len(audit_items),
+            "audit_status_counts": audit_status_counts,
+            "audit_items": audit_items[:80],
+            "user_states": sorted(
+                user_states,
+                key=lambda item: (
+                    0 if item.get("user_role") == "owner" else 1,
+                    self._float(item.get("next_proactive_ts")) if self._float(item.get("next_proactive_ts")) > 0 else 9999999999,
+                    self._single_line(item.get("user_label"), 40),
+                ),
+            )[:80],
+            "runtime": {
+                "last_tick_started_ts": last_tick_started,
+                "last_tick_started": self.plugin._format_timestamp_elapsed(last_tick_started),
+                "last_tick_finished_ts": last_tick_finished,
+                "last_tick_finished": self.plugin._format_timestamp_elapsed(last_tick_finished),
+                "tick_age_seconds": round(tick_age, 1) if tick_age >= 0 else -1,
+                "expected_interval_seconds": expected_interval,
+                "healthy": bool(tick_age >= 0 and tick_age <= max(180, expected_interval * 4)),
+                "last_tick_error": self._single_line(runtime.get("last_tick_error"), 180) if runtime else "",
+            },
         }
 
     def _creative_summary(self, data: dict[str, Any]) -> dict[str, Any]:

@@ -6439,6 +6439,10 @@ class DailyStateMixin:
 
     async def _tick(self):
         async with self._data_lock:
+            runtime = self.data.setdefault("proactive_runtime", {})
+            if isinstance(runtime, dict):
+                runtime["last_tick_started_at"] = _now_ts()
+                runtime["last_tick_error"] = ""
             if self._maybe_schedule_bilibili_video_share():
                 self._save_data_sync()
             users = list(self.data.get("users", {}).items())
@@ -6478,6 +6482,12 @@ class DailyStateMixin:
                     continue
                 current_for_mark["proactive_sending"] = True
                 current_for_mark["proactive_sending_started_at"] = _now_ts()
+                audit_id = self._append_proactive_audit(
+                    user_id,
+                    current_for_mark,
+                    status="running",
+                    note="主动发送链路已开始",
+                )
                 self._save_data_sync()
 
             planned_action_for_send = str(user.get("planned_proactive_action") or "message")
@@ -6498,12 +6508,27 @@ class DailyStateMixin:
                 async with self._data_lock:
                     current_for_defer = self._get_user(user_id)
                     self._defer_planned_photo_text_for_load(current_for_defer, now=_now_ts(), note=load_defer_note)
+                    current_for_defer["proactive_sending"] = False
+                    current_for_defer["proactive_sending_started_at"] = 0
+                    self._update_proactive_audit(audit_id, status="deferred", note=load_defer_note)
                     self._save_data_sync()
                 self._debug_tick_skip(user_id, load_defer_note, prefix="延后")
                 continue
             task_start_last_seen = _safe_float(user.get("last_seen"), 0)
             task_start_inbound_count = _safe_int(user.get("inbound_count"), 0)
-            reason, text, image_path, extra_components, action_summary, effective_action_for_send = await self._render_message(user)
+            try:
+                reason, text, image_path, extra_components, action_summary, effective_action_for_send = await self._render_message(user)
+            except Exception as e:
+                logger.warning("[PrivateCompanion] 主动消息生成失败: user=%s error=%s", user_id, _single_line(e, 160), exc_info=True)
+                async with self._data_lock:
+                    current_after_render_failure = self._get_user(user_id)
+                    current_after_render_failure["proactive_sending"] = False
+                    current_after_render_failure["proactive_sending_started_at"] = 0
+                    current_after_render_failure["next_proactive_at"] = 0
+                    self._schedule_next_proactive(current_after_render_failure, now=_now_ts(), delay_hours=(1, 3))
+                    self._update_proactive_audit(audit_id, status="failed", note=f"生成失败: {_single_line(e, 140)}")
+                    self._save_data_sync()
+                continue
             async with self._data_lock:
                 current_after_render = self._get_user(user_id)
                 has_new_user_message = (
@@ -6519,6 +6544,7 @@ class DailyStateMixin:
                     current_for_clear = self._get_user(user_id)
                     current_for_clear["proactive_sending"] = False
                     current_for_clear["proactive_sending_started_at"] = 0
+                    self._update_proactive_audit(audit_id, status="cancelled", note="用户在生成期间发来新消息,已取消本次主动")
                     self._save_data_sync()
                 continue
             if not text and not image_path and not extra_components:
@@ -6539,6 +6565,7 @@ class DailyStateMixin:
                         current["planned_followup_kind"] = ""
                         current["planned_proactive_quota_exempt"] = False
                         self._schedule_next_proactive(current, now=_now_ts(), delay_hours=(2, 8))
+                    self._update_proactive_audit(audit_id, status="dropped", note="主动行为失败或不适合发送")
                     self._save_data_sync()
                 self._debug_tick_skip(user_id, "主动行为失败或不适合发送", prefix="放弃")
                 continue
@@ -6597,6 +6624,7 @@ class DailyStateMixin:
                     current_after_failure["planned_followup_kind"] = ""
                     current_after_failure["planned_proactive_quota_exempt"] = False
                     self._schedule_next_proactive(current_after_failure, now=_now_ts(), delay_hours=(6, 12))
+                    self._update_proactive_audit(audit_id, status="failed", note=f"发送失败: {_single_line(e, 140)}")
                     self._save_data_sync()
                 continue
             finally:
@@ -6633,6 +6661,16 @@ class DailyStateMixin:
                     motive=planned_motive_for_send,
                 )
                 self._mark_planned_candidate_status(current, "sent", "已发送")
+                self._update_proactive_audit(
+                    audit_id,
+                    status="sent",
+                    note="已真实发送",
+                    text=text,
+                    image_path=image_path,
+                    extra_count=len(extra_components),
+                    action=current["last_proactive_action"],
+                    reason=reason,
+                )
                 self._note_proactive_daypart_sent(current, current["last_sent"])
                 opener_mode = planned_opener_mode_for_send
                 followup_kind = planned_followup_kind_for_send
@@ -6781,4 +6819,8 @@ class DailyStateMixin:
             asyncio.create_task(self._refresh_persona_relationship(user_id, current_snapshot))
 
         await self._run_proactive_maintenance_tasks()
+        async with self._data_lock:
+            runtime = self.data.setdefault("proactive_runtime", {})
+            if isinstance(runtime, dict):
+                runtime["last_tick_finished_at"] = _now_ts()
 

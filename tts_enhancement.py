@@ -258,6 +258,40 @@ class TtsEnhancementMixin:
             pieces.append("</tts>" * open_count)
         return "".join(pieces)
 
+    def _strip_any_tts_markup(self, text: str) -> str:
+        cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", str(text or ""), flags=re.IGNORECASE)
+        return cleaned.strip()
+
+    def _annotate_tts_record_component(self, component: Any, spoken_text: str, *, source_text: str = "") -> Any:
+        spoken = _single_line(self._strip_any_tts_markup(spoken_text), 500)
+        source = _single_line(self._strip_any_tts_markup(source_text), 500)
+        try:
+            setattr(component, "_private_companion_tts_spoken_text", spoken)
+            setattr(component, "_private_companion_tts_source_text", source)
+        except Exception:
+            pass
+        return component
+
+    def _tts_component_log_note(self, component: Any) -> str:
+        spoken = _single_line(getattr(component, "_private_companion_tts_spoken_text", ""), 180)
+        source = _single_line(getattr(component, "_private_companion_tts_source_text", ""), 180)
+        if spoken and source and spoken != source:
+            return f"语音：{spoken}｜对应文本：{source}"
+        if spoken:
+            return f"语音：{spoken}"
+        return "语音消息"
+
+    def _tts_chain_log_text(self, chain: list[Any]) -> str:
+        parts: list[str] = []
+        for comp in chain:
+            if isinstance(comp, Plain):
+                text = _single_line(getattr(comp, "text", ""), 180)
+                if text:
+                    parts.append(f"文本：{text}")
+            elif isinstance(comp, Record):
+                parts.append(self._tts_component_log_note(comp))
+        return "；".join(parts)
+
     def _strip_or_keep_emotion_tags(self, text: str, *, provider_kind: str) -> str:
         if self._tts_provider_allows_emotion_tags(provider_kind):
             return str(text or "")
@@ -410,6 +444,14 @@ class TtsEnhancementMixin:
 
     async def protect_tts_enhancement_response_blocks(self, event: Any, resp: Any) -> None:
         if not getattr(self, "enable_tts_enhancement", False):
+            text = str(getattr(resp, "completion_text", "") or "")
+            if re.search(r"</?t{2,}s\b", text, flags=re.IGNORECASE):
+                resp.completion_text = self._strip_any_tts_markup(text)
+                logger.info(
+                    "[PrivateCompanion] TTS强化未开启,已从模型回复中移除 TTS 标签: session=%s preview=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    _single_line(resp.completion_text, 160),
+                )
             return
         text = self._normalize_tts_tags(str(getattr(resp, "completion_text", "") or ""))
         if text:
@@ -474,9 +516,19 @@ class TtsEnhancementMixin:
             await asyncio.sleep(0.45)
             try:
                 await event.send(event.chain_result(chunk))
+                logger.info(
+                    "[PrivateCompanion] TTS 分块后台补发完成: session=%s %s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    self._tts_chain_log_text(chunk),
+                )
             except Exception as exc:
                 try:
                     await event.send(self._build_result_from_chain(chunk))
+                    logger.info(
+                        "[PrivateCompanion] TTS 分块后台补发完成: session=%s %s",
+                        _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                        self._tts_chain_log_text(chunk),
+                    )
                 except Exception:
                     logger.warning("[PrivateCompanion] TTS 分块后台补发失败: %s", _single_line(exc, 120))
                     return
@@ -499,7 +551,12 @@ class TtsEnhancementMixin:
         if chain:
             session = str(getattr(event, "unified_msg_origin", "") or "")
             self._tts_auto_voice_last_at[session] = time.time()
-            logger.info("[PrivateCompanion] TTS强化已转换纯文本回复: reason=%s session=%s", reason, _single_line(session, 80))
+            logger.info(
+                "[PrivateCompanion] TTS强化已转换纯文本回复: reason=%s session=%s %s",
+                reason,
+                _single_line(session, 80),
+                self._tts_chain_log_text(chain),
+            )
         return chain
 
     def _auto_voice_trigger_reason(self, text: str, event: Any) -> tuple[bool, str]:
@@ -883,7 +940,14 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
             config = config or getattr(self, "config", {}) or {}
             provider_settings = provider_settings or dict((config or {}).get("provider_tts_settings", {}) or {})
         if not tts_provider:
-            return [Plain(fallback_plain or re.sub(TTS_TAG_PATTERN, "", str(text or "")).strip())] if fallback_plain else []
+            fallback_text = fallback_plain or re.sub(TTS_TAG_PATTERN, "", str(text or "")).strip()
+            if fallback_text:
+                logger.warning(
+                    "[PrivateCompanion] TTS强化检测到标签但当前会话没有可用 TTS provider,已按普通文本发送: %s",
+                    _single_line(fallback_text, 160),
+                )
+                return [Plain(fallback_text)]
+            return []
         provider_kind = self._tts_provider_kind(tts_provider, provider_settings)
         normalized = self._normalize_tts_tags(text)
         output: list[Any] = []
@@ -896,6 +960,7 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
             if not spoken:
                 pos = match.end()
                 continue
+            source_spoken = spoken
             if self._tts_text_needs_language_conversion(spoken, provider_kind=provider_kind):
                 before_convert = spoken
                 spoken = await self._convert_text_to_spoken_language(spoken, event, provider_kind=provider_kind)
@@ -905,9 +970,17 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
                         _single_line(before_convert, 80),
                         _single_line(spoken, 80),
                     )
-            record = await self._tts_record_component(spoken, tts_provider, provider_settings, config or {})
+            record = await self._tts_record_component(
+                spoken,
+                tts_provider,
+                provider_settings,
+                config or {},
+                source_text=fallback_plain or source_spoken,
+            )
             if record is not None:
                 output.append(record)
+            else:
+                output.append(Plain(spoken))
             pos = match.end()
         after = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized[pos:], flags=re.IGNORECASE).strip()
         if after:
@@ -936,7 +1009,15 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
             pass
         return text
 
-    async def _tts_record_component(self, spoken: str, tts_provider: Any, provider_settings: dict[str, Any], config: dict[str, Any]) -> Any | None:
+    async def _tts_record_component(
+        self,
+        spoken: str,
+        tts_provider: Any,
+        provider_settings: dict[str, Any],
+        config: dict[str, Any],
+        *,
+        source_text: str = "",
+    ) -> Any | None:
         provider_kind = self._tts_provider_kind(tts_provider, provider_settings)
         sanitized = self._sanitize_tts_spoken_text(spoken, provider_kind=provider_kind)
         if not sanitized:
@@ -980,9 +1061,12 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
                 except Exception as exc:
                     logger.warning("[PrivateCompanion] TTS强化注册语音文件失败: %s", _single_line(exc, 120))
         try:
-            return Record(file=final_ref, url=final_ref)
+            component = Record(file=final_ref, url=final_ref)
         except TypeError:
             try:
-                return Record(file=final_ref)
+                component = Record(file=final_ref)
             except TypeError:
-                return Record.fromFileSystem(str(audio_path))
+                component = Record.fromFileSystem(str(audio_path))
+        self._annotate_tts_record_component(component, sanitized, source_text=source_text or spoken)
+        logger.info("[PrivateCompanion] TTS语音组件已生成: %s", self._tts_component_log_note(component))
+        return component
