@@ -31,6 +31,15 @@ from .helpers import _now_ts, _safe_float, _safe_int, _single_line, _strip_inter
 class PrivateImageMixin:
     """Methods split from main.PrivateCompanionPlugin."""
 
+    def _private_event_has_image(self, event: AstrMessageEvent) -> bool:
+        for comp in self._event_components(event):
+            class_name = comp.__class__.__name__.lower()
+            if isinstance(comp, dict):
+                class_name = str(comp.get("type") or "").lower()
+            if class_name == "image":
+                return True
+        return bool(self._raw_private_image_sources(event))
+
     def _is_private_image_only_message(self, event: AstrMessageEvent, text: str) -> bool:
         cleaned = _single_line(text, 120)
         if cleaned and cleaned not in {"[图片]", "【图片】", "图片"}:
@@ -282,7 +291,7 @@ class PrivateImageMixin:
 
     def _private_image_sources_for_astrbot_request(self, image_sources: list[str]) -> list[str]:
         refs: list[str] = []
-        for source in [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:4]:
+        for source in [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]:
             text = source
             if text.startswith("file://"):
                 text = text[len("file://"):]
@@ -517,7 +526,7 @@ class PrivateImageMixin:
 
     def _private_image_cache_aliases_for_sources(self, sources: list[str]) -> list[str]:
         aliases: list[str] = []
-        for source in [str(item).strip() for item in (sources or []) if str(item or "").strip()][:4]:
+        for source in [str(item).strip() for item in (sources or []) if str(item or "").strip()][:5]:
             for alias in self._private_image_source_cache_aliases(source):
                 if alias and alias not in aliases:
                     aliases.append(alias)
@@ -529,7 +538,7 @@ class PrivateImageMixin:
             key = self._private_image_source_cache_key(source)
             if key and key not in keys:
                 keys.append(key)
-        return keys[:4]
+        return keys[:5]
 
     def _private_image_vision_cache_store(self) -> dict[str, Any]:
         cache = self.data.setdefault("private_image_vision_cache", {})
@@ -565,7 +574,7 @@ class PrivateImageMixin:
         expected_count = max(0, int(image_count or 0))
 
         def use_item(key: str, item: dict[str, Any], *, fallback: bool = False, detail: str = "") -> str:
-            text = _single_line(item.get("text"), 900 if scope == "forward_image" else 600)
+            text = _single_line(item.get("text"), 900 if scope == "forward_image" else self._private_image_vision_text_limit(expected_count))
             if not text:
                 cache.pop(key, None)
                 return ""
@@ -659,11 +668,11 @@ class PrivateImageMixin:
     ) -> None:
         if not bool(getattr(self, "enable_private_image_vision_cache", True)):
             return
-        cleaned = _single_line(text, 900 if scope == "forward_image" else 600)
+        cleaned = _single_line(text, 900 if scope == "forward_image" else self._private_image_vision_text_limit(image_count))
         if not cache_key or not cleaned:
             return
         cache = self._private_image_vision_cache_store()
-        clean_image_keys = [str(item) for item in image_keys[:4] if str(item or "").strip()]
+        clean_image_keys = [str(item) for item in image_keys[:5] if str(item or "").strip()]
         clean_scope = _single_line(scope, 40)
         clean_provider = _single_line(provider_id, 160)
         clean_aliases = [str(item).strip() for item in (image_aliases or []) if str(item or "").strip()]
@@ -926,29 +935,50 @@ class PrivateImageMixin:
         seen_image_keys: set[str] = set()
         gif_enhancement_enabled = bool(getattr(self, "enable_private_image_gif_enhancement", True))
         gif_max_frames = max(1, min(8, int(getattr(self, "private_image_gif_max_frames", 4) or 4)))
-        max_model_images = max(8, min(16, gif_max_frames * 2))
-        for source in [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:4]:
+        sources = [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]
+        max_model_images = max(len(sources), max(8, min(16, len(sources) * 2)))
+        pending_gif_frames: list[list[tuple[str, str]]] = []
+
+        def append_item(item: tuple[str, str]) -> bool:
+            frame_key, frame_url = item
+            if not frame_key or frame_key in seen_image_keys:
+                return False
+            seen_image_keys.add(frame_key)
+            image_items.append((frame_key, frame_url))
+            return True
+
+        for source in sources:
             image_key = self._private_image_source_cache_key(source)
             gif_items = self._private_image_gif_frame_model_items(source, image_key, max_frames=gif_max_frames) if gif_enhancement_enabled else []
             if gif_items:
-                for frame_key, frame_url in gif_items:
-                    if frame_key in seen_image_keys:
-                        continue
-                    seen_image_keys.add(frame_key)
-                    image_items.append((frame_key, frame_url))
-                    if len(image_items) >= max_model_images:
-                        return image_items
+                if append_item(gif_items[0]) and len(gif_items) > 1:
+                    pending_gif_frames.append(gif_items[1:])
+                if len(image_items) >= max_model_images:
+                    break
                 continue
             url = self._private_image_source_to_model_url(source)
             if not url:
                 continue
             image_key = image_key or ("model_url:" + hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest())
-            if image_key in seen_image_keys:
-                continue
-            seen_image_keys.add(image_key)
-            image_items.append((image_key, url))
+            append_item((image_key, url))
             if len(image_items) >= max_model_images:
                 break
+        while pending_gif_frames and len(image_items) < max_model_images:
+            progressed = False
+            next_round: list[list[tuple[str, str]]] = []
+            for frames in pending_gif_frames:
+                if not frames:
+                    continue
+                if len(image_items) >= max_model_images:
+                    next_round.append(frames)
+                    continue
+                if append_item(frames[0]):
+                    progressed = True
+                if len(frames) > 1:
+                    next_round.append(frames[1:])
+            if not progressed:
+                break
+            pending_gif_frames = next_round
         return image_items
 
     def _private_image_gif_frame_model_items(self, source: str, image_key: str, *, max_frames: int = 4) -> list[tuple[str, str]]:
@@ -1046,7 +1076,7 @@ class PrivateImageMixin:
             return b""
 
     def _private_image_sources_include_gif(self, image_sources: list[str]) -> bool:
-        for source in [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:4]:
+        for source in [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]:
             if self._private_image_source_bytes_if_gif(source):
                 return True
         return False
@@ -1250,7 +1280,7 @@ class PrivateImageMixin:
         return ""
 
     def _private_image_downgrade_conflicting_ownership(self, vision_text: str) -> str:
-        text = _single_line(vision_text, 600)
+        text = _single_line(vision_text, 1400)
         reason = self._private_image_ownership_conflict_reason(text)
         if not reason:
             return text
@@ -1280,7 +1310,7 @@ class PrivateImageMixin:
 
     @staticmethod
     def _private_image_labeled_segment(text: str, label: str) -> str:
-        source = _single_line(text, 900)
+        source = _single_line(text, 1400)
         if not source or not label:
             return ""
         next_labels = ("图片类型", "可见内容", "图像表达意图", "图像归属判断")
@@ -1414,6 +1444,23 @@ class PrivateImageMixin:
         )
         return any(token in compact for token in request_tokens)
 
+    def _private_image_user_mentions_combo_result(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "")).lower()
+        if not compact:
+            return False
+        combo_tokens = (
+            "赛博老虎机", "老虎机", "抽签", "抽卡", "组合结果", "这组", "这一组",
+            "五张", "5张", "结果", "今日份", "天意",
+        )
+        return any(token in compact for token in combo_tokens)
+
+    @staticmethod
+    def _private_image_vision_text_limit(image_count: int = 1) -> int:
+        count = max(1, int(image_count or 1))
+        if count <= 1:
+            return 600
+        return min(1400, 600 + count * 160)
+
     def _private_image_query_prompt_suffix(self, user_text: str) -> str:
         user_text = _single_line(user_text, 240)
         if not user_text:
@@ -1427,7 +1474,7 @@ class PrivateImageMixin:
         )
 
     async def _transcribe_private_inbound_images(self, image_sources: list[str], *, umo: str = "", user_text: str = "", force_contextual: bool = False) -> str:
-        original_sources = [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:4]
+        original_sources = [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]
         sources = await self._prepare_private_image_sources_for_model(
             original_sources,
             namespace="private_vision",
@@ -1441,16 +1488,23 @@ class PrivateImageMixin:
             return ""
         image_aliases = self._private_image_cache_aliases_for_sources([*original_sources, *sources])
         image_count = len(original_sources) or len(sources)
+        text_limit = self._private_image_vision_text_limit(image_count)
+        combo_hint = (
+            "如果用户文本明确把多张图称为抽签、抽卡、老虎机、赛博老虎机或组合结果,请按顺序综合理解这组结果,保留每张图的关键文字并概括最终含义。"
+            if image_count >= 2 and self._private_image_user_mentions_combo_result(user_text)
+            else "如果用户一次发多张图,请先分别保留每张图的关键可见内容；只有用户文本明确表示它们是一组组合结果时,才合并成一个梗来解读。"
+        )
         default_prompt = (
-            "请把用户刚发的图片压缩成给聊天模型看的短摘要。先判断它更像表情包/贴纸/GIF,还是照片/截图/漫画/聊天记录。"
+            f"请把用户刚发的 {len(original_sources)} 张图片压缩成给聊天模型看的短摘要。先判断它们更像表情包/贴纸/GIF,还是照片/截图/漫画/聊天记录。"
             "只输出下面 4 行,不要写标题、分析过程、帧列表或长篇描述。\n"
             "图片类型：<照片/截图/漫画/表情包/聊天记录/其他>\n"
-            "可见内容：<客观画面主体、文字、动作或最关键细节,125字内；若是照片/截图/漫画/聊天记录,请比普通表情包更细致地说明画面内容>\n"
-            "图像表达意图：<用户可能借图表达的情绪、态度、疑问、分享意图、动作变化或梗,125字内；若是表情包/贴纸/GIF,请比普通图片更充分分析情绪和梗>\n"
+            "可见内容：<客观画面主体、文字、动作或最关键细节,125字内；多张图要按顺序保留每张图的关键文字/结果,不要只概括第一张>\n"
+            "图像表达意图：<用户可能借图表达的情绪、态度、疑问、分享意图、动作变化或梗,125字内>\n"
             "图像归属判断：<当前角色自己/当前角色的表情包/当前角色的聊天截图/发图用户本人/用户发来的无关图片/无法判断>\n"
             "完整性规则：这是在原有基础上的增强,不是二选一。任何类型都要保留可见内容和表达意图；"
             "区别只是图片侧多给内容细节,表情包/GIF侧多给情绪、态度和梗点。"
             "使用规则：表情包/贴纸/GIF 的表达意图常来自文字、表情、动作和梗点；普通图片的表达意图常来自用户分享、询问、吐槽或展示的语境。"
+            f"{combo_hint}"
             "无法确定就写无法判断；不要为了归属判断反复比较。"
             "如果同一张动态 GIF 被抽成多帧,请按时间顺序综合动作、表情变化和文字变化,不要把它们当成多张无关图片。"
         )
@@ -1502,9 +1556,9 @@ class PrivateImageMixin:
                 continue
             try:
                 start = time.time()
-                result = await provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=220)
+                result = await provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=min(520, 220 + image_count * 50))
                 text = str(getattr(result, "completion_text", result) or "").strip()
-                cleaned_text = _single_line(_strip_internal_message_blocks(text), 600)
+                cleaned_text = _single_line(_strip_internal_message_blocks(text), text_limit)
                 cleaned_text = self._private_image_downgrade_conflicting_ownership(cleaned_text)
                 intent_line = self._private_image_intent_line(cleaned_text)
                 ownership_line = self._private_image_ownership_line(cleaned_text)
@@ -1740,13 +1794,13 @@ class PrivateImageMixin:
 
     def _take_buffered_private_images_for_event(self, event: AstrMessageEvent) -> list[str]:
         context = self._take_buffered_private_image_context_for_event(event)
-        return [str(item) for item in context.get("images", [])[:4] if str(item or "").strip()] if isinstance(context, dict) else []
+        return [str(item) for item in context.get("images", [])[:5] if str(item or "").strip()] if isinstance(context, dict) else []
 
     def _completed_private_image_vision_task_text(self, vision_task: Any) -> str:
         if not isinstance(vision_task, asyncio.Task) or not vision_task.done() or vision_task.cancelled():
             return ""
         try:
-            return _single_line(vision_task.result(), 600)
+            return _single_line(vision_task.result(), 1400)
         except Exception as exc:
             logger.info("[PrivateCompanion] 私聊单图后台视觉任务结果读取失败: %s", _single_line(exc, 120))
             return ""
@@ -2089,11 +2143,12 @@ class PrivateImageMixin:
         if _now_ts() - _safe_float(buffer.get("updated_ts"), buffer.get("first_ts"), 0) > max(30.0, self._message_debounce_seconds("image") + 30.0):
             return {}
         images = buffer.pop("images", [])
+        image_limit = self._private_image_vision_text_limit(len(images))
         return {
-            "images": [str(item) for item in images[:4] if str(item or "").strip()],
+            "images": [str(item) for item in images[:5] if str(item or "").strip()],
             "image_mode": _single_line(buffer.pop("image_mode", ""), 20),
             "vision_task": buffer.pop("vision_task", None),
-            "vision_text": _single_line(buffer.pop("vision_text", ""), 600),
+            "vision_text": _single_line(buffer.pop("vision_text", ""), image_limit),
         }
 
     async def _send_delayed_private_image_only_event(
@@ -2104,13 +2159,14 @@ class PrivateImageMixin:
     ) -> None:
         images = buffer.get("images") if isinstance(buffer.get("images"), list) else []
         vision_task = buffer.get("vision_task")
-        vision_text = _single_line(buffer.get("vision_text"), 600)
+        image_limit = self._private_image_vision_text_limit(len(images))
+        vision_text = _single_line(buffer.get("vision_text"), image_limit)
         if not vision_text and isinstance(vision_task, asyncio.Task):
             timeout = max(0.0, float(getattr(self, "private_image_vision_wait_seconds", 30.0) or 0.0))
             try:
                 if timeout > 0:
                     logger.info("[PrivateCompanion] 私聊单图等待视觉转述完成: user=%s timeout=%.1fs", user_id, timeout)
-                    vision_text = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=timeout), 600)
+                    vision_text = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=timeout), image_limit)
             except asyncio.TimeoutError:
                 logger.info("[PrivateCompanion] 私聊单图延迟处理时视觉转述仍未完成: user=%s timeout=%.1fs", user_id, timeout)
             except Exception as exc:
@@ -2137,7 +2193,7 @@ class PrivateImageMixin:
             _single_line(reply_objective, 120),
             _single_line(vision_text, 220),
         )
-        raw_image_sources = [str(item) for item in images[:4] if str(item or "").strip()]
+        raw_image_sources = [str(item) for item in images[:5] if str(item or "").strip()]
         image_items = self._private_image_model_image_items(raw_image_sources)
         model_image_urls = [url for _, url in image_items]
         request_image_refs = self._private_image_sources_for_astrbot_request(raw_image_sources)
@@ -2201,7 +2257,7 @@ class PrivateImageMixin:
             elif request_image_refs:
                 setattr(framework_event, "private_companion_delayed_image_mode", "caption")
             if not direct_image_mode and not vision_text and images:
-                vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), 600)
+                vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), self._private_image_vision_text_limit(len(images)))
                 setattr(framework_event, "private_companion_delayed_image_vision_text", vision_text)
                 ownership_line = self._private_image_ownership_line(vision_text)
                 intent_line = self._private_image_intent_line(vision_text)
@@ -2397,7 +2453,7 @@ class PrivateImageMixin:
                             _single_line(vision_text, 220),
                         )
                     else:
-                        vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), 600)
+                        vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), self._private_image_vision_text_limit(len(images)))
                     setattr(event, "private_companion_delayed_image_vision_text", vision_text)
                     ownership_line = self._private_image_ownership_line(vision_text)
                     intent_line = self._private_image_intent_line(vision_text)
@@ -2445,8 +2501,8 @@ class PrivateImageMixin:
                 budget_exempt=True,
             )
             await self._send_private_image_reply_text(event, reply)
-            image_keys = self._private_image_cache_image_keys([str(item) for item in images[:4] if str(item or "").strip()])
-            image_aliases = self._private_image_cache_aliases_for_sources([str(item) for item in images[:4] if str(item or "").strip()])
+            image_keys = self._private_image_cache_image_keys([str(item) for item in images[:5] if str(item or "").strip()])
+            image_aliases = self._private_image_cache_aliases_for_sources([str(item) for item in images[:5] if str(item or "").strip()])
             if image_keys:
                 try:
                     async with self._data_lock:
@@ -2455,7 +2511,7 @@ class PrivateImageMixin:
                             "ts": _now_ts(),
                             "image_keys": image_keys,
                             "image_aliases": image_aliases,
-                            "vision_text": _single_line(vision_text, 600),
+                            "vision_text": _single_line(vision_text, image_limit),
                             "reply": _single_line(reply, 300),
                             "ownership": ownership_line,
                             "intent": intent_line,

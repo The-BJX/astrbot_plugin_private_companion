@@ -867,6 +867,28 @@ class ProactiveMessageMixin:
             )
         return "\n".join(line for line in lines if line)
 
+    def _sanitize_schedule_context_for_private_user(self, text: str, user: dict[str, Any] | None = None) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        if self._private_user_role(user) != "friend":
+            return cleaned
+        sensitive_names = [
+            _single_line(item, 24)
+            for item in (
+                getattr(self, "default_nickname", ""),
+                *(getattr(self, "target_user_ids", []) or []),
+            )
+            if _single_line(item, 24)
+        ]
+        for name in sensitive_names:
+            cleaned = cleaned.replace(name, "某个熟人")
+        cleaned = re.sub(r"看见[^，。,；;。！？]{1,24}坐在[^，。,；;。！？]{0,24}", "看见有人在忙", cleaned)
+        cleaned = re.sub(r"(?:放在|放到|搁在|塞到)[^，。,；;。！？]{0,12}(?:桌边|桌上|手边|旁边)", "放到一边", cleaned)
+        cleaned = re.sub(r"给你[^，。,；;。！？]{0,24}", "给熟人留了一点小东西", cleaned)
+        cleaned = re.sub(r"你(?:的|那边|桌边|桌上|手边)", "对方那边", cleaned)
+        return re.sub(r"\s+", " ", cleaned).strip()
+
     def _current_time_period_label(self, now: datetime | None = None) -> tuple[str, str]:
         current = now or self._environment_now()
         minute = current.hour * 60 + current.minute
@@ -918,6 +940,7 @@ class ProactiveMessageMixin:
 17. 不要用“哈哈,我也觉得”“确实”“对吧”“是吧”这类附和式开头；主动消息不是在回复用户刚说的话,要直接说自己的观察或念头。
 18. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
 19. 不要凭空添加世界观、人格、关系网、近期对话或用户输入里没提到的人际关系。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现时使用；没有依据时只说眼前事,或用“路人”“店员”“旁边的人”“群友”“别人”等弱关系。
+20. 日程主语归属必须稳定：当前生活片段、状态、作业、上课、放学、任务和手边小物默认都是 Bot 自己的生活背景,不是 {{name}} 正在做的事。不能把“我在写作业/上课/忙任务”改写成“你作业还差多少/你课上完了吗/你任务做完了吗”。除非当前用户最近明确说过自己正在写作业、上课或做任务,否则不要围绕这些内容追问用户进度。
 
 禁止事项：
 - 不要出现"系统任务""提示词""AI""模型""后台调度""工具调用"等字眼
@@ -981,6 +1004,7 @@ class ProactiveMessageMixin:
 17. 不要用“哈哈,我也觉得”“确实”“对吧”“是吧”这类附和式开头；主动消息不是在回复用户刚说的话,要直接说自己的观察或念头。
 18. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
 19. 不要凭空添加世界观、人格、关系网、近期对话或用户输入里没提到的人际关系。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现时使用；没有依据时只说眼前事,或用“路人”“店员”“旁边的人”“群友”“别人”等弱关系。
+20. 日程主语归属必须稳定：当前生活片段、状态、作业、上课、放学、任务和手边小物默认都是 Bot 自己的生活背景,不是 {{name}} 正在做的事。不能把“我在写作业/上课/忙任务”改写成“你作业还差多少/你课上完了吗/你任务做完了吗”。除非当前用户最近明确说过自己正在写作业、上课或做任务,否则不要围绕这些内容追问用户进度。
 
 【禁止事项】
 - 不要出现"系统任务""提示词""AI""模型""后台调度""工具调用"等字眼
@@ -990,6 +1014,7 @@ class ProactiveMessageMixin:
 - 不要直接宣告状态,例如"我累了""我吓了一跳""我正在写作业"；除非用户明确问,且只能用极短口语回应。
 - 不要用动作描写暗示状态,例如"差点把茶打翻""笔帽弹到桌子底下""喝了一口咳出来"。
 - 不要写任何“我正在做某事”的汇报式语句。
+- 不要把当前日程里的 Bot 自己任务转成追问用户进度,例如“你作业还差多少”“你课上完了吗”“你任务做完了吗”。
 - 不要输出 JSON、标题、解释或标注
 - 如果上下文里出现 [QQ:...] 或 QQ:... 这样的身份锚点,只用于区分群友身份,不要把它写进最终消息
 - 只输出你要发给 {{name}} 的那一段正文
@@ -1025,6 +1050,7 @@ class ProactiveMessageMixin:
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
         ability_search = self._format_proactive_ability_search_hint(user)
+        current_schedule = self._sanitize_schedule_context_for_private_user(current_schedule, user)
         compact_motive = _single_line(motive, 36) or "有一点想靠近对方"
         topic_hint = _single_line(user.get("planned_proactive_topic"), 40)
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
@@ -1799,12 +1825,74 @@ class ProactiveMessageMixin:
             )
         cleaned = self._apply_proactive_style_variation(cleaned, user)
         cleaned = self._collapse_multi_candidate_proactive_text(cleaned, user=user, name=name)
+        cleaned = self._repair_proactive_subject_drift(cleaned, reason=reason, action=action, action_context=action_context)
         cleaned = self._visible_text_without_tts_reading(cleaned, limit=1000)
         if self._should_drop_vague_generic_proactive(user, reason=reason, action=action, action_context=action_context, text=cleaned):
             return ""
         if self._should_drop_misstaged_proactive_text(cleaned, reason=reason, action=action):
             return ""
         return self._normalize_proactive_sentence_flow(cleaned)
+
+    def _repair_proactive_subject_drift(
+        self,
+        text: str,
+        *,
+        reason: str,
+        action: str,
+        action_context: str = "",
+    ) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned or action != "message":
+            return cleaned
+        state_context = "\n".join(
+            _single_line(part, 260)
+            for part in (
+                action_context,
+                self._format_schedule_context_for_prompt(),
+                self._format_plan_item_for_prompt(self._get_current_plan_item(self.data.get("daily_plan", {}))),
+            )
+            if _single_line(part, 260)
+        )
+        bot_task_markers = (
+            "作业", "写题", "题", "上课", "放学", "课本", "书桌", "试卷", "复习", "预习",
+            "任务", "代码", "创作", "草稿", "报告", "练习",
+        )
+        if not any(token in state_context for token in bot_task_markers):
+            return cleaned
+        user_progress_patterns = (
+            r"你[^。！？\n]{0,12}(?:作业|题|试卷|课|任务|代码|报告|草稿|练习)[^。！？\n]{0,18}(?:还差多少|写完了吗|做完了吗|弄完了吗|忙完了吗|上完了吗|差多少|完成了吗|怎么样了)[呀啊嘛呢了]*[？?。!！]?",
+            r"(?:作业|题|试卷|课|任务|代码|报告|草稿|练习)[^。！？\n]{0,12}(?:还差多少|写完了吗|做完了吗|弄完了吗|忙完了吗|上完了吗|差多少|完成了吗)[呀啊嘛呢了]*[？?。!！]?",
+        )
+        repaired = cleaned
+        changed = False
+        for pattern in user_progress_patterns:
+            repaired, count = re.subn(pattern, "", repaired)
+            changed = changed or count > 0
+        if not changed:
+            return cleaned
+        repaired = re.sub(r"\s+", " ", repaired).strip(" ，,。！？!?、")
+        if repaired:
+            logger.info(
+                "[PrivateCompanion] 主动消息修正主客体错位问句: reason=%s before=%s after=%s",
+                reason,
+                _single_line(cleaned, 120),
+                _single_line(repaired, 120),
+            )
+            return repaired
+        fallback_by_reason = {
+            "evening_greeting": "我这边慢慢安静下来了。给你留一句就继续收尾。",
+            "noon_greeting": "我这边刚停下来一下。给你留一句,不打扰你。",
+            "morning_greeting": "早。先把这句放你这边。",
+            "check_in": "我这边刚停下来一下。就来跟你说一句。",
+        }
+        fallback = fallback_by_reason.get(reason, "我这边刚停下来一下。就来跟你说一句。")
+        logger.info(
+            "[PrivateCompanion] 主动消息主客体错位问句已替换为兜底: reason=%s before=%s after=%s",
+            reason,
+            _single_line(cleaned, 120),
+            fallback,
+        )
+        return fallback
 
     def _should_drop_misstaged_proactive_text(self, text: str, *, reason: str, action: str) -> bool:
         cleaned = _single_line(text, 220)

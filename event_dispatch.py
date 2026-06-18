@@ -523,8 +523,42 @@ class EventDispatchMixin:
         quote_id = self._group_current_reply_quote_message_id(event)
         if quote_id:
             ids.append(quote_id)
+        for message_id in self._event_reply_message_ids(event):
+            if message_id:
+                ids.append(message_id)
         for message_id in extra_message_ids:
             message_id = _single_line(message_id, 120)
+            if message_id:
+                ids.append(message_id)
+        seen: set[str] = set()
+        unique: list[str] = []
+        for message_id in ids:
+            if message_id in seen:
+                continue
+            seen.add(message_id)
+            unique.append(message_id)
+        return unique
+
+    def _event_reply_message_ids(self, event: AstrMessageEvent) -> list[str]:
+        ids: list[str] = []
+        extractor = getattr(self, "_extract_reply_message_id", None)
+        for item in self._event_components(event):
+            type_name = self._component_type_name(item)
+            if type_name != "reply" and "reply" not in type_name:
+                continue
+            message_id = ""
+            if callable(extractor):
+                try:
+                    message_id = _single_line(extractor(item), 120)
+                except Exception:
+                    message_id = ""
+            if not message_id:
+                data = self._component_data(item)
+                for key in ("id", "message_id", "msg_id", "seq", "message_seq", "real_id"):
+                    value = data.get(key) if isinstance(data, dict) else None
+                    if value is not None and str(value).strip():
+                        message_id = _single_line(value, 120)
+                        break
             if message_id:
                 ids.append(message_id)
         seen: set[str] = set()

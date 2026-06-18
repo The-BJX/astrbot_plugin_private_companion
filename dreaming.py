@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import random
+import re
+from difflib import SequenceMatcher
 from datetime import datetime
 from typing import Any
 
@@ -76,6 +78,122 @@ def recent_diary_context(plugin, count: int = 3) -> str:
         if summary:
             lines.append(f"- {diary.get('date', '')}：{summary} {tag_text}".strip())
     return "\n".join(lines) if lines else "（暂无）"
+
+
+def _compact_diary_text(text: Any, limit: int = 220) -> str:
+    raw = _single_line(text, limit)
+    if not raw:
+        return ""
+    chars: list[str] = []
+    for char in raw:
+        if "\u4e00" <= char <= "\u9fff" or char.isascii() and char.isalnum():
+            chars.append(char.lower())
+    return "".join(chars)
+
+
+_DIARY_DUPLICATE_KEYWORDS = (
+    "梦", "梦里", "梦见", "学校", "教室", "窗台", "窗边", "窗", "猫", "橘猫", "星图",
+    "发夹", "书包", "餐桌", "糖", "软糖", "花", "雨", "伞", "走廊", "床", "枕头",
+)
+
+
+def _diary_keyword_overlap(left: Any, right: Any) -> int:
+    a = _compact_diary_text(left, limit=520)
+    b = _compact_diary_text(right, limit=520)
+    if not a or not b:
+        return 0
+    return sum(1 for keyword in _DIARY_DUPLICATE_KEYWORDS if keyword in a and keyword in b)
+
+
+def _diary_text_similarity(left: Any, right: Any) -> float:
+    a = _compact_diary_text(left)
+    b = _compact_diary_text(right)
+    if len(a) < 8 or len(b) < 8:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _recent_diary_avoid_context(plugin, count: int = 3) -> str:
+    diaries = plugin.data.get("bot_diaries", [])
+    if not isinstance(diaries, list) or not diaries:
+        return "（暂无）"
+    lines: list[str] = []
+    for diary in diaries[-count:]:
+        if not isinstance(diary, dict):
+            continue
+        date_text = _single_line(diary.get("date"), 16)
+        summary = _single_line(diary.get("summary"), 70)
+        share_seed = _single_line(diary.get("share_seed"), 90)
+        body = _single_line(diary.get("body"), 120)
+        fragments = []
+        for item in diary.get("dream_fragments", []) if isinstance(diary.get("dream_fragments"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            text = _single_line(item.get("text"), 24)
+            if text:
+                fragments.append(text)
+            if len(fragments) >= 4:
+                break
+        parts = []
+        if summary:
+            parts.append(f"摘要={summary}")
+        if share_seed:
+            parts.append(f"分享句={share_seed}")
+        if body:
+            parts.append(f"正文片段={body}")
+        if fragments:
+            parts.append(f"梦境碎片={','.join(fragments)}")
+        if parts:
+            lines.append(f"- {date_text or '近期'}：" + "；".join(parts))
+    return "\n".join(lines) if lines else "（暂无）"
+
+
+def _recent_diary_duplicate_hit(plugin, payload: dict[str, Any], count: int = 3) -> tuple[bool, str]:
+    diaries = plugin.data.get("bot_diaries", [])
+    if not isinstance(diaries, list) or not diaries:
+        return False, ""
+    current_share = _single_line(payload.get("share_seed"), 140)
+    current_summary = _single_line(payload.get("summary"), 180)
+    current_body = _single_line(payload.get("body"), 520)
+    current_all = " ".join(part for part in (current_share, current_summary, current_body) if part)
+    for diary in reversed(diaries[-count:]):
+        if not isinstance(diary, dict):
+            continue
+        prior_share = _single_line(diary.get("share_seed"), 140)
+        prior_summary = _single_line(diary.get("summary"), 180)
+        prior_body = _single_line(diary.get("body"), 520)
+        prior_all = " ".join(part for part in (prior_share, prior_summary, prior_body) if part)
+        share_ratio = _diary_text_similarity(current_share, prior_share)
+        all_ratio = _diary_text_similarity(current_all, prior_all)
+        cross_ratio = max(
+            _diary_text_similarity(current_share, prior_summary),
+            _diary_text_similarity(current_share, prior_body),
+            _diary_text_similarity(current_summary, prior_share),
+        )
+        keyword_overlap = max(
+            _diary_keyword_overlap(current_share, prior_share),
+            _diary_keyword_overlap(current_all, prior_all),
+        )
+        if share_ratio >= 0.58 or all_ratio >= 0.48 or cross_ratio >= 0.62 or keyword_overlap >= 4:
+            return True, _single_line(diary.get("date"), 16) or "近期日记"
+    return False, ""
+
+
+def _repair_duplicate_daily_diary(plugin, payload: dict[str, Any], matched_date: str) -> dict[str, Any]:
+    state = plugin.data.get("daily_state", {})
+    mood = state.get("mood_bias", "平稳") if isinstance(state, dict) else "平稳"
+    energy = _safe_int(state.get("energy"), 70) if isinstance(state, dict) else 70
+    weather = _single_line(plugin._weather_summary_text(plugin.data.get("daily_weather", {})), 48)
+    note = "今天脑子里还残留着前几天梦里的画面,像醒来后还没散掉的一点余温。"
+    if weather and weather != "暂无天气信息":
+        note += f"外面的{weather}让这种余韵更明显了一点。"
+    note += f"状态大概是{mood},能量在 {energy}/100 左右,适合把注意力慢慢放回今天新的小事。"
+    repaired = dict(payload)
+    repaired["summary"] = "今天有一点梦境余韵,但更想把注意力放回新的小事上。"
+    repaired["body"] = note
+    repaired["share_seed"] = "今天梦里的余韵还在,不过我想等遇到新的小事再讲给你听。"
+    repaired["tags"] = payload.get("tags") if isinstance(payload.get("tags"), list) else ["平稳"]
+    return repaired
 
 
 def normalize_dream_fragment_item(plugin, raw: Any) -> dict[str, Any] | None:
@@ -471,6 +589,7 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     can_do = plugin._format_can_do_for_prompt()
     calendar_context = plugin._format_calendar_context_for_prompt()
     yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
+    recent_diary_avoid_context = _recent_diary_avoid_context(plugin)
     worldview_adaptation = ""
     formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
     if callable(formatter):
@@ -485,6 +604,8 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 · 0–3 个长线事件,代表之后几天还可能延续的小剧情,用来增加沉浸感。
 · proactive_events 要同时带 motive（心里一闪而过的念头,不要长解释）,适合时也可以带 scene/tone/impulse。
 · 顺手产出 3–8 个梦境碎片关键词,它们是今天残留在脑子里的小东西：物件、动作、气味、颜色、情绪、半句话都可以。每个碎片给一个 0.6–3.5 的权重,越重代表越容易在梦里反复冒出来。
+· 最近 3 天日记里已经写过的具体物件、场景、动作和 share_seed 不要当成今天的新事件重复写。可以保留“梦境余韵/似曾相识”的连续感,但必须换成新的现实小事或只写成模糊余温。
+· 如果近期写过“梦里某物出现在学校/窗台/路上/桌边”这类桥段,今天不要再写同一物件又在同一场景出现,也不要复用“救命！我今天……”式相同分享句。
 
 只输出 JSON：
 {{
@@ -539,6 +660,9 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 最近日记：
 {plugin._recent_diary_context()}
 
+近期需要避免复用的具体素材：
+{recent_diary_avoid_context}
+
 昨日完整对话摘要：
 {yesterday_conversation}
 
@@ -556,6 +680,9 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     payload = plugin._extract_json_payload(raw_text or "")
     if not isinstance(payload, dict):
         payload = plugin._fallback_diary_payload()
+    duplicate_hit, matched_date = _recent_diary_duplicate_hit(plugin, payload)
+    if duplicate_hit:
+        payload = _repair_duplicate_daily_diary(plugin, payload, matched_date)
     tags = payload.get("tags", [])
     if not isinstance(tags, list):
         tags = []

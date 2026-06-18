@@ -3564,6 +3564,7 @@
   "segmented_proactive_split_mode": {
     "description": "主动分段模式",
     "type": "string",
+    "hint": "regex：按正则表达式切分，适合中文标点和换行；words：按下方分段词列表切分，适合自定义固定分隔符。",
     "options": [
       "regex",
       "words"

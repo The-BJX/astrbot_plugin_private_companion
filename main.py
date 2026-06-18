@@ -113,6 +113,7 @@ from .helpers import (
 )
 from .forward_message import ForwardMessageMixin
 from .private_image import PrivateImageMixin
+from .prompt_surface import PromptSurface
 from .qzone_integration import QzoneMixin
 from .token_budget import TokenBudgetMixin
 from .worldbook import WorldbookMixin
@@ -301,7 +302,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.0.1",
+    "4.0.2",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -2058,34 +2059,40 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         state = await self._ensure_daily_state(skip_conversation_summary=True, passive_fast=True)
         inbound_text = _single_line(getattr(event, "message_str", "") or current_user.get("last_user_message"), 260)
         lightweight_passive = self._is_lightweight_private_passive_inbound(inbound_text)
-        injection_parts = []
+        prompt_surface = PromptSurface()
         if lightweight_passive:
-            injection_parts.append(self._prepared_lightweight_state_injection(state))
+            lightweight_injection = self._prepared_lightweight_state_injection(state)
+            lightweight_injection = self._sanitize_schedule_context_for_private_user(lightweight_injection, current_user)
+            prompt_surface.add("state.lightweight", lightweight_injection, priority=10, source="daily_state")
         else:
-            injection_parts.append(self._format_state_injection(state))
+            state_injection = self._format_state_injection(state)
+            state_injection = self._sanitize_schedule_context_for_private_user(state_injection, current_user)
+            prompt_surface.add("state.full", state_injection, priority=10, source="daily_state")
             worldview_context = self._format_worldview_adaptation_prompt()
             if worldview_context:
-                injection_parts.append(worldview_context)
+                prompt_surface.add("worldview.adaptation", worldview_context, priority=20, source="worldview")
         identity_anchor = self._format_private_identity_anchor_for_prompt(user_id, current_user, event)
         if identity_anchor:
-            injection_parts.append(identity_anchor)
+            prompt_surface.add("identity.anchor", identity_anchor, priority=30, source="identity")
         buffered_image_context = self._take_buffered_private_image_context_for_event(event)
         buffered_images = (
             [str(item) for item in buffered_image_context.get("images", []) if str(item or "").strip()]
             if isinstance(buffered_image_context, dict)
             else []
         )
-        buffered_image_vision = (
-            _single_line(buffered_image_context.get("vision_text"), 600)
-            if isinstance(buffered_image_context, dict)
-            else ""
-        )
-        delayed_image_vision = _single_line(getattr(event, "private_companion_delayed_image_vision_text", ""), 600)
-        if delayed_image_vision and not buffered_image_vision:
-            buffered_image_vision = delayed_image_vision
+        buffered_image_vision = ""
         delayed_image_sources = getattr(event, "private_companion_delayed_image_sources", [])
         if not buffered_images and isinstance(delayed_image_sources, list):
-            buffered_images = [str(item) for item in delayed_image_sources[:4] if str(item or "").strip()]
+            buffered_images = [str(item) for item in delayed_image_sources[:5] if str(item or "").strip()]
+        buffered_image_vision_limit = self._private_image_vision_text_limit(len(buffered_images))
+        if isinstance(buffered_image_context, dict):
+            buffered_image_vision = _single_line(buffered_image_context.get("vision_text"), buffered_image_vision_limit)
+        delayed_image_vision = _single_line(
+            getattr(event, "private_companion_delayed_image_vision_text", ""),
+            buffered_image_vision_limit,
+        )
+        if delayed_image_vision and not buffered_image_vision:
+            buffered_image_vision = delayed_image_vision
         buffered_image_mode = _single_line(buffered_image_context.get("image_mode"), 20) if isinstance(buffered_image_context, dict) else ""
         delayed_image_mode = _single_line(getattr(event, "private_companion_delayed_image_mode", ""), 20)
         if not buffered_image_mode and delayed_image_mode:
@@ -2093,7 +2100,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         vision_task = buffered_image_context.get("vision_task") if isinstance(buffered_image_context, dict) else None
         if not buffered_image_vision and isinstance(vision_task, asyncio.Task):
             try:
-                buffered_image_vision = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=2.5), 600)
+                buffered_image_vision = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=2.5), buffered_image_vision_limit)
             except asyncio.TimeoutError:
                 logger.info("[PrivateCompanion] 私聊图片视觉转述仍在进行,本轮先注入路径兜底")
             except Exception as exc:
@@ -2117,7 +2124,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     buffered_images,
                     umo=str(getattr(event, "unified_msg_origin", "") or ""),
                 ),
-                600,
+                buffered_image_vision_limit,
             )
         combined_text = ""
         private_buffer_key = self._semantic_buffer_key(f"private:{user_id}", user_id)
@@ -2125,14 +2132,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not lightweight_passive or buffered_images or private_buffer_active:
             combined_text = await self._consume_semantic_message_buffer_for_event(event, private_chat=True)
         if combined_text:
-            injection_parts.append(
+            prompt_surface.add(
+                "turn.continuation",
                 "【本轮用户连续补充】\n"
                 "用户刚刚在短时间内连续补充了几句,请把它们当作同一轮完整发言理解,不要逐条回复,也不要表现得像用户重复催促：\n"
-                f"{combined_text}"
+                f"{combined_text}",
+                priority=40,
+                source="message_debounce",
             )
             inbound_text = _single_line(combined_text.replace("\n", " "), 260)
         if self._user_asks_recalled_messages(inbound_text):
-            injection_parts.append(self._format_recalled_messages_for_natural_query(event, limit=5))
+            prompt_surface.add("recall.query", self._format_recalled_messages_for_natural_query(event, limit=5), priority=45, source="recall")
         if buffered_images and buffered_image_vision and self._private_image_user_has_specific_vision_request(inbound_text):
             contextual_vision = _single_line(
                 await self._transcribe_private_inbound_images(
@@ -2141,7 +2151,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     user_text=inbound_text,
                     force_contextual=True,
                 ),
-                600,
+                buffered_image_vision_limit,
             )
             if contextual_vision:
                 buffered_image_vision = contextual_vision
@@ -2149,7 +2159,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             direct_image_mounted = False
             if buffered_image_mode == "direct" and self._event_main_provider_supports_image(event) and not buffered_images_include_gif:
                 image_refs: list[str] = []
-                for image_ref in buffered_images[:4]:
+                for image_ref in buffered_images[:5]:
                     for request_ref in self._private_image_sources_for_astrbot_request([image_ref]):
                         if request_ref not in image_refs:
                             image_refs.append(request_ref)
@@ -2174,12 +2184,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                         len(buffered_images),
                         len(image_refs),
                     )
-                    injection_parts.append(
+                    prompt_surface.add(
+                        "image.direct",
                         "【本轮延迟图片】\n"
                         "用户刚刚先单独发了一张图片,随后补充了文字。图片已随本轮请求一起交给当前视觉主模型；"
                         "请同时理解画面内容和用户借图表达的情绪/态度/疑问/梗。图片类型只决定回复组织顺序，不代表可以弱化另一项。"
                         "如果用户在问图里是什么,请先回答画面内容,再结合表达意图。不要提插件或处理过程。"
-                        f"{self._private_image_identity_disambiguation_instruction()}"
+                        f"{self._private_image_identity_disambiguation_instruction()}",
+                        priority=50,
+                        source="private_image",
                     )
                     direct_image_mounted = True
             if not direct_image_mounted and buffered_image_vision:
@@ -2200,7 +2213,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     if bool(getattr(event, "private_companion_deferred_private_image_only_ready", False))
                     else "用户刚刚先单独发了一张图片,随后补充了文字。"
                 )
-                injection_parts.append(
+                prompt_surface.add(
+                    "image.vision",
                     "【本轮延迟图片】\n"
                     f"{image_context_intro}下面是视觉模型对刚才那张图的内部摘要；"
                     "这是当前这张图片的可靠内容摘要；即使当前主模型不能直接识图,也请按此摘要理解,不要回答“没看到图”或要求重发。"
@@ -2210,7 +2224,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     "不要顺便提下午、五点、放学、出去走走、陪你、到时候叫我等旧约定。"
                     f"{self._private_image_identity_disambiguation_instruction()}\n"
                     f"{reply_objective}\n"
-                    f"{buffered_image_vision}"
+                    f"{buffered_image_vision}",
+                    priority=50,
+                    source="private_image",
                 )
             else:
                 image_context_intro = (
@@ -2218,36 +2234,46 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     if bool(getattr(event, "private_companion_deferred_private_image_only_ready", False))
                     else "用户刚刚先单独发了一张图片,随后补充了文字。"
                 )
-                injection_parts.append(
+                prompt_surface.add(
+                    "image.fallback",
                     "【本轮延迟图片】\n"
                     f"{image_context_intro}图片已暂存,但视觉转述暂时不可用；"
                     "如果用户问的是图片内容,请自然说明自己这边暂时没看清,不要编造画面。"
                     "本轮只回应当前图片和用户补充文字,不要续写、答应或安排历史里的旧邀约/旧 TTS 内容。\n"
-                    + "\n".join(f"- {path}" for path in buffered_images)
+                    + "\n".join(f"- {path}" for path in buffered_images),
+                    priority=50,
+                    source="private_image",
                 )
         elif bool(getattr(event, "private_companion_deferred_private_image_only_ready", False)):
             if buffered_image_vision:
-                injection_parts.append(
+                prompt_surface.add(
+                    "image.only.vision",
                     "【本轮延迟图片】\n"
                     "用户刚刚只发了一张图片,没有继续补充文字。下面是视觉模型对那张图的内部摘要；"
                     "这是当前这张图片的可靠内容摘要；即使当前主模型不能直接识图,也请按此摘要理解,不要回答“没看到图”或要求重发。"
                     "请自然回应图片内容,不要提模型、插件或处理过程。"
                     "本轮只回应当前图片和用户发图可能表达的态度/梗/疑问；不要把聊天历史、长期记忆、主动消息、旧 TTS 文本或压缩摘要里的邀约当成当前输入。"
                     "不要顺便提下午、五点、放学、出去走走、陪你、到时候叫我等旧约定。\n"
-                    f"{buffered_image_vision}"
+                    f"{buffered_image_vision}",
+                    priority=50,
+                    source="private_image",
                 )
             else:
-                injection_parts.append(
+                prompt_surface.add(
+                    "image.only.fallback",
                     "【本轮延迟图片】\n"
                     "用户刚刚只发了一张图片,没有继续补充文字。当前没有拿到可用图片内容；"
                     "请不要沉默,也不要编造画面,可以自然地表示这边暂时没看清并等用户补一句。"
-                    "不要续写、答应或安排历史里的旧邀约/旧 TTS 内容。"
+                    "不要续写、答应或安排历史里的旧邀约/旧 TTS 内容。",
+                    priority=50,
+                    source="private_image",
                 )
         reply_image_sources: list[str] = []
         reply_image_prompt_anchor = ""
         if not buffered_images and not bool(getattr(event, "private_companion_deferred_private_image_only_ready", False)):
             reply_image_sources = await self._find_reply_image_sources_for_event(event)
             if reply_image_sources:
+                reply_image_limit = self._private_image_vision_text_limit(len(reply_image_sources))
                 reply_image_vision = _single_line(
                     await self._transcribe_private_inbound_images(
                         reply_image_sources,
@@ -2255,7 +2281,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                         user_text=inbound_text,
                         force_contextual=self._private_image_user_has_specific_vision_request(inbound_text),
                     ),
-                    600,
+                    reply_image_limit,
                 )
                 if reply_image_vision:
                     intent_line = self._private_image_intent_line(reply_image_vision)
@@ -2280,8 +2306,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                         f"{reply_objective}\n"
                         f"{reply_image_vision}"
                     )
-                    injection_parts.insert(
-                        0,
+                    prompt_surface.add(
+                        "image.reply.vision",
                         "【本轮引用图片】\n"
                         f"用户这轮引用/回复了一张图片,并发送文字：{inbound_text or '（空）'}。\n"
                         "下面是视觉模型对被引用图片的内部摘要。请优先回答用户当前这句文字针对引用图片提出的问题；"
@@ -2289,7 +2315,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                         "如果用户问图里是什么,必须基于本摘要直接回答当前引用图片内容,不要只泛泛反问来源。\n"
                         f"{self._private_image_identity_disambiguation_instruction()}\n"
                         f"{reply_objective}\n"
-                        f"{reply_image_vision}"
+                        f"{reply_image_vision}",
+                        priority=5,
+                        source="private_image",
                     )
                     image_keys = self._private_image_cache_image_keys(reply_image_sources)
                     if image_keys:
@@ -2299,7 +2327,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                                 user["last_private_image_vision_feedback_target"] = {
                                     "ts": _now_ts(),
                                     "image_keys": image_keys,
-                                    "vision_text": _single_line(reply_image_vision, 600),
+                                    "vision_text": _single_line(reply_image_vision, reply_image_limit),
                                     "reply": "",
                                     "ownership": ownership_line,
                                     "intent": intent_line,
@@ -2309,7 +2337,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                         except Exception as exc:
                             logger.debug("[PrivateCompanion] 私聊引用图片视觉反馈目标记录失败: %s", exc)
                     try:
-                        setattr(event, "private_companion_reply_image_vision_text", _single_line(reply_image_vision, 600))
+                        setattr(event, "private_companion_reply_image_vision_text", _single_line(reply_image_vision, reply_image_limit))
+                        setattr(event, "private_companion_reply_image_count", len(reply_image_sources))
                         setattr(event, "private_companion_reply_image_user_text", inbound_text)
                         setattr(
                             event,
@@ -2319,10 +2348,13 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     except Exception:
                         pass
                 else:
-                    injection_parts.append(
+                    prompt_surface.add(
+                        "image.reply.fallback",
                         "【本轮引用图片】\n"
                         f"用户这轮引用/回复了一张图片,并发送文字：{inbound_text or '（空）'}。"
-                        "当前未能拿到可用视觉摘要；如果用户问的是引用图片内容,请自然说明这边暂时没看清,不要编造。"
+                        "当前未能拿到可用视觉摘要；如果用户问的是引用图片内容,请自然说明这边暂时没看清,不要编造。",
+                        priority=5,
+                        source="private_image",
                     )
         if reply_image_prompt_anchor:
             try:
@@ -2338,35 +2370,35 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not lightweight_passive:
             hidden_creative_context = self._format_hidden_creative_context_for_reply(inbound_text)
             if hidden_creative_context:
-                injection_parts.append(hidden_creative_context)
+                prompt_surface.add("creative.hidden", hidden_creative_context, priority=70, source="creative")
             bookshelf_secret_context = await self._format_bookshelf_secret_for_prompt(inbound_text, current_user)
             if bookshelf_secret_context:
-                injection_parts.append(bookshelf_secret_context)
+                prompt_surface.add("bookshelf.secret", bookshelf_secret_context, priority=70, source="bookshelf")
             bookshelf_reading_context = self._format_bookshelf_reading_context_for_reply(inbound_text, current_user)
             if bookshelf_reading_context:
-                injection_parts.append(bookshelf_reading_context)
+                prompt_surface.add("bookshelf.reading", bookshelf_reading_context, priority=72, source="bookshelf")
             private_preference_context = self._format_private_reading_preference_influence_for_reply(inbound_text, current_user)
             if private_preference_context:
-                injection_parts.append(private_preference_context)
+                prompt_surface.add("private_reading.preference", private_preference_context, priority=74, source="private_reading")
             news_context = self._format_recent_news_context_for_reply(inbound_text)
             if news_context:
-                injection_parts.append(news_context)
+                prompt_surface.add("news.recent", news_context, priority=76, source="news")
             skill_context = self._format_skill_growth_for_prompt()
             if skill_context:
-                injection_parts.append(skill_context)
+                prompt_surface.add("skill.growth", skill_context, priority=78, source="skill")
             companion_injection = self._format_companion_planner_injection(current_user)
             if companion_injection:
-                injection_parts.append(companion_injection)
+                prompt_surface.add("companion.planner", companion_injection, priority=80, source="companion")
             is_wake_event = bool(getattr(event, "is_wake", False)) or bool(
                 getattr(event, "is_at_or_wake_command", False)
             )
             if is_private_chat and not is_wake_event:
                 proactive_context = await self._format_proactive_reply_context(event)
                 if proactive_context:
-                    injection_parts.append(proactive_context)
+                    prompt_surface.add("proactive.reply_context", proactive_context, priority=82, source="proactive")
             detail_injection = self._format_detail_injection()
             if detail_injection:
-                injection_parts.append(detail_injection)
+                prompt_surface.add("detail.injection", detail_injection, priority=84, source="daily_detail")
             if self.enable_llm_timer_scheduling and is_private_chat:
                 try:
                     user_id = str(event.get_sender_id())
@@ -2376,11 +2408,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     async with self._data_lock:
                         enabled = bool(self._get_user(user_id).get("enabled"))
                     if enabled:
-                        injection_parts.append(self._format_timer_scheduling_instruction())
-        injection = "\n\n".join(injection_parts)
+                        prompt_surface.add("timer.scheduling", self._format_timer_scheduling_instruction(), priority=90, source="timer")
+        injection = prompt_surface.render()
         marker = "<!-- private_companion_state_v1 -->"
         current_prompt = req.system_prompt or ""
         if marker in current_prompt:
+            await self._append_conditional_tool_instructions_to_request(event, req)
+            if not lightweight_passive:
+                await self._append_environment_perception_to_request(event, req)
+            return
+        if not injection:
+            logger.debug("[PrivateCompanion] 被动状态提示词片段为空,跳过状态 marker 注入")
             await self._append_conditional_tool_instructions_to_request(event, req)
             if not lightweight_passive:
                 await self._append_environment_perception_to_request(event, req)
@@ -2397,7 +2435,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if weather and weather != "暂无天气信息":
             state_log_parts.append(f"天气={weather}")
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-        current_schedule = self._format_plan_item_for_prompt(current_item) or "无当前日程"
+        current_schedule = self._sanitize_schedule_context_for_private_user(
+            self._format_plan_item_for_prompt(current_item),
+            current_user,
+        ) or "无当前日程"
         logger.info(
             "[PrivateCompanion] 已注入被动状态提示词到 %s: mode=%s chars=%s 状态=%s；当前日程=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 80) or "unknown_session",
@@ -2467,7 +2508,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 release_now = True
                 return
             working_text = original_text
-            reply_image_vision = _single_line(getattr(event, "private_companion_reply_image_vision_text", ""), 600)
+            reply_image_count = _safe_int(getattr(event, "private_companion_reply_image_count", 1), 1, 1, 5)
+            reply_image_vision = _single_line(
+                getattr(event, "private_companion_reply_image_vision_text", ""),
+                self._private_image_vision_text_limit(reply_image_count),
+            )
             reply_image_user_text = _single_line(
                 getattr(event, "private_companion_reply_image_user_text", "") or current_user.get("last_user_message"),
                 260,
@@ -3013,6 +3058,70 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     text=text,
                     now=received_ts,
                 )
+            private_image_enhancement_enabled = (
+                bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True)))
+                and self._message_debounce_seconds("image") > 0
+            )
+            private_image_only = (
+                is_target_user
+                and private_image_enhancement_enabled
+                and self._is_private_image_only_message(event, text)
+            )
+            if (
+                is_target_user
+                and text
+                and not forward_only_prompt
+                and private_image_enhancement_enabled
+                and not private_image_only
+                and self._private_event_has_image(event)
+            ):
+                persisted_images = await self._persist_private_inbound_images(event, user_id)
+                usable_images = [source for source in persisted_images if self._private_image_source_to_model_url(source)]
+                if usable_images:
+                    setattr(event, "private_companion_delayed_image_sources", usable_images[:5])
+                    has_dynamic_gif_sources = (
+                        bool(getattr(self, "enable_private_image_gif_enhancement", True))
+                        and self._private_image_sources_include_gif(usable_images)
+                    )
+                    needs_caption_mode = (
+                        has_dynamic_gif_sources
+                        or len(usable_images) >= 2
+                        or self._private_image_user_mentions_combo_result(text)
+                    )
+                    direct_image_mode = (
+                        not needs_caption_mode
+                        and self._event_main_provider_supports_image(event)
+                    )
+                    setattr(event, "private_companion_delayed_image_mode", "direct" if direct_image_mode else "caption")
+                    if not direct_image_mode:
+                        vision_text = _single_line(
+                            await self._transcribe_private_inbound_images(
+                                usable_images[:5],
+                                umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                                user_text=text,
+                                force_contextual=self._private_image_user_mentions_combo_result(text) or self._private_image_user_has_specific_vision_request(text),
+                            ),
+                            self._private_image_vision_text_limit(len(usable_images)),
+                        )
+                        if vision_text:
+                            setattr(event, "private_companion_delayed_image_vision_text", vision_text)
+                    logger.info(
+                        "[PrivateCompanion] 私聊文本图片混合消息已接入图片上下文: user=%s images=%s mode=%s gif=%s combo=%s vision=%s text=%s",
+                        user_id,
+                        len(usable_images),
+                        "direct" if direct_image_mode else "caption",
+                        has_dynamic_gif_sources,
+                        self._private_image_user_mentions_combo_result(text),
+                        bool(_single_line(getattr(event, "private_companion_delayed_image_vision_text", ""), 80)),
+                        _single_line(text, 80),
+                    )
+                else:
+                    logger.info(
+                        "[PrivateCompanion] 私聊文本图片混合消息未解析到可用图片源: user=%s sources=%s text=%s",
+                        user_id,
+                        len(persisted_images),
+                        _single_line(text, 80),
+                    )
             if is_target_user and forward_only_prompt:
                 key = self._semantic_buffer_key(f"private:{user_id}", user_id)
                 if self._note_semantic_message_buffer(
@@ -3025,15 +3134,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     self._schedule_data_save()
                     event.stop_event()
                     return
-            private_image_enhancement_enabled = (
-                bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True)))
-                and self._message_debounce_seconds("image") > 0
-            )
-            private_image_only = (
-                is_target_user
-                and private_image_enhancement_enabled
-                and self._is_private_image_only_message(event, text)
-            )
             if private_image_only:
                 setattr(event, "private_companion_deferred_private_image_only", True)
                 key = self._semantic_buffer_key(f"private:{user_id}", user_id)

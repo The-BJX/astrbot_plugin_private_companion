@@ -17,6 +17,7 @@ import random
 import re
 import shutil
 import sys
+import threading
 import time
 import unicodedata
 import uuid
@@ -434,16 +435,43 @@ class CoreStoreMixin:
                         self.data[key] = existing.get(key, self.data.get(key))
             except Exception:
                 pass
-        tmp_file = self.data_file + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_file, self.data_file)
+        self._atomic_write_data_file_sync(self.data)
 
     def _write_data_snapshot_sync(self, data: dict[str, Any]) -> None:
-        tmp_file = self.data_file + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_file, self.data_file)
+        self._atomic_write_data_file_sync(data)
+
+    def _atomic_write_data_file_sync(self, data: dict[str, Any]) -> None:
+        base = self.data_file
+        tmp_file = f"{base}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            last_exc: Exception | None = None
+            for attempt in range(6):
+                try:
+                    os.replace(tmp_file, base)
+                    return
+                except PermissionError as exc:
+                    last_exc = exc
+                    time.sleep(0.05 * (attempt + 1))
+                except OSError as exc:
+                    last_exc = exc
+                    if getattr(exc, "winerror", 0) not in {32, 33, 5}:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+            if last_exc:
+                raise last_exc
+        finally:
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except Exception:
+                pass
 
     def _schedule_data_save(self, delay: float = 1.5) -> None:
         self._data_save_dirty = True
@@ -452,6 +480,7 @@ class CoreStoreMixin:
             return
 
         async def _runner() -> None:
+            should_retry = False
             try:
                 while bool(getattr(self, "_data_save_dirty", False)):
                     self._data_save_dirty = False
@@ -461,9 +490,17 @@ class CoreStoreMixin:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._data_save_dirty = True
+                should_retry = True
                 logger.warning("[PrivateCompanion] 延迟保存数据失败: %s", exc)
             finally:
                 self._data_save_task = None
+                if should_retry and bool(getattr(self, "_data_save_dirty", False)):
+                    retry_delay = max(3.0, min(30.0, float(delay) * 2.0 if delay else 3.0))
+                    try:
+                        self._schedule_data_save(delay=retry_delay)
+                    except Exception as retry_exc:
+                        logger.warning("[PrivateCompanion] 延迟保存重试调度失败: %s", retry_exc)
 
         try:
             self._data_save_task = asyncio.create_task(_runner())
