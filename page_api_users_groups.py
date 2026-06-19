@@ -7,6 +7,8 @@ from typing import Any
 from astrbot.api import logger
 from quart import request
 
+from .helpers import _safe_int
+
 
 class PrivateCompanionPageApiUsersGroupsMixin:
     async def list_users(self) -> dict[str, Any]:
