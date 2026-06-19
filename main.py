@@ -302,7 +302,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.0.7",
+    "4.0.8",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -561,6 +561,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.enable_humanized_states = self._cfg_bool(c, "enable_humanized_states", True)
         self.enable_cycle_state = self._cfg_bool(c, "enable_cycle_state", True)
         self.humanized_state_intensity = self._cfg_int(c, "humanized_state_intensity", 50, 0, 100)
+        self.enable_rest_reply_simulation = self._cfg_bool(c, "enable_rest_reply_simulation", False)
+        self.rest_reply_mode = self._cfg_str(c, "rest_reply_mode", "probability", "probability").strip().lower()
+        if self.rest_reply_mode in {"model", "模型", "llm_judge", "llm-judge"}:
+            self.rest_reply_mode = "llm"
+        if self.rest_reply_mode not in {"probability", "llm"}:
+            self.rest_reply_mode = "probability"
+        self.rest_reply_probability = self._cfg_int(c, "rest_reply_probability", 18, 0, 100) / 100.0
+        self.rest_reply_llm_threshold = self._cfg_int(c, "rest_reply_llm_threshold", 65, 0, 100)
+        self.rest_wakeup_provider_id = self._cfg_str(c, "REST_WAKEUP_PROVIDER_ID", "")
         self.enable_enhanced_dreams = self._cfg_bool(c, "enable_enhanced_dreams", False)
         self.dream_diary_provider_id = self._cfg_str(
             c,
@@ -1598,7 +1607,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 sent_tts_chain = False
                 normalized_segment = segment
                 normalizer = getattr(self, "_normalize_tts_tags", None)
-                if callable(normalizer) and re.search(r"</?t{2,}s\b", normalized_segment, flags=re.IGNORECASE):
+                if callable(normalizer) and re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", normalized_segment, flags=re.IGNORECASE):
                     try:
                         normalized_segment = str(normalizer(normalized_segment) or normalized_segment).strip()
                     except Exception:
@@ -1609,7 +1618,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 ):
                         processor = getattr(self, "_process_tts_tags", None)
                         if callable(processor):
-                            fallback_plain = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized_segment, flags=re.IGNORECASE).strip()
+                            fallback_plain = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", normalized_segment, flags=re.IGNORECASE).strip()
                             chain = await processor(normalized_segment, event, fallback_plain=fallback_plain)
                             if chain:
                                 hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(chain))
@@ -1622,7 +1631,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                                     await event.send(self._build_result_from_chain(chain))
                                 sent_tts_chain = True
                 if not sent_tts_chain:
-                    outbound = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized_segment, flags=re.IGNORECASE).strip() or segment
+                    outbound = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", normalized_segment, flags=re.IGNORECASE).strip() or segment
                     hit = self._forbidden_recall_hit(outbound)
                     if hit:
                         logger.warning("[PrivateCompanion] 分段剩余片段命中违禁词，停止发送: word=%s", _single_line(hit, 40))
@@ -2142,6 +2151,120 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             approx_tokens,
         )
 
+    def _rest_reply_sleep_context(self) -> tuple[bool, dict[str, Any], dict[str, Any] | None, str]:
+        try:
+            current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+            runtime = self._refresh_sleep_runtime_state(current_item)
+        except Exception:
+            current_item = None
+            runtime = self._sleep_runtime_state()
+        phase = str((runtime or {}).get("phase") or "")
+        sleepy_item = self._is_sleepy_plan_item(current_item) if isinstance(current_item, dict) else False
+        sleeping = phase in {"falling_asleep", "light_sleep", "sleeping_again"} or sleepy_item
+        if phase in {"woken", "natural_wake", "awake"} and not sleepy_item:
+            sleeping = False
+        schedule_text = self._format_plan_item_for_prompt(current_item) if isinstance(current_item, dict) else ""
+        return sleeping, runtime if isinstance(runtime, dict) else {}, current_item, _single_line(schedule_text, 220)
+
+    @staticmethod
+    def _rest_reply_boundary_score(text: str) -> tuple[int, str]:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return 0, "empty"
+        if re.search(r"别(回|理|吵|发|找)|不要(回|理|吵|发|找)|安静|闭嘴|先别|别醒|继续睡|不用回|不用理", compact):
+            return -100, "user_asks_quiet"
+        if re.search(r"救命|出事|急|紧急|快醒|醒醒|快回|马上回|重要|不舒服|难受|害怕|崩溃|报警|医院|摔|痛", compact):
+            return 100, "urgent_or_explicit_wakeup"
+        if re.search(r"醒了吗|睡了吗|在吗|能不能回|可以回吗|想你|陪我|听我说", compact):
+            return 72, "soft_wakeup_request"
+        return 0, "normal"
+
+    async def _rest_reply_llm_score(
+        self,
+        *,
+        text: str,
+        schedule_text: str,
+        runtime: dict[str, Any],
+        is_private_chat: bool,
+    ) -> tuple[int, str]:
+        prompt = f"""
+你是一个睡眠/休息中是否需要醒来回复的判定器。请只输出 JSON。
+
+背景：
+- Bot 当前日程处于睡眠、午休或休息段。
+- 当前睡眠阶段：{_single_line(runtime.get("label") or runtime.get("phase"), 40) or "未知"}。
+- 当前日程：{schedule_text or "未知"}。
+- 会话类型：{"私聊" if is_private_chat else "群聊"}。
+
+判断原则：
+- 只有用户明显需要回应、明确叫醒、情绪/安全/紧急需要支持，或继续不回复会显得很不合适时，才建议醒来。
+- 普通闲聊、表情、无明确对象的群聊、轻微玩笑、可等到醒来再说的内容，应保持睡眠不回复。
+- 如果用户明确说不要打扰、别回、继续睡，必须不回复。
+
+用户消息：
+{_single_line(text, 800)}
+
+只输出 JSON：
+{{"score": 0-100, "should_reply": true/false, "reason": "一句话原因"}}
+""".strip()
+        raw = await self._llm_call(
+            prompt,
+            max_tokens=180,
+            provider_id=self._task_provider(self.rest_wakeup_provider_id, self.response_review_provider_id, self.llm_provider_id),
+            task="rest_wakeup_judge",
+        )
+        payload = self._extract_json_payload(raw or "")
+        if not isinstance(payload, dict):
+            return 0, "llm_invalid"
+        try:
+            score = max(0, min(100, int(float(payload.get("score", 0)))))
+        except (TypeError, ValueError):
+            score = 0
+        should_reply = bool(payload.get("should_reply"))
+        reason = _single_line(payload.get("reason"), 80) or "llm"
+        if should_reply and score < self.rest_reply_llm_threshold:
+            score = self.rest_reply_llm_threshold
+        return score, reason
+
+    async def _should_reply_during_rest(self, event: AstrMessageEvent, *, is_private_chat: bool) -> tuple[bool, str]:
+        if not self.enable_rest_reply_simulation:
+            return True, "disabled"
+        sleeping, runtime, _current_item, schedule_text = self._rest_reply_sleep_context()
+        if not sleeping:
+            return True, "not_sleeping"
+        text = _single_line(getattr(event, "message_str", ""), 800)
+        boundary_score, boundary_reason = self._rest_reply_boundary_score(text)
+        if boundary_score < 0:
+            return False, boundary_reason
+        if boundary_score >= max(1, self.rest_reply_llm_threshold):
+            return True, boundary_reason
+        mode = getattr(self, "rest_reply_mode", "probability")
+        if mode == "llm":
+            score, reason = await self._rest_reply_llm_score(
+                text=text,
+                schedule_text=schedule_text,
+                runtime=runtime,
+                is_private_chat=is_private_chat,
+            )
+            return score >= self.rest_reply_llm_threshold, f"llm:{score}/{self.rest_reply_llm_threshold}:{reason}"
+        probability = max(0.0, min(1.0, float(getattr(self, "rest_reply_probability", 0.0) or 0.0)))
+        hit = random.random() <= probability
+        return hit, f"probability:{probability:.2f}"
+
+    def _stop_reply_for_rest_gate(self, event: AstrMessageEvent, reason: str) -> None:
+        logger.info(
+            "[PrivateCompanion] 睡眠/休息回复闸门拦截本轮被动回复: session=%s reason=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            _single_line(reason, 120),
+        )
+        empty_result = self._build_result_from_chain([])
+        try:
+            empty_result.stop_event()
+        except Exception:
+            pass
+        event.set_result(empty_result)
+        event.stop_event()
+
     @filter.on_llm_request()
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM 请求前注入陪伴状态、群聊上下文、工具边界和合并消息阅读上下文。"""
@@ -2151,6 +2274,20 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return
         self._remember_external_llm_request_for_token_stats(event, req)
         is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
+        rest_allowed, rest_reason = await self._should_reply_during_rest(event, is_private_chat=is_private_chat)
+        if not rest_allowed:
+            self._stop_reply_for_rest_gate(event, rest_reason)
+            return
+        if rest_reason not in {"disabled", "not_sleeping"}:
+            try:
+                setattr(event, "private_companion_rest_reply_gate_reason", rest_reason)
+            except Exception:
+                pass
+            logger.info(
+                "[PrivateCompanion] 睡眠/休息回复闸门放行本轮被动回复: session=%s reason=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(rest_reason, 120),
+            )
         self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
         group_id_for_lock = ""
         if not is_private_chat and self.enable_group_companion:

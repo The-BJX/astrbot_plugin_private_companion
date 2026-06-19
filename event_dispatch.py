@@ -263,8 +263,9 @@ _PROMPT_MODULE_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "environment.lightweight": ("轻量环境", "短句被动回复使用的时间和平台边界，避免完全丢失当前语境。"),
     "environment.perception": ("环境感知", "完整被动回复使用的时间、日期、平台和模型环境边界。"),
     "environment.request": ("请求级环境感知", "状态总注入关闭时仍可单独补充的时间、日期、平台和消息媒介边界。"),
-    "tts.rule": ("TTS 基础规则", "告诉模型本轮是否可以使用 <tts> 标签、目标语种、双语展示和格式示例。"),
-    "tts.frequency": ("TTS 频率控制", "自动语音概率未命中时的软约束，要求默认不用语音但保留用户明确请求的优先级。"),
+    "tts.rule": ("TTS 基础规则", "告诉模型本轮是否可以使用插件私有语音标签、目标语种、双语展示和格式示例。"),
+    "tts.frequency": ("TTS 频率控制", "自动语音概率未命中时的软约束；没有用户明确请求时要求本轮必须纯文字，不主动使用任何语音标签。"),
+    "tts.block": ("TTS 强约束禁用", "强约束模式下概率未命中或会话冷却时的反向规则，要求本轮禁止任何语音内容。"),
     "tts.force": ("TTS 主用户倾向", "主用户或明确 @ 主用户时的语音倾向提示，仍由模型按语境判断。"),
     "tts.user_request": ("用户语音请求", "用户明确想听语音/声音时的顺应规则，不受自动语音概率限制。"),
     "capability.boundary": ("能力边界", "群聊中防止模型承诺现实操作、网络操作或无法执行的代办。"),
@@ -603,6 +604,16 @@ class EventDispatchMixin:
                 root[kind] = items
             items.insert(0, item)
             del items[5:]
+            if kind == "request" and any(
+                isinstance(module, dict) and _single_line(module.get("key"), 100).startswith("tts.")
+                for module in item.get("modules", [])
+            ):
+                tts_items = root.setdefault("tts", [])
+                if not isinstance(tts_items, list):
+                    tts_items = []
+                    root["tts"] = tts_items
+                tts_items.insert(0, item)
+                del tts_items[8:]
         try:
             self._schedule_data_save(delay=2.0)
         except Exception:
@@ -2549,7 +2560,7 @@ class EventDispatchMixin:
         if not normalized:
             return []
         tts_normalizer = getattr(self, "_normalize_tts_tags", None)
-        if callable(tts_normalizer) and re.search(r"</?t{2,}s\b", normalized, flags=re.IGNORECASE):
+        if callable(tts_normalizer) and re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", normalized, flags=re.IGNORECASE):
             try:
                 normalized = str(tts_normalizer(normalized) or normalized).strip()
             except Exception:

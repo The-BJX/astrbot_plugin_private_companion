@@ -2880,6 +2880,63 @@
       "enable_humanized_states": true
     }
   },
+  "enable_rest_reply_simulation": {
+    "description": "启用休息回复闸门",
+    "type": "bool",
+    "hint": "开启后，当当前日程处于睡眠、午休或休息段时，普通被动回复会先经过休息闸门；未放行时静默不回复，避免睡眠中每条消息都醒来。",
+    "default": false,
+    "condition": {
+      "enable_humanized_states": true
+    }
+  },
+  "rest_reply_mode": {
+    "description": "休息回复判定模式",
+    "type": "string",
+    "default": "probability",
+    "options": ["probability", "llm"],
+    "labels": ["仅概率醒来", "模型判断是否醒来"],
+    "hint": "仅概率醒来：命中概率才回复；模型判断：由模型根据消息重要性、是否明确叫醒、情绪/安全需要等打分，达到阈值才回复。用户明确不要打扰会直接静默，紧急/明确叫醒会优先放行。",
+    "condition": {
+      "enable_rest_reply_simulation": true
+    }
+  },
+  "rest_reply_probability": {
+    "description": "休息中概率回复（%）",
+    "type": "int",
+    "hint": "休息回复判定模式为“仅概率醒来”时使用。数值越低，睡眠/休息中越少被普通消息叫醒。",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    },
+    "default": 18,
+    "condition": {
+      "enable_rest_reply_simulation": true
+    }
+  },
+  "rest_reply_llm_threshold": {
+    "description": "模型醒来阈值",
+    "type": "int",
+    "hint": "休息回复判定模式为“模型判断是否醒来”时使用。模型会输出 0-100 分，达到该阈值才醒来回复；建议 60-75。",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    },
+    "default": 65,
+    "condition": {
+      "enable_rest_reply_simulation": true
+    }
+  },
+  "REST_WAKEUP_PROVIDER_ID": {
+    "description": "休息醒来判断模型ID",
+    "type": "string",
+    "hint": "可选。用于休息中是否醒来回复的轻量判断模型；留空时优先使用回复审校模型，再回退主模型。",
+    "default": "",
+    "condition": {
+      "enable_rest_reply_simulation": true
+    }
+  },
   "enable_enhanced_dreams": {
     "description": "启用强化梦境生成",
     "type": "bool",
@@ -3272,7 +3329,18 @@
     "default": "global",
     "options": ["global", "legacy"],
     "labels": ["全局频控：间隔+概率控制三种路径", "旧版行为：按各路径原逻辑触发"],
-    "hint": "选择频率规则。全局频控用概率影响 LLM 是否倾向输出 TTS，并控制 hybrid 自动语音和 convert 转换；显式 <tts> 不再被概率剥离，只受 provider 和会话间隔保护。旧版行为按各路径旧逻辑触发。",
+    "hint": "选择频率规则。全局频控用概率影响 LLM 是否倾向输出 TTS，并控制 hybrid 自动语音和 convert 转换；弱约束下显式 <tts> 不再被概率剥离，只受 provider 和会话间隔保护；强约束下按约束强度硬拦。旧版行为按各路径旧逻辑触发。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "tts_constraint_mode": {
+    "description": "TTS约束强度",
+    "type": "string",
+    "default": "weak",
+    "options": ["weak", "strong"],
+    "labels": ["弱约束：提示词引导，保留模型决定权", "强约束：未命中/冷却内硬禁语音"],
+    "hint": "仅全局频控生效。弱约束保持当前行为：概率未命中时用更明确的提示要求模型默认不用语音，显式 <pc_tts>/<tts> 仍交给插件处理。强约束会在概率未命中或会话冷却内注入“本轮禁止语音”的反向提示词，并在发送前阻止任何语音生成。",
     "condition": {
       "enable_tts_enhancement": true
     }
@@ -3313,7 +3381,7 @@
     "default": 20,
     "min": 0,
     "max": 100,
-    "hint": "仅全局频控生效。作为私聊/群聊未覆盖时的默认触发概率；概率未命中时会提示 LLM 默认不要输出 <tts>，但不会剥离 LLM 已输出的 <tts>。",
+    "hint": "仅全局频控生效。作为私聊/群聊未覆盖时的默认触发概率；概率未命中时会提示 LLM 在没有用户明确语音请求时必须纯文字，不主动输出 <pc_tts>、<tts> 或等价语音内容；弱约束不会剥离 LLM 已输出的语音标签。",
     "condition": {
       "enable_tts_enhancement": true
     }

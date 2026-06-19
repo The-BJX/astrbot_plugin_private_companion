@@ -960,11 +960,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             }
 
         result: dict[str, Any] = {}
-        for kind in ("proactive", "passive", "request"):
+        for kind in ("tts", "proactive", "passive", "request"):
             items = raw.get(kind) if isinstance(raw.get(kind), list) else []
-            normalized = [entry for entry in (normalize_item(item) for item in items[:5]) if entry]
+            limit = 8 if kind == "tts" else 5
+            normalized = [entry for entry in (normalize_item(item) for item in items[:limit]) if entry]
             result[kind] = normalized
-        result["total"] = len(result.get("proactive", [])) + len(result.get("passive", [])) + len(result.get("request", []))
+        result["total"] = (
+            len(result.get("tts", []))
+            + len(result.get("proactive", []))
+            + len(result.get("passive", []))
+            + len(result.get("request", []))
+        )
         return result
 
     def _sanitize_troubleshooting_test_result(self, result: dict[str, Any]) -> dict[str, Any]:
@@ -3243,6 +3249,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "tts_conversion_provider_id",
             "tts_extra_prompt",
             "tts_frequency_control_mode",
+            "tts_constraint_mode",
             "tts_session_min_interval_seconds",
             "tts_private_min_interval_seconds",
             "tts_group_min_interval_seconds",
@@ -3267,6 +3274,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
             "humanized_state_intensity",
+            "enable_rest_reply_simulation",
+            "rest_reply_mode",
+            "rest_reply_probability",
+            "rest_reply_llm_threshold",
+            "REST_WAKEUP_PROVIDER_ID",
             "check_interval_seconds",
             "idle_minutes",
             "min_interval_minutes",
@@ -3996,12 +4008,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             raw = float(value or 0)
             setattr(self.plugin, key, max(0.0, min(1.0, raw / 100.0 if raw > 1 else raw)))
             return
+        if key == "rest_reply_probability":
+            raw = float(value or 0)
+            setattr(self.plugin, key, max(0.0, min(1.0, raw / 100.0 if raw > 1 else raw)))
+            return
         tts_runtime_keys = {
             "tts_generation_mode",
             "tts_voice_language",
             "tts_conversion_provider_id",
             "tts_extra_prompt",
             "tts_frequency_control_mode",
+            "tts_constraint_mode",
             "tts_session_min_interval_seconds",
             "tts_private_min_interval_seconds",
             "tts_group_min_interval_seconds",
@@ -4265,6 +4282,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "tts_conversion_provider_id",
             "tts_extra_prompt",
             "tts_frequency_control_mode",
+            "tts_constraint_mode",
             "tts_session_min_interval_seconds",
             "tts_private_min_interval_seconds",
             "tts_group_min_interval_seconds",
@@ -4289,6 +4307,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
             "humanized_state_intensity",
+            "enable_rest_reply_simulation",
+            "rest_reply_mode",
+            "rest_reply_probability",
+            "rest_reply_llm_threshold",
+            "REST_WAKEUP_PROVIDER_ID",
             "check_interval_seconds",
             "idle_minutes",
             "min_interval_minutes",
@@ -4511,6 +4534,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         if key == "worldview_adaptation_mode":
             mode = str(value or "auto").strip()
             return mode if mode in {"auto", "modern", "fantasy", "sci_fi", "custom", "off"} else "auto"
+        if key == "rest_reply_mode":
+            mode = str(value or "probability").strip().lower()
+            aliases = {
+                "概率": "probability",
+                "仅概率": "probability",
+                "仅概率醒来": "probability",
+                "模型": "llm",
+                "模型判断": "llm",
+                "模型判断是否醒来": "llm",
+                "model": "llm",
+                "llm_judge": "llm",
+            }
+            mode = aliases.get(mode, mode)
+            return mode if mode in {"probability", "llm"} else "probability"
+        if key == "REST_WAKEUP_PROVIDER_ID":
+            return str(value or "").strip()[:160]
         if key == "tts_generation_mode":
             mode = str(value or "hybrid").strip().lower()
             return mode if mode in {"hybrid", "direct", "convert"} else "hybrid"
@@ -4526,6 +4565,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             }
             mode = aliases.get(mode, mode)
             return mode if mode in {"global", "legacy"} else "global"
+        if key == "tts_constraint_mode":
+            mode = str(value or "weak").strip().lower()
+            aliases = {
+                "弱": "weak",
+                "弱约束": "weak",
+                "软": "weak",
+                "软约束": "weak",
+                "强": "strong",
+                "强约束": "strong",
+                "硬": "strong",
+                "硬约束": "strong",
+            }
+            mode = aliases.get(mode, mode)
+            return mode if mode in {"weak", "strong"} else "weak"
         if key == "tts_voice_language":
             lang = str(value or "ja").strip().lower()
             return lang if lang in {"ja", "zh", "en"} else "ja"
@@ -4665,12 +4718,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0, min(5, int(value)))
             except (TypeError, ValueError):
                 return 1
-        if key in {"tts_trigger_probability", "auto_voice_probability"}:
+        if key in {"tts_trigger_probability", "auto_voice_probability", "rest_reply_probability"}:
             try:
                 raw = float(value)
                 return max(0, min(100, int(round(raw * 100 if 0 <= raw <= 1 else raw))))
             except (TypeError, ValueError):
-                return 20
+                return 18 if key == "rest_reply_probability" else 20
         if key in {"tts_private_trigger_probability", "tts_group_trigger_probability"}:
             try:
                 raw = float(value)
@@ -4691,10 +4744,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0, min(100, int(round(raw * 100 if 0 <= raw <= 1 else raw))))
             except (TypeError, ValueError):
                 return 0
+        if key == "rest_reply_llm_threshold":
+            try:
+                return max(0, min(100, int(value)))
+            except (TypeError, ValueError):
+                return 65
         if key in {
             "check_interval_seconds",
             "daily_token_limit",
             "daily_token_soft_limit",
+            "rest_reply_llm_threshold",
             "idle_minutes",
             "min_interval_minutes",
             "max_daily_messages",
