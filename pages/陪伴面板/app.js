@@ -324,6 +324,7 @@ const featureMeta = {
   enable_holiday_perception: ["节假日感知", "识别工作日、周末、节假日和调休，影响生活节奏判断。"],
   enable_platform_perception: ["平台感知", "识别 QQ/平台、私聊/群聊、群号群名以及图片语音视频消息。"],
   enable_model_perception: ["模型感知", "识别当前会话 LLM、插件任务模型覆盖和视觉转述模型配置。"],
+  enable_worldview_perception: ["世界观适配感知", "把插件能力和生活语境转换成当前人设世界观说法，默认关闭，避免和 AstrBot 人设重复。"],
   enable_lunar_perception: ["农历感知", "可用时注入农历日期，辅助节日、生活氛围和日记语境。"],
   enable_solar_term_perception: ["节气感知", "注入当天或临近节气，让日程和表达更贴合时令。"],
   enable_almanac_perception: ["轻量黄历", "生成宜/忌氛围标签，默认关闭，避免玄学感太强。"],
@@ -450,6 +451,7 @@ const featureGroups = [
       "enable_holiday_perception",
       "enable_platform_perception",
       "enable_model_perception",
+      "enable_worldview_perception",
       "enable_lunar_perception",
       "enable_solar_term_perception",
       "enable_almanac_perception",
@@ -505,6 +507,7 @@ const embeddedFeatureParentByKey = {
   enable_holiday_perception: "enable_environment_perception",
   enable_platform_perception: "enable_environment_perception",
   enable_model_perception: "enable_environment_perception",
+  enable_worldview_perception: "enable_environment_perception",
   enable_lunar_perception: "enable_environment_perception",
   enable_solar_term_perception: "enable_environment_perception",
   enable_almanac_perception: "enable_environment_perception",
@@ -685,6 +688,7 @@ const configLabels = {
   enable_cycle_state: "生理周期模拟",
   worldview_adaptation_mode: "世界观适配模式",
   worldview_adaptation_prompt: "自定义世界观适配",
+  enable_worldview_perception: "世界观适配感知",
   environment_perception_timezone: "环境感知时区",
   holiday_country: "节假日地区",
   enable_holiday_perception: "节假日/工作日",
@@ -839,6 +843,7 @@ const configDescriptions = {
   enable_holiday_perception: "开启后会把节假日、调休和工作日判断注入环境感知。",
   enable_platform_perception: "开启后会识别平台、私聊/群聊和消息媒介类型。",
   enable_model_perception: "开启后会把当前会话 LLM、插件分项模型和视觉转述模型作为环境信息注入；只供 Bot 判断能力边界，不要求主动报告模型名。",
+  enable_worldview_perception: "开启后才会把世界观适配片段注入被动回复。若 AstrBot 人设已经写了世界观，建议关闭以避免重复。",
   enable_lunar_perception: "开启后在依赖可用时注入农历日期。",
   enable_solar_term_perception: "开启后注入当天或近三天节气提示。",
   enable_almanac_perception: "开启后生成轻量宜忌氛围标签，只作表达参考。",
@@ -1102,7 +1107,7 @@ const featureSettingGroups = {
   enable_forbidden_word_recall: ["recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
-  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
+  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
   enable_holiday_perception: ["holiday_country"],
   enable_platform_perception: [],
   enable_model_perception: [],
@@ -1250,7 +1255,7 @@ const featureSettingSections = {
     {
       title: "基础环境",
       note: "时间、平台、模型和消息媒介感知。",
-      keys: ["environment_perception_timezone", "enable_platform_perception", "enable_model_perception"],
+      keys: ["environment_perception_timezone", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception"],
     },
     {
       title: "日期与时令",
@@ -2462,18 +2467,37 @@ function troubleshootingChainTestMarkup(results) {
       text: "实际调用当前会话 TTS provider 并检查音频文件",
       button: "测试 TTS 生成",
     },
+    {
+      type: "proactive_message",
+      title: "主动消息",
+      text: "预约 1 分钟后的临时主动私聊，检查生成、复核、发送和历史归档",
+      button: "测试主动消息",
+    },
   ];
   return tests.map((test) => {
     const result = results?.[test.type] || {};
     const ok = Boolean(result.ok);
+    const pending = Boolean(result.pending);
     const hasResult = Boolean(result.ran_at || result.ran_at_text || result.error || result.detail);
-    const status = hasResult ? (ok ? "ok" : "error") : "info";
+    const status = hasResult ? (pending ? "info" : ok ? "ok" : "error") : "info";
     const meta = [
       result.backend || result.provider || "",
       result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
       result.file_size ? `${formatBytes(result.file_size)}` : "",
       result.ran_at_text || "",
     ].filter(Boolean).join(" · ");
+    const steps = Array.isArray(result.steps) ? result.steps : [];
+    const stepsMarkup = steps.length ? `
+      <details class="chain-test-steps">
+        <summary>查看链路阶段</summary>
+        ${steps.map((step) => `
+          <div class="${escapeHtml(step.status || "info")}">
+            <b>${escapeHtml(step.name || "-")}</b>
+            <span>${escapeHtml(step.detail || "")}</span>
+          </div>
+        `).join("")}
+      </details>
+    ` : "";
     return `
       <section class="troubleshooting-chain-test ${escapeHtml(status)}">
         <div>
@@ -2481,6 +2505,8 @@ function troubleshootingChainTestMarkup(results) {
           <p>${escapeHtml(hasResult ? (result.detail || result.error || test.text) : test.text)}</p>
           ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
           ${result.path ? `<small class="path">${escapeHtml(result.path)}</small>` : ""}
+          ${result.text_preview ? `<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>` : ""}
+          ${stepsMarkup}
         </div>
         <button type="button" data-troubleshooting-test="${escapeHtml(test.type)}">${escapeHtml(test.button)}</button>
       </section>
@@ -2561,6 +2587,7 @@ function troubleshootingPromptInjectionMarkup(data) {
   const groups = [
     ["proactive", "主动消息注入", "主动主链提示词"],
     ["passive", "被动回复注入", "system prompt 片段"],
+    ["request", "请求附加规则", "TTS / 工具 / 环境 / 群聊边界"],
   ];
   return groups.map(([key, title, note]) => {
     const items = Array.isArray(data?.[key]) ? data[key] : [];
@@ -6166,17 +6193,18 @@ function renderConfig() {
 
 function renderModuleSettings() {
   const settings = state.overview?.settings || {};
+  const formValues = { ...settings, ...(state.featureDraft || {}) };
   renderModuleSummary(settings);
   renderCurrentPersonaStatus(settings);
-  fillForm("#roleplayProfileForm", settings);
-  fillForm("#privateAliasForm", settings);
-  fillForm("#quickModuleForm", settings);
-  fillForm("#environmentModuleForm", settings);
-  fillForm("#privateModuleForm", settings);
-  fillForm("#groupModuleForm", settings);
-  fillForm("#worldbookModuleForm", settings);
-  fillForm("#memoryModuleForm", settings);
-  fillForm("#longTermModuleForm", settings);
+  fillForm("#roleplayProfileForm", formValues);
+  fillForm("#privateAliasForm", formValues);
+  fillForm("#quickModuleForm", formValues);
+  fillForm("#environmentModuleForm", formValues);
+  fillForm("#privateModuleForm", formValues);
+  fillForm("#groupModuleForm", formValues);
+  fillForm("#worldbookModuleForm", formValues);
+  fillForm("#memoryModuleForm", formValues);
+  fillForm("#longTermModuleForm", formValues);
   setPrivateReadingConfigVisible(isPrivateReadingAvailable());
   const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
   if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
@@ -7998,6 +8026,12 @@ const featureDetailGuides = {
     enabled: "Bot 能知道当前文本模型和视觉转述模型的大致来源，遇到不同配置时更容易判断自己的能力边界。",
     disabled: "Bot 不再获得模型环境信息，只按普通对话上下文回复。",
   },
+  enable_worldview_perception: {
+    summary: "把插件能力、生活片段和聊天场景转换成当前人设世界观能自然理解的说法。",
+    trigger: "完整被动回复的环境感知注入时。",
+    enabled: "会额外注入世界观适配片段，例如把现实能力映射为奇幻/科幻/自定义世界里的表达。",
+    disabled: "不再额外注入世界观适配，适合 AstrBot 人设里已经写了完整世界观的情况；默认关闭以避免重复。",
+  },
   enable_lunar_perception: {
     summary: "在依赖可用时加入农历日期，用于节日、日记和生活氛围。",
     trigger: "环境感知刷新时。",
@@ -9282,7 +9316,11 @@ document.addEventListener("click", async (event) => {
         [testType]: result,
       };
       renderTroubleshooting();
-      showToast(result.ok ? "链路测试通过" : `链路测试失败：${result.error || "未返回有效结果"}`, result.ok ? "success" : "error");
+      if (result.pending) {
+        showToast("主动消息链路测试已预约，约 1 分钟后刷新查看结果", "success");
+      } else {
+        showToast(result.ok ? "链路测试通过" : `链路测试失败：${result.error || "未返回有效结果"}`, result.ok ? "success" : "error");
+      }
     } catch (error) {
       showToast(`链路测试失败：${error.message}`, "error");
     } finally {

@@ -559,6 +559,8 @@ class ProactiveEngineMixin:
     def _should_send(self, user: dict[str, Any]) -> tuple[bool, str]:
         self._recover_stale_proactive_sending(user)
         user_id = str(user.get("user_id") or user.get("id") or "")
+        planned_source = str(user.get("planned_proactive_source") or "")
+        is_troubleshooting = planned_source == "troubleshooting"
         if not self._user_enabled_for_proactive(user_id, user):
             self._clear_pending_proactive_plan(user)
             return False, "私聊对象未启用"
@@ -569,7 +571,7 @@ class ProactiveEngineMixin:
         if self._simulation_active(user):
             return self._should_send_simulation(user)
         daily_limit = self._effective_user_daily_limit(user)
-        if daily_limit <= 0:
+        if not is_troubleshooting and daily_limit <= 0:
             reason_formatter = getattr(self, "_format_daily_limit_disabled_reason", None)
             if callable(reason_formatter):
                 return False, reason_formatter(user)
@@ -577,21 +579,27 @@ class ProactiveEngineMixin:
         now = _now_ts()
         due_timer_active = self._has_due_llm_timer(user, now=now)
         if (
+            not is_troubleshooting
+            and
             self._user_rest_silence_until(user, now=now) > now
             and not due_timer_active
-            and str(user.get("planned_proactive_source") or "") != "timer"
+            and planned_source != "timer"
         ):
             return False, "用户明确休息中"
-        if self._is_quiet_time() and not self._can_send_insomnia_night_message(user):
+        if not is_troubleshooting and self._is_quiet_time() and not self._can_send_insomnia_night_message(user):
             return False, "免打扰时段"
         rel_state = user.get("relationship_state")
         relationship_blocked = (
+            not is_troubleshooting
+            and
             self.enable_relationship_state_machine
             and isinstance(rel_state, dict)
             and rel_state.get("mode") == "backoff"
             and _safe_float(rel_state.get("backoff_until"), 0) > _now_ts()
         )
         emotion_blocked = (
+            not is_troubleshooting
+            and
             bool(getattr(self, "enable_emotion_simulation", True))
             and isinstance(rel_state, dict)
             and rel_state.get("mode") in {"hurt", "refusing"}
@@ -614,19 +622,22 @@ class ProactiveEngineMixin:
             return False, adjusted_reason
 
         planned_reason = str(user.get("planned_proactive_reason") or "")
-        if due_timer_active and str(user.get("planned_proactive_source") or "") != "timer":
+        if due_timer_active and planned_source != "timer":
             self._promote_due_llm_timer_plan(user, now=now)
             planned_reason = str(user.get("planned_proactive_reason") or "")
+            planned_source = str(user.get("planned_proactive_source") or planned_source)
         next_at = _safe_float(user.get("next_proactive_at"), 0)
         if next_at <= 0:
             self._schedule_next_proactive(user, now=now)
             return False, "已安排下一次候选主动时间"
-        if self._promote_earlier_daily_greeting_event(user, now=now):
+        if not is_troubleshooting and self._promote_earlier_daily_greeting_event(user, now=now):
             planned_reason = str(user.get("planned_proactive_reason") or "")
             next_at = _safe_float(user.get("next_proactive_at"), 0)
         if (
+            not is_troubleshooting
+            and
             not due_timer_active
-            and str(user.get("planned_proactive_source") or "") != "timer"
+            and planned_source != "timer"
             and self._in_llm_timer_silence_window(user, now=now)
         ):
             self._remember_silenced_plan_for_timer(user, now=now)
@@ -634,18 +645,18 @@ class ProactiveEngineMixin:
             return False, "用户预约静默窗口"
         if now < next_at:
             return False, "未到候选主动时间"
-        if self._is_proactive_plan_stale(user, now=now) and not due_timer_active:
+        if not is_troubleshooting and self._is_proactive_plan_stale(user, now=now) and not due_timer_active:
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(1, 4))
             return False, "候选主动计划已过期,已重新安排"
 
         self._reset_daily_counter_if_needed(user)
-        if _safe_int(user.get("sent_today"), 0) >= daily_limit:
+        if not is_troubleshooting and _safe_int(user.get("sent_today"), 0) >= daily_limit:
             if not due_timer_active:
                 self._schedule_next_proactive(user, now=now, delay_hours=(8, 16))
             return False, "已达每日上限"
         idle_minutes = self._effective_user_idle_minutes(user)
-        if not due_timer_active and now - _safe_float(user.get("last_seen"), 0) < idle_minutes * 60:
+        if not is_troubleshooting and not due_timer_active and now - _safe_float(user.get("last_seen"), 0) < idle_minutes * 60:
             idle_limit = (
                 self._effective_user_greeting_idle_minutes(user) * 60
                 if self._is_greeting_reason(planned_reason)
@@ -658,26 +669,26 @@ class ProactiveEngineMixin:
         min_interval = self._effective_min_interval_seconds(user)
         if self._is_greeting_reason(planned_reason) and self._private_user_role(user) != "friend":
             min_interval = min(min_interval, self._greeting_min_interval_seconds(planned_reason))
-        if not due_timer_active and now - _safe_float(user.get("last_sent"), 0) < min_interval:
+        if not is_troubleshooting and not due_timer_active and now - _safe_float(user.get("last_sent"), 0) < min_interval:
             if self._is_sticky_greeting_reason(planned_reason):
                 self._reschedule_greeting_within_window(user, planned_reason, now=now)
             return False, "发送间隔不足"
         planned_action = str(user.get("planned_proactive_action") or "message")
         normalizer = getattr(self, "_normalize_existing_plan_for_emotion", None)
-        if callable(normalizer):
+        if not is_troubleshooting and callable(normalizer):
             emotion_note = normalizer(user, now=now)
             if emotion_note:
                 planned_reason = str(user.get("planned_proactive_reason") or planned_reason)
                 planned_action = str(user.get("planned_proactive_action") or planned_action or "message")
                 if _safe_float(user.get("next_proactive_at"), 0) > now + 1:
                     return False, emotion_note
-        if not self._friend_can_receive_proactive_reason(user, planned_reason, planned_action):
+        if not is_troubleshooting and not self._friend_can_receive_proactive_reason(user, planned_reason, planned_action):
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
             return False, "朋友关系不接收敏感主动"
         if due_timer_active:
             return True, "ok(timer)"
-        if not self._is_reason_allowed_now(planned_reason):
+        if not is_troubleshooting and not self._is_reason_allowed_now(planned_reason):
             if self._is_sticky_greeting_reason(planned_reason):
                 self._reschedule_greeting_within_window(user, planned_reason, now=now)
                 return False, "问候仍在窗口内,稍后再试"
@@ -697,12 +708,12 @@ class ProactiveEngineMixin:
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
             return False, "动作不可用或媒体额度不足"
-        if self._planned_proactive_recently_repeated(user):
+        if not is_troubleshooting and self._planned_proactive_recently_repeated(user):
             self._mark_planned_candidate_status(user, "blocked", "近期主题过于相似")
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
             return False, "近期主动主题过于相似"
-        if self._planned_event_exceeds_daypart_cap(user, planned_reason, next_at):
+        if not is_troubleshooting and self._planned_event_exceeds_daypart_cap(user, planned_reason, next_at):
             self._clear_pending_proactive_plan(user)
             delay = self._friend_proactive_spread_delay_hours(user, now=now)
             if delay is None:
@@ -3659,7 +3670,8 @@ class ProactiveEngineMixin:
         planned_action = str(user.get("planned_proactive_action") or "message")
         planned_motive = _single_line(user.get("planned_proactive_motive"), 140)
         due_timer_active = self._has_due_llm_timer(user)
-        reason = planned_reason if planned_reason and (due_timer_active or self._is_reason_allowed_now(planned_reason)) else ""
+        troubleshooting_active = str(user.get("planned_proactive_source") or "") == "troubleshooting"
+        reason = planned_reason if planned_reason and (troubleshooting_active or due_timer_active or self._is_reason_allowed_now(planned_reason)) else ""
         if not reason:
             reason, _ = self._choose_proactive_message(user, name, planned_reason)
             planned_motive = self._choose_proactive_motive(reason, user, action=planned_action)

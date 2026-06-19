@@ -553,6 +553,8 @@ class PrivateReadingMixin:
         inbound_text: str = "",
         user: dict[str, Any] | None = None,
     ) -> str:
+        if not getattr(self, "enable_jm_cosmos_integration", False):
+            return ""
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return ""
         if not getattr(self, "enable_private_reading_preference_influence", True):
@@ -941,6 +943,8 @@ class PrivateReadingMixin:
         inbound_text: str = "",
         user: dict[str, Any] | None = None,
     ) -> str:
+        if not getattr(self, "enable_jm_cosmos_integration", False):
+            return ""
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return ""
         text = str(inbound_text or "")
@@ -1141,6 +1145,8 @@ class PrivateReadingMixin:
         inbound_text: str,
         user: dict[str, Any] | None = None,
     ) -> str:
+        if not getattr(self, "enable_jm_cosmos_integration", False):
+            return ""
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return ""
         text = str(inbound_text or "")

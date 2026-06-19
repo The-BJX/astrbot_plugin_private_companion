@@ -262,6 +262,18 @@ _PROMPT_MODULE_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "timer.scheduling": ("主动预约", "允许模型在合适时隐藏预约下一次主动开口。"),
     "environment.lightweight": ("轻量环境", "短句被动回复使用的时间和平台边界，避免完全丢失当前语境。"),
     "environment.perception": ("环境感知", "完整被动回复使用的时间、日期、平台和模型环境边界。"),
+    "environment.request": ("请求级环境感知", "状态总注入关闭时仍可单独补充的时间、日期、平台和消息媒介边界。"),
+    "tts.rule": ("TTS 基础规则", "告诉模型本轮是否可以使用 <tts> 标签、目标语种、双语展示和格式示例。"),
+    "tts.frequency": ("TTS 频率控制", "自动语音概率未命中时的软约束，要求默认不用语音但保留用户明确请求的优先级。"),
+    "tts.force": ("TTS 主用户倾向", "主用户或明确 @ 主用户时的语音倾向提示，仍由模型按语境判断。"),
+    "tts.user_request": ("用户语音请求", "用户明确想听语音/声音时的顺应规则，不受自动语音概率限制。"),
+    "capability.boundary": ("能力边界", "群聊中防止模型承诺现实操作、网络操作或无法执行的代办。"),
+    "tools.atrelay": ("跨群转述工具", "用户可能要转告、私聊、@ 群友时注入的工具使用说明。"),
+    "tools.qzone": ("QQ 空间工具", "用户提到空间、说说、动态等场景时注入的工具使用说明。"),
+    "group.persona_denoise": ("群聊人格降噪", "群聊回复时降低私聊腔、过度亲密和状态外露。"),
+    "group.context": ("群聊上下文", "群聊回复时补充群氛围、当前发言者、最近话题和连续补充内容。"),
+    "identity.non_target": ("非目标私聊防串", "私聊对象不是主陪伴用户时防止套用专属关系和记忆。"),
+    "forward.message": ("合并转发上下文", "合并转发、聊天记录或引用卡片进入回复时注入的阅读摘要。"),
 }
 
 _PROMPT_MODULE_PREFIX_DESCRIPTIONS: tuple[tuple[str, tuple[str, str]], ...] = (
@@ -555,7 +567,7 @@ class EventDispatchMixin:
     ) -> None:
         content = str(text or "").strip()
         kind = _single_line(kind, 20) or "unknown"
-        if kind not in {"passive", "proactive"} or not content:
+        if kind not in {"passive", "proactive", "request"} or not content:
             return
         now = _now_ts()
         max_content = 12000

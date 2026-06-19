@@ -1290,10 +1290,30 @@ class ForwardMessageMixin:
         context = await self._format_forward_message_context_for_prompt(event, req)
         if context:
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{context}".strip()
+            recorder = getattr(self, "_record_request_prompt_fragment", None)
+            if callable(recorder):
+                await recorder(
+                    event,
+                    title="合并转发上下文注入",
+                    key="forward.message",
+                    text=context,
+                    source="forward_message",
+                    mode="forward",
+                )
             return
         rich_card_context = await self._format_reply_rich_card_context_for_prompt(event)
         if rich_card_context:
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{rich_card_context}".strip()
+            recorder = getattr(self, "_record_request_prompt_fragment", None)
+            if callable(recorder):
+                await recorder(
+                    event,
+                    title="引用卡片上下文注入",
+                    key="forward.message",
+                    text=rich_card_context,
+                    source="forward_message",
+                    mode="rich_card",
+                )
         elif should_log_probe:
             logger.info("[PrivateCompanion] 合并消息请求未生成上下文: text=%s", message_text or "(empty)")
 

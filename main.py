@@ -531,6 +531,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.holiday_country = self._cfg_str(c, "holiday_country", "CN", "CN").upper()
         self.enable_platform_perception = self._cfg_bool(c, "enable_platform_perception", True)
         self.enable_model_perception = self._cfg_bool(c, "enable_model_perception", True)
+        self.enable_worldview_perception = self._cfg_bool(c, "enable_worldview_perception", False)
         self.enable_lunar_perception = self._cfg_bool(c, "enable_lunar_perception", True)
         self.enable_solar_term_perception = self._cfg_bool(c, "enable_solar_term_perception", True)
         self.enable_almanac_perception = self._cfg_bool(c, "enable_almanac_perception", False)
@@ -993,7 +994,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         os.makedirs(self.data_dir, exist_ok=True)
         self._patch_livingmemory_processor_compat()
-        self._disable_integrated_features_when_external_plugins_present()
+        self._report_integrated_feature_conflicts()
         self.data_file = os.path.join(self.data_dir, "companions.json")
         self._data_lock = asyncio.Lock()
         self._conversation_db_lock = asyncio.Lock()
@@ -1805,6 +1806,51 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         environment_injection = await self._format_environment_perception(event)
         if environment_injection:
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{environment_injection}".strip()
+            await self._record_request_prompt_fragment(
+                event,
+                title="请求级环境感知注入",
+                key="environment.request",
+                text=environment_injection,
+                source="environment",
+            )
+
+    async def _record_request_prompt_fragment(
+        self,
+        event: AstrMessageEvent,
+        *,
+        title: str,
+        key: str,
+        text: str,
+        source: str = "",
+        mode: str = "",
+        priority: int = 50,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        recorder = getattr(self, "_record_prompt_injection_snapshot", None)
+        content = str(text or "").strip()
+        if not callable(recorder) or not content:
+            return
+        await recorder(
+            kind="request",
+            session=_single_line(getattr(event, "unified_msg_origin", ""), 160) or self._event_scope_key(event),
+            title=title,
+            text=content,
+            mode=mode,
+            modules=[
+                {
+                    "key": key,
+                    "source": source,
+                    "priority": priority,
+                    "content": content,
+                    "chars": len(content),
+                }
+            ],
+            metadata={
+                **(metadata or {}),
+                "会话": _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown",
+                "发送者": _single_line(self._event_sender_id(event), 80),
+            },
+        )
 
     async def _format_passive_environment_fragment(self, event: AstrMessageEvent, *, lightweight: bool = False) -> str:
         if not lightweight:
@@ -1834,6 +1880,14 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             "遇到拉人、开房间、修网、重启、登录、下载、现实代办等请求,只能自然说明自己做不到实际操作,可以提醒、陪用户确认、建议对方找能操作的人,或在确有工具时调用工具后再描述结果。"
         )
         req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="能力边界注入",
+            key="capability.boundary",
+            text=boundary,
+            source="guard",
+            mode="group",
+        )
 
     async def _append_conditional_tool_instructions_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         message_text = str(getattr(event, "message_str", "") or "")
@@ -1843,12 +1897,28 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             if any(token in message_text for token in ("发到", "发给", "告诉", "转告", "通知", "私聊", "@", "艾特", "群友", "群里", "群聊", "出现", "冒泡", "上线")):
                 current_prompt = f"{current_prompt}\n\n<!-- private_companion_atrelay_tools_v1 -->\n{atrelay_instruction}".strip()
                 req.system_prompt = current_prompt
+                await self._record_request_prompt_fragment(
+                    event,
+                    title="跨群转述工具注入",
+                    key="tools.atrelay",
+                    text=atrelay_instruction,
+                    source="tools",
+                    mode="conditional",
+                )
         qzone_instruction = self._qzone_tool_instruction()
         current_prompt = req.system_prompt or ""
         if qzone_instruction and "<!-- private_companion_qzone_tools_v1 -->" not in current_prompt:
             if any(token in message_text for token in ("说说", "空间", "QQ空间", "动态", "点赞", "评论")):
                 current_prompt = f"{current_prompt}\n\n<!-- private_companion_qzone_tools_v1 -->\n{qzone_instruction}".strip()
                 req.system_prompt = current_prompt
+                await self._record_request_prompt_fragment(
+                    event,
+                    title="QQ 空间工具注入",
+                    key="tools.qzone",
+                    text=qzone_instruction,
+                    source="tools",
+                    mode="conditional",
+                )
 
     def _is_lightweight_private_passive_inbound(self, text: str) -> bool:
         cleaned = _single_line(text, 80)
@@ -1884,7 +1954,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             lines.append("群里刚才较密集，回复要更像收口：集中一个重点，避免逐条点名回应。")
         return "\n".join(lines)
 
-    def _append_group_persona_denoise_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+    async def _append_group_persona_denoise_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         if not bool(getattr(self, "enable_group_companion", True)):
             return
         group_id = self._extract_group_id_from_event(event)
@@ -1898,8 +1968,16 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if marker in current_prompt:
             return
         req.system_prompt = f"{current_prompt}\n\n{marker}\n{denoise_text}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="群聊人格降噪注入",
+            key="group.persona_denoise",
+            text=denoise_text,
+            source="group",
+            mode="group",
+        )
 
-    def _append_non_target_private_identity_guard_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+    async def _append_non_target_private_identity_guard_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         marker = "<!-- private_companion_non_target_private_guard_v1 -->"
         current_prompt = req.system_prompt or ""
         if marker in current_prompt:
@@ -1958,7 +2036,16 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             if boundary:
                 lines.append(f"互动边界：{boundary}")
             lines.append("即使此用户资料中有亲昵称呼,也必须服从上面的防串规则：不要把目标陪伴用户的专属关系套给 TA。")
-        req.system_prompt = f"{current_prompt}\n\n{marker}\n{chr(10).join(lines)}".strip()
+        guard_text = chr(10).join(lines)
+        req.system_prompt = f"{current_prompt}\n\n{marker}\n{guard_text}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="非目标私聊防串注入",
+            key="identity.non_target",
+            text=guard_text,
+            source="identity",
+            mode="private",
+        )
 
     @filter.on_llm_request()
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -1995,9 +2082,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             await self._append_capability_boundary_to_request(event, req)
         if not is_private_chat:
             await self._mark_group_conversation_from_llm_request(event)
-            self._append_group_persona_denoise_to_request(event, req)
+            await self._append_group_persona_denoise_to_request(event, req)
         else:
-            self._append_non_target_private_identity_guard_to_request(event, req)
+            await self._append_non_target_private_identity_guard_to_request(event, req)
         if not self.inject_passive_states:
             await self._append_conditional_tool_instructions_to_request(event, req)
             await self._append_environment_perception_to_request(event, req)
@@ -2052,9 +2139,18 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                             recall_context = self._format_recalled_messages_for_natural_query(event, limit=5)
                             if recall_context:
                                 extra = f"{extra}\n\n{recall_context}" if extra else f"\n\n{recall_context}"
+                        group_context_text = f"{self._format_group_context_for_prompt(group, sender_id, str(event.message_str or ''))}{wakeup_state_text}{extra}"
                         req.system_prompt = (
-                            f"{current_prompt}\n\n{marker}\n{self._format_group_context_for_prompt(group, sender_id, str(event.message_str or ''))}{wakeup_state_text}{extra}"
+                            f"{current_prompt}\n\n{marker}\n{group_context_text}"
                         ).strip()
+                        await self._record_request_prompt_fragment(
+                            event,
+                            title="群聊上下文注入",
+                            key="group.context",
+                            text=group_context_text,
+                            source="group",
+                            mode="group",
+                        )
             group_recall_text = _single_line(
                 getattr(event, "private_companion_group_text", "") or getattr(event, "message_str", ""),
                 260,
@@ -2064,6 +2160,14 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 recall_context = self._format_recalled_messages_for_natural_query(event, limit=5)
                 if recall_context:
                     req.system_prompt = f"{req.system_prompt or ''}\n\n{recall_marker}\n{recall_context}".strip()
+                    await self._record_request_prompt_fragment(
+                        event,
+                        title="历史召回查询注入",
+                        key="recall.query",
+                        text=recall_context,
+                        source="recall",
+                        mode="group",
+                    )
             await self._append_conditional_tool_instructions_to_request(event, req)
             await self._append_environment_perception_to_request(event, req)
             return
@@ -2093,7 +2197,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             state_injection = self._format_state_injection(state)
             state_injection = self._sanitize_schedule_context_for_private_user(state_injection, current_user)
             prompt_surface.add("state.full", state_injection, priority=10, source="daily_state")
-            worldview_context = self._format_worldview_adaptation_prompt()
+            worldview_context = (
+                self._format_worldview_adaptation_prompt()
+                if self.enable_environment_perception and self.enable_worldview_perception
+                else ""
+            )
             if worldview_context:
                 prompt_surface.add("worldview.adaptation", worldview_context, priority=20, source="worldview")
         identity_anchor = self._format_private_identity_anchor_for_prompt(user_id, current_user, event)

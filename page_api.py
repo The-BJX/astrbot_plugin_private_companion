@@ -524,6 +524,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 result = await self._run_image_generation_chain_test(payload)
             elif test_type == "tts_generation":
                 result = await self._run_tts_generation_chain_test(payload)
+            elif test_type == "proactive_message":
+                result = await self._run_proactive_message_chain_test(payload)
             else:
                 return self._error("未知排障测试类型")
         except Exception as exc:
@@ -666,6 +668,175 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "error": "" if audio_ref and exists else "TTS provider 未返回有效音频文件",
         }
 
+    async def _run_proactive_message_chain_test(self, payload: dict[str, Any]) -> dict[str, Any]:
+        steps: list[dict[str, str]] = []
+
+        def add_step(name: str, status: str, detail: str = "") -> None:
+            steps.append(
+                {
+                    "name": self._single_line(name, 40),
+                    "status": self._single_line(status, 16) or "info",
+                    "detail": self._single_line(detail, 180),
+                }
+            )
+
+        context = getattr(self.plugin, "context", None)
+        if context is None:
+            add_step("上下文", "error", "AstrBot context 不可用")
+            return {
+                "ok": False,
+                "title": "主动消息链路测试",
+                "steps": steps,
+                "error": "AstrBot context 不可用",
+            }
+
+        target_user_id = self._single_line(payload.get("user_id"), 80)
+        async with self.plugin._data_lock:
+            users = deepcopy(self.plugin.data.get("users") if isinstance(self.plugin.data.get("users"), dict) else {})
+        target_user_id, target_user = self._preferred_proactive_test_user(users, target_user_id)
+        if not target_user_id or not target_user:
+            add_step("目标会话", "error", "没有找到已启用且带私聊会话的私聊对象")
+            return {
+                "ok": False,
+                "title": "主动消息链路测试",
+                "steps": steps,
+                "error": "没有找到可用于测试的私聊对象",
+            }
+        umo = self._single_line(target_user.get("umo"), 180)
+        if not umo:
+            add_step("目标会话", "error", "目标用户缺少 umo")
+            return {
+                "ok": False,
+                "title": "主动消息链路测试",
+                "user_id": target_user_id,
+                "steps": steps,
+                "error": "目标用户缺少私聊会话",
+            }
+        add_step("目标会话", "ok", f"用户 {target_user.get('nickname') or target_user_id} / {umo}")
+
+        now = time.time()
+        scheduled_ts = now + 60
+        test_id = secrets.token_hex(6)
+        plan_keys = (
+            "next_proactive_at",
+            "planned_proactive_reason",
+            "planned_proactive_action",
+            "planned_proactive_source",
+            "planned_proactive_motive",
+            "planned_proactive_topic",
+            "planned_event_chain",
+            "planned_opener_mode",
+            "planned_followup_kind",
+            "planned_proactive_quota_exempt",
+            "planned_candidate_id",
+            "planned_proactive_trigger_message_id",
+            "planned_proactive_trigger_umo",
+            "planned_proactive_trigger_created_at",
+            "llm_timer_event",
+            "sent_today",
+            "proactive_sent_count",
+            "ignored_streak",
+            "awaiting_reply_since",
+            "last_sent",
+            "last_companion_message",
+            "last_proactive_reason",
+            "last_proactive_action",
+            "last_proactive_behavior_summary",
+            "last_proactive_motive",
+            "recent_proactive_topics",
+            "proactive_daypart_counts",
+            "pending_followup_event",
+            "suspended_proactive",
+            "poke_daily_limit",
+            "photo_daily_limit",
+            "screen_peek_daily_limit",
+        )
+
+        async with self.plugin._data_lock:
+            current = self.plugin._get_user(target_user_id)
+            if not isinstance(current, dict) or not current.get("enabled", True):
+                add_step("临时任务", "error", "目标私聊对象未启用")
+                return {
+                    "ok": False,
+                    "title": "主动消息链路测试",
+                    "user_id": target_user_id,
+                    "umo": umo,
+                    "steps": steps,
+                    "error": "目标私聊对象未启用",
+                }
+            if current.get("proactive_sending"):
+                add_step("临时任务", "error", "该用户已有主动发送正在进行")
+                return {
+                    "ok": False,
+                    "title": "主动消息链路测试",
+                    "user_id": target_user_id,
+                    "umo": umo,
+                    "steps": steps,
+                    "error": "该用户已有主动发送正在进行",
+                }
+            if (
+                str(current.get("planned_proactive_source") or "") == "troubleshooting"
+                and isinstance(current.get("troubleshooting_proactive_restore"), dict)
+            ):
+                existing_steps = current.get("troubleshooting_proactive_steps") if isinstance(current.get("troubleshooting_proactive_steps"), list) else []
+                return {
+                    "ok": True,
+                    "pending": True,
+                    "title": "主动消息链路测试",
+                    "user_id": target_user_id,
+                    "umo": umo,
+                    "steps": existing_steps,
+                    "detail": "已有一个排障临时主动任务在等待执行，请约 1 分钟后刷新查看结果",
+                    "action": "message",
+                    "reason": self._single_line(current.get("planned_proactive_reason"), 40) or "check_in",
+                    "error": "",
+                }
+            restore = {key: deepcopy(current.get(key)) for key in plan_keys}
+            current["troubleshooting_proactive_restore"] = restore
+            current["troubleshooting_proactive_test_id"] = test_id
+            current["troubleshooting_proactive_started_at"] = now
+            current["troubleshooting_proactive_steps"] = [
+                {"name": "目标会话", "status": "ok", "detail": f"用户 {current.get('nickname') or target_user_id} / {umo}"},
+                {"name": "临时任务", "status": "ok", "detail": "已预约 60 秒后由主动循环执行"},
+            ]
+            current["user_id"] = str(current.get("user_id") or target_user_id)
+            current["umo"] = umo
+            current["next_proactive_at"] = scheduled_ts
+            current["planned_proactive_reason"] = "check_in"
+            current["planned_proactive_action"] = "message"
+            current["planned_proactive_source"] = "troubleshooting"
+            current["planned_proactive_motive"] = "对方希望你主动来找一下,轻轻开口确认主动消息链路能正常工作。"
+            current["planned_proactive_topic"] = "主动来找对方一下"
+            current["planned_event_chain"] = []
+            current["planned_opener_mode"] = ""
+            current["planned_followup_kind"] = ""
+            current["planned_proactive_quota_exempt"] = True
+            current["planned_candidate_id"] = f"troubleshooting_{test_id}"
+            current["llm_timer_event"] = {}
+            current["poke_daily_limit"] = 0
+            current["photo_daily_limit"] = 0
+            current["screen_peek_daily_limit"] = 0
+            result = {
+                "ok": True,
+                "pending": True,
+                "title": "主动消息链路测试",
+                "user_id": target_user_id,
+                "umo": umo,
+                "steps": list(current["troubleshooting_proactive_steps"]),
+                "detail": "已预约 1 分钟后的排障临时主动任务；到点后由主动循环走完整生成、复核、发送和归档流程",
+                "action": "message",
+                "reason": "check_in",
+                "error": "",
+            }
+            raw = self.plugin.data.setdefault("troubleshooting_test_results", {})
+            if not isinstance(raw, dict):
+                raw = {}
+                self.plugin.data["troubleshooting_test_results"] = raw
+            raw["proactive_message"] = self._sanitize_troubleshooting_test_result(result)
+            self.plugin._save_data_sync()
+        add_step("临时任务", "ok", "已预约 60 秒后由主动循环执行")
+        return result
+
     def _preferred_tts_test_umo(self, users: dict[str, Any]) -> str:
         fallback = ""
         for user_id, item in users.items():
@@ -676,6 +847,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 fallback = umo
             if self.plugin._private_user_role(item, str(item.get("user_id") or user_id)) == "owner":
                 return umo
+        return fallback
+
+    def _preferred_proactive_test_user(
+        self,
+        users: dict[str, Any],
+        preferred_user_id: str = "",
+    ) -> tuple[str, dict[str, Any] | None]:
+        if preferred_user_id:
+            item = users.get(preferred_user_id)
+            if isinstance(item, dict) and item.get("enabled", True) and item.get("umo"):
+                item = deepcopy(item)
+                item["user_id"] = str(item.get("user_id") or preferred_user_id)
+                return preferred_user_id, item
+        fallback: tuple[str, dict[str, Any] | None] = ("", None)
+        for user_id, item in users.items():
+            if not isinstance(item, dict) or not item.get("enabled", True) or not item.get("umo"):
+                continue
+            candidate = deepcopy(item)
+            candidate["user_id"] = str(candidate.get("user_id") or user_id)
+            if not fallback[0]:
+                fallback = (str(user_id), candidate)
+            if self.plugin._private_user_role(candidate, str(candidate.get("user_id") or user_id)) == "owner":
+                return str(user_id), candidate
         return fallback
 
     async def _remember_troubleshooting_test_result(self, test_type: str, result: dict[str, Any]) -> None:
@@ -760,17 +954,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             }
 
         result: dict[str, Any] = {}
-        for kind in ("proactive", "passive"):
+        for kind in ("proactive", "passive", "request"):
             items = raw.get(kind) if isinstance(raw.get(kind), list) else []
             normalized = [entry for entry in (normalize_item(item) for item in items[:5]) if entry]
             result[kind] = normalized
-        result["total"] = len(result.get("proactive", [])) + len(result.get("passive", []))
+        result["total"] = len(result.get("proactive", [])) + len(result.get("passive", [])) + len(result.get("request", []))
         return result
 
     def _sanitize_troubleshooting_test_result(self, result: dict[str, Any]) -> dict[str, Any]:
         return {
             "type": self._single_line(result.get("type"), 40),
             "ok": bool(result.get("ok")),
+            "pending": bool(result.get("pending")),
             "title": self._single_line(result.get("title"), 60),
             "backend": self._single_line(result.get("backend"), 80),
             "provider": self._single_line(result.get("provider"), 100),
@@ -779,6 +974,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "file_size": self._int(result.get("file_size")),
             "detail": self._single_line(result.get("detail"), 220),
             "error": self._single_line(result.get("error"), 220),
+            "text_preview": self._single_line(result.get("text_preview"), 220),
+            "action": self._single_line(result.get("action"), 60),
+            "reason": self._single_line(result.get("reason"), 40),
+            "extra_count": self._int(result.get("extra_count")),
+            "steps": [
+                {
+                    "name": self._single_line(step.get("name"), 40),
+                    "status": self._single_line(step.get("status"), 16),
+                    "detail": self._single_line(step.get("detail"), 180),
+                }
+                for step in (result.get("steps") if isinstance(result.get("steps"), list) else [])[:12]
+                if isinstance(step, dict)
+            ],
             "elapsed_ms": self._int(result.get("elapsed_ms")),
             "ran_at": self._float(result.get("ran_at")),
             "ran_at_text": self._single_line(result.get("ran_at_text"), 40),
@@ -789,6 +997,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         return {
             "image_generation": "图片生成链路测试",
             "tts_generation": "TTS 生成链路测试",
+            "proactive_message": "主动消息链路测试",
         }.get(test_type, "排障链路测试")
 
     def _troubleshooting_recent_events(
@@ -2755,6 +2964,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_holiday_perception",
             "enable_platform_perception",
             "enable_model_perception",
+            "enable_worldview_perception",
             "enable_lunar_perception",
             "enable_solar_term_perception",
             "enable_almanac_perception",
@@ -2980,6 +3190,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_holiday_perception",
             "enable_platform_perception",
             "enable_model_perception",
+            "enable_worldview_perception",
             "enable_lunar_perception",
             "enable_solar_term_perception",
             "enable_almanac_perception",
@@ -3403,10 +3614,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "warn",
                     "检测到 LLMPerception 插件",
                     "本插件已内置时间、节假日、农历节气和平台环境感知；两者同时启用会重复注入并增加 Token 消耗",
-                    "重启插件会自动关闭 enable_environment_perception，或手动二选一",
+                    "建议手动二选一；本插件不会再自动改写 enable_environment_perception",
                 )
             else:
-                add("ok", "环境感知由外部插件接管", "检测到 LLMPerception，本插件内置环境感知已关闭")
+                add("ok", "环境感知由外部插件接管", "检测到 LLMPerception，且本插件内置环境感知当前为关闭")
 
         if features.get("enable_creative_writing"):
             projects = self._creative_summary({"creative_projects": getattr(self.plugin, "data", {}).get("creative_projects", [])})
@@ -3448,10 +3659,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "warn",
                     "检测到上下文场景感知增强插件",
                     "不会造成代码级冲突，但若两个插件同时注入群聊场景，会增加重复上下文和 Token 消耗",
-                    "重启插件会自动关闭 enable_group_scene_awareness，或手动二选一",
+                    "建议手动二选一；本插件不会再自动改写 enable_group_scene_awareness",
                 )
             else:
-                add("ok", "群聊场景感知由外部插件接管", "检测到 context_aware，本插件对应内置功能已关闭")
+                add("ok", "群聊场景感知由外部插件接管", "检测到 context_aware，且本插件对应内置功能当前为关闭")
 
         atrelay_installed = bool(getattr(self.plugin, "_atrelay_plugin_available", lambda: False)())
         if atrelay_installed:
@@ -3460,10 +3671,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "warn",
                     "检测到艾特群友插件",
                     "本插件已内置跨群转述与 @ 群友工具；两者同时启用可能让模型看到重复工具",
-                    "重启插件会自动关闭 enable_atrelay_tools，或手动二选一",
+                    "建议手动二选一；本插件不会再自动改写 enable_atrelay_tools",
                 )
             else:
-                add("ok", "跨群转述由外部插件接管", "检测到 atrelay，本插件对应内置工具已关闭")
+                add("ok", "跨群转述由外部插件接管", "检测到 atrelay，且本插件对应内置工具当前为关闭")
 
         if not features.get("enable_group_privacy_guard"):
             add("warn", "群聊隐私保护未开启", "私聊记忆注入群聊时缺少额外防护", "建议打开 enable_group_privacy_guard")
@@ -3906,6 +4117,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_holiday_perception",
             "enable_platform_perception",
             "enable_model_perception",
+            "enable_worldview_perception",
             "enable_lunar_perception",
             "enable_solar_term_perception",
             "enable_almanac_perception",
@@ -4001,6 +4213,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_holiday_perception",
             "enable_platform_perception",
             "enable_model_perception",
+            "enable_worldview_perception",
             "enable_lunar_perception",
             "enable_solar_term_perception",
             "enable_almanac_perception",
@@ -4646,6 +4859,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_holiday_perception",
             "enable_platform_perception",
             "enable_model_perception",
+            "enable_worldview_perception",
             "enable_lunar_perception",
             "enable_solar_term_perception",
             "enable_almanac_perception",

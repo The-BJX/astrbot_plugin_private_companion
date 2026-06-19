@@ -781,8 +781,38 @@ TTS 朗读文本：
         provider_kind = self._tts_provider_kind(provider_settings=provider_settings)
         marker = "<!-- private_companion_tts_enhancement_v1 -->"
         prompt = str(getattr(req, "system_prompt", "") or "")
+
+        async def record_tts_fragment(title: str, key: str, text: str, mode: str = "") -> None:
+            recorder = getattr(self, "_record_prompt_injection_snapshot", None)
+            if not callable(recorder):
+                return
+            await recorder(
+                kind="request",
+                session=_single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown",
+                title=title,
+                text=text,
+                mode=mode or str(getattr(self, "tts_generation_mode", "hybrid") or ""),
+                modules=[
+                    {
+                        "key": key,
+                        "source": "tts_enhancement",
+                        "priority": 20,
+                        "content": text,
+                        "chars": len(text),
+                    }
+                ],
+                metadata={
+                    "语种": self._tts_language_label(),
+                    "模式": getattr(self, "tts_generation_mode", "hybrid"),
+                    "频控": getattr(self, "tts_frequency_control_mode", "global"),
+                    "provider": provider_kind,
+                },
+            )
+
         if marker not in prompt and getattr(self, "tts_generation_mode", "hybrid") in {"hybrid", "direct"}:
-            req.system_prompt = f"{prompt}\n\n{marker}\n{self._build_tts_rule_prompt(provider_kind)}".strip()
+            rule_prompt = self._build_tts_rule_prompt(provider_kind)
+            req.system_prompt = f"{prompt}\n\n{marker}\n{rule_prompt}".strip()
+            await record_tts_fragment("TTS 基础规则注入", "tts.rule", rule_prompt)
         user_requested_tts = self._event_explicitly_requests_tts(event)
         if (
             not user_requested_tts
@@ -790,27 +820,36 @@ TTS 朗读文本：
             and getattr(self, "tts_frequency_control_mode", "global") != "legacy"
             and not self._tts_trigger_probability_allows(event, reason="llm_tts_prompt")
         ):
-            req.system_prompt = (
-                f"{req.system_prompt}\n\n【本轮 TTS 频率控制】\n"
+            frequency_prompt = (
+                "【本轮 TTS 频率控制】\n"
                 "这轮自动语音概率未命中，默认不要输出 <tts>...</tts>。"
                 "如果用户本轮明确要求语音、想听你的声音或要求朗读，仍应以回应用户需求为主，可以输出 <tts>。"
+            )
+            req.system_prompt = (
+                f"{req.system_prompt}\n\n{frequency_prompt}"
             ).strip()
+            await record_tts_fragment("TTS 频率控制注入", "tts.frequency", frequency_prompt, mode="frequency")
         if self._should_force_tts_for_main_user_event(event):
             frequency_mode = getattr(self, "tts_frequency_control_mode", "global")
             if frequency_mode == "legacy":
                 force_rule = "这轮消息来自主用户或明确 @ 到主用户。若当前回复适合语音表达，适合采用一段 <tts>...</tts>；由你根据语境判断，仍需遵守目标语种和中文释义。"
             else:
                 force_rule = "这轮消息来自主用户或明确 @ 到主用户。如果语音比纯文字更自然，可以采用一段 <tts>...</tts>；不要刻意使用语音，仍需遵守目标语种、中文释义和会话最小间隔。"
+            force_prompt = f"【本轮 TTS 强化触发】\n{force_rule}"
             req.system_prompt = (
-                f"{req.system_prompt}\n\n【本轮 TTS 强化触发】\n"
-                f"{force_rule}"
+                f"{req.system_prompt}\n\n{force_prompt}"
             ).strip()
+            await record_tts_fragment("TTS 主用户倾向注入", "tts.force", force_prompt, mode="main_user")
         if user_requested_tts and getattr(self, "tts_generation_mode", "hybrid") in {"hybrid", "direct"}:
-            req.system_prompt = (
-                f"{req.system_prompt}\n\n【用户语音请求】\n"
+            user_request_prompt = (
+                "【用户语音请求】\n"
                 "用户本轮明确希望听到语音或你的声音。请以回应用户需求为主：如果当前回复适合用语音表达，可以直接写一段 <tts>...</tts>；"
                 "这类顺应用户请求的语音不受自动语音触发概率限制，但仍需自然克制、遵守目标语种和中文释义，不要为了格式而硬加。"
+            )
+            req.system_prompt = (
+                f"{req.system_prompt}\n\n{user_request_prompt}"
             ).strip()
+            await record_tts_fragment("用户语音请求注入", "tts.user_request", user_request_prompt, mode="user_request")
 
     async def protect_tts_enhancement_response_blocks(self, event: Any, resp: Any) -> None:
         if not getattr(self, "enable_tts_enhancement", False):

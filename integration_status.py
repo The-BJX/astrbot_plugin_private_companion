@@ -295,32 +295,28 @@ class IntegrationStatusMixin:
                     continue
         return False
 
-    def _disable_integrated_features_when_external_plugins_present(self) -> None:
+    def _report_integrated_feature_conflicts(self) -> None:
         rules = [
             (
                 "enable_environment_perception",
                 ("astrbot_plugin_llmperception", "astrbot_plugin_LLMPerception"),
-                "检测到已安装 astrbot_plugin_LLMPerception,已自动关闭本插件内置环境感知,避免重复注入。",
+                "检测到已安装 astrbot_plugin_LLMPerception,本插件内置环境感知仍按用户配置保持%s；如同时开启可能重复注入。",
             ),
             (
                 "enable_group_scene_awareness",
                 ("astrbot_plugin_context_aware",),
-                "检测到已安装 astrbot_plugin_context_aware,已自动关闭本插件群聊场景感知,避免重复注入。",
+                "检测到已安装 astrbot_plugin_context_aware,本插件群聊场景感知仍按用户配置保持%s；如同时开启可能重复注入。",
             ),
             (
                 "enable_atrelay_tools",
                 ("astrbot_plugin_atrelay",),
-                "检测到已安装 astrbot_plugin_atrelay,已自动关闭本插件跨群转述与 @ 群友工具,避免重复工具能力。",
+                "检测到已安装 astrbot_plugin_atrelay,本插件跨群转述与 @ 群友工具仍按用户配置保持%s；如同时开启可能出现重复工具。",
             ),
         ]
-        changed = False
         for key, plugin_names, message in rules:
-            if bool(getattr(self, key, False)) and self._integrated_plugin_installed(*plugin_names):
-                self._set_runtime_bool_config(key, False)
-                changed = True
-                logger.info("[PrivateCompanion] %s", message)
-        if changed:
-            self._save_config_if_possible()
+            if self._integrated_plugin_installed(*plugin_names):
+                state = "开启" if bool(getattr(self, key, False)) else "关闭"
+                logger.info("[PrivateCompanion] %s", message % state)
 
     def _worldview_mode_effective(self) -> str:
         mode = str(getattr(self, "worldview_adaptation_mode", "auto") or "auto")

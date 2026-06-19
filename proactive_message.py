@@ -382,6 +382,8 @@ class ProactiveMessageMixin:
         return any(token in lowered for token in ("ai news", "llm news", "daily ai", "tech news"))
 
     def _format_recent_news_context_for_reply(self, inbound_text: str = "") -> str:
+        if not self.enable_news_integration:
+            return ""
         if not self._user_asks_news_context(inbound_text):
             return ""
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
@@ -389,11 +391,6 @@ class ProactiveMessageMixin:
         digests = state.get("digests") if isinstance(state.get("digests"), list) else []
         latest_items = state.get("latest_items") if isinstance(state.get("latest_items"), list) else []
         if not digest and not digests and not latest_items:
-            if not self.enable_news_integration:
-                return (
-                    "【新闻阅读上下文】\n"
-                    "用户正在询问今天的新闻/AI 新闻,但新闻阅读功能当前未开启。请自然说明自己这边没有近期新闻记录,不要编造新闻。"
-                )
             return (
                 "【新闻阅读上下文】\n"
                 "用户正在询问今天的新闻/AI 新闻,但当前还没有可用的新闻阅读记录。请自然说明自己还没读到今天的新闻,不要编造新闻。"
@@ -998,7 +995,7 @@ class ProactiveMessageMixin:
 12. 如果发图,先在内容选择菜单里选“可拍画面”或“眼前物”方向,再自己生成当前场景里合理的具体画面。不要总是天气、窗外、晚霞。
 13. 连贯性优先：当前时间、当前生活片段、聊天历史要合成同一个合理现场。只抓一个最自然的当下切口开口,不要把多个不同时段或不同地点的生活碎片拼成一条消息；如果资料之间冲突,优先服从当前真实时段和当前生活片段。
 14. 不要把用户很久前的请求、邀约、相对时间说法当成此刻正在等你处理的事。除非定时提醒或当前日程明确要求兑现约定,否则旧消息只保留成情绪和关系背景,主动消息要从当前时段自然开口。
-14.5 如果现在是早晨/上午的主动问候,绝不能写成“好呀、下午陪你、五点之后、你到时候叫我”这类在回应旧邀约或旧请求的话；这种旧话题只能当背景,不能被当成当前正在发生的对话。
+14.5 如果这是早晨/午间/晚间问候或普通 check-in,绝不能写成“好呀、一直等着呢、想去哪儿逛、下午陪你、五点之后、你到时候叫我”这类在回应旧邀约或旧请求的话；这种旧话题只能当背景,不能被当成当前正在发生的对话。
 15. 普通主动消息不需要解释自己为什么现在出现,也不要为了接上旧聊天而补一段“刚看到/才看到”的说明；像真实私聊一样,直接从当下能说的话开口。
 16. 如果最近已经主动说过同一件小事,这次不要换壳复述。可以只留一点余味、换到新的具体细节,或者自然转开话题。
 17. 不要用“哈哈,我也觉得”“确实”“对吧”“是吧”这类附和式开头；主动消息不是在回复用户刚说的话,要直接说自己的观察或念头。
@@ -1131,8 +1128,8 @@ class ProactiveMessageMixin:
                 [
                     "【主动承接边界】",
                     "本轮是独立主动开口：聊天历史只能提供关系背景,不能被写成当前有人刚问你、约你、让你做决定。",
-                    "开头不要使用回复式承接词,例如“好呀/好啊/可以呀/行啊/那就/你说呢/要不/我哪来的/你到时候”。",
-                    "不要承接旧邀约、旧时间点或旧问答,尤其不要把下午、五点、放学、垫钱、到时候叫你这类历史片段当成当前正在发生。",
+                    "开头不要使用回复式承接词,例如“好呀/好啊/可以呀/行啊/那就/你说呢/要不/我哪来的/你到时候/一直等着”。",
+                    "不要承接旧邀约、旧时间点或旧问答,尤其不要把下午、五点、放学、去哪儿逛、出去走走、一直等着、垫钱、到时候叫你这类历史片段当成当前正在发生。",
                     "如果想轻轻延续关系感,只能从当前时段自起一句,像刚把一句话放进私聊里。",
                 ]
             )
@@ -1913,8 +1910,9 @@ class ProactiveMessageMixin:
         old_invite_markers = (
             "下午陪你", "陪你出去", "出去走走", "五点", "放学之后", "下班之后",
             "到时候叫我", "到时候喊我", "到时候", "垫上", "我哪来的钱",
+            "一直等着", "等着呢", "想去哪", "去哪儿", "去哪逛", "哪儿逛", "哪里逛", "去逛",
         )
-        if reason == "morning_greeting" and cleaned.startswith(reply_openers) and any(token in cleaned for token in old_invite_markers):
+        if reason in {"morning_greeting", "noon_greeting", "evening_greeting"} and cleaned.startswith(reply_openers) and any(token in cleaned for token in old_invite_markers):
             logger.info(
                 "[PrivateCompanion] 主动消息疑似把旧邀约当成当前回复,已丢弃: reason=%s text=%s",
                 reason,
@@ -1927,6 +1925,8 @@ class ProactiveMessageMixin:
                 r"^(?:好呀|好啊|可以呀|可以啊|行呀|行啊|嗯好|那就).{0,30}(?:我得|我得等|我只能|我可以).{0,18}(?:之后|以后|才行)",
                 r"^(?:你说呢|要不|不然).{0,30}(?:我哪来|哪来的钱|先帮我|帮我垫|垫上)",
                 r"^(?:好呀|好啊|可以呀|可以啊|行呀|行啊|嗯好|那就|你说呢|要不|不然).{0,36}(?:下午|五点|放学|下班|垫上|哪来的钱)",
+                r"^(?:好呀|好啊|可以呀|可以啊|行呀|行啊|嗯好|那就).{0,30}(?:一直等|等着呢|等你).{0,30}(?:去哪|哪儿|哪里|逛|走走)",
+                r"^(?:好呀|好啊|可以呀|可以啊|行呀|行啊|嗯好|那就).{0,36}(?:想去哪|去哪儿|去哪逛|哪儿逛|哪里逛|去逛)",
             )
             if any(re.search(pattern, cleaned) for pattern in stale_reply_patterns):
                 logger.info(

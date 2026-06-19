@@ -4040,6 +4040,39 @@ input[type="search"] {
   background: #fff6f5;
 }
 
+.chain-test-steps {
+  margin-top: 8px;
+  border-top: 1px dashed var(--line-soft);
+  padding-top: 8px;
+}
+
+.chain-test-steps summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.chain-test-steps div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.chain-test-steps div.ok b {
+  color: var(--accent-strong);
+}
+
+.chain-test-steps div.error b {
+  color: #9b2f2f;
+}
+
+.chain-test-steps span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .troubleshooting-debounce-panel {
   display: grid;
   gap: 12px;

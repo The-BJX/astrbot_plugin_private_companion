@@ -108,6 +108,13 @@
     "default": true,
     "condition": "enable_environment_perception"
   },
+  "enable_worldview_perception": {
+    "description": "感知世界观适配",
+    "type": "bool",
+    "hint": "把插件能力和生活语境转换成当前人设世界观能理解的说法。若 AstrBot 人设里已经写了完整世界观，建议保持关闭，避免重复注入。",
+    "default": false,
+    "condition": "enable_environment_perception"
+  },
   "enable_lunar_perception": {
     "description": "感知农历",
     "type": "bool",
