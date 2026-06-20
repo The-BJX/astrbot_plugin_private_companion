@@ -2469,6 +2469,24 @@ class ProactiveEngineMixin:
         if not count_daily:
             user["last_unanswered_screen_peek_at"] = _now_ts()
 
+    def _screen_peek_failure_cooldown_active(self, user: dict[str, Any] | None = None, *, now: float | None = None) -> bool:
+        if not isinstance(user, dict):
+            return False
+        check_now = _now_ts() if now is None else now
+        return _safe_float(user.get("screen_peek_failure_until"), 0.0) > check_now
+
+    def _note_screen_peek_failure(self, user: dict[str, Any] | None, reason: str = "", *, cooldown_minutes: int = 60) -> None:
+        if not isinstance(user, dict):
+            return
+        now = _now_ts()
+        user["screen_peek_failure_until"] = now + max(5, _safe_int(cooldown_minutes, 60, 5)) * 60
+        user["screen_peek_failure_reason"] = _single_line(reason, 180)
+        user["screen_peek_failure_count"] = _safe_int(user.get("screen_peek_failure_count"), 0, 0) + 1
+        try:
+            self._save_data_sync()
+        except Exception:
+            pass
+
     def _note_action_reply_feedback(self, user: dict[str, Any], action: str) -> None:
         raw = user.setdefault("action_reply_affinity", {})
         if not isinstance(raw, dict):
@@ -2988,6 +3006,8 @@ class ProactiveEngineMixin:
         if daily_limit <= 0 and not ignore_daily_limit:
             return False
         if isinstance(user, dict):
+            if self._screen_peek_failure_cooldown_active(user):
+                return False
             today = _today_key()
             used_today = (
                 _safe_int(user.get("screen_peek_today"), 0)

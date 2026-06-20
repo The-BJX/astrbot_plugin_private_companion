@@ -4073,6 +4073,13 @@ input[type="search"] {
   overflow-wrap: anywhere;
 }
 
+.chain-test-preview p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .troubleshooting-debounce-panel {
   display: grid;
   gap: 12px;
@@ -7702,6 +7709,93 @@ textarea {
   font-size: 20px;
 }
 
+.proactive-mode-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  margin-top: 12px;
+  border: 1px solid rgba(47, 117, 102, 0.22);
+  border-left: 5px solid var(--accent);
+  border-radius: 10px;
+  padding: 15px;
+  background:
+    radial-gradient(circle at 92% 8%, rgba(155, 116, 49, 0.16), transparent 32%),
+    linear-gradient(135deg, rgba(226, 241, 236, 0.78), rgba(255, 255, 255, 0.96));
+  box-shadow: var(--shadow-soft), var(--shadow-ring);
+}
+
+.proactive-mode-card.off {
+  border-left-color: #b15a4f;
+  background:
+    radial-gradient(circle at 92% 8%, rgba(155, 116, 49, 0.12), transparent 32%),
+    linear-gradient(135deg, rgba(245, 236, 226, 0.74), rgba(255, 255, 255, 0.96));
+}
+
+.proactive-mode-toggle {
+  display: grid;
+  place-items: center;
+}
+
+.proactive-mode-card.on .feature-toggle-visual {
+  background: var(--accent);
+}
+
+.proactive-mode-card.on .feature-toggle-visual::after {
+  transform: translateX(16px);
+}
+
+.proactive-mode-main {
+  min-width: 0;
+}
+
+.proactive-mode-kicker {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(47, 117, 102, 0.12);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.proactive-mode-card.off .proactive-mode-kicker {
+  background: #f5ece2;
+  color: #9b3f34;
+}
+
+.proactive-mode-main h3 {
+  margin: 7px 0 5px;
+  font-size: 18px;
+}
+
+.proactive-mode-main p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.proactive-mode-main p + p {
+  margin-top: 4px;
+}
+
+.proactive-mode-main small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.proactive-mode-detail {
+  min-height: 36px;
+  border: 1px solid rgba(47, 117, 102, 0.34);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #fff;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-family: inherit;
+}
+
 .feature-switch-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -7871,6 +7965,24 @@ textarea {
   color: var(--accent-strong);
 }
 
+.feature-switch-item.locked {
+  border-left-color: var(--blue);
+  background: linear-gradient(135deg, rgba(229, 237, 246, 0.72), rgba(255, 255, 255, 0.96));
+}
+
+.feature-switch-item.locked .feature-toggle-hit {
+  cursor: not-allowed;
+}
+
+.feature-switch-item.locked .feature-toggle-visual {
+  background: #9aa7b5;
+}
+
+.feature-switch-item.locked .feature-state-text {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
 .feature-switch-text em {
   margin-top: 5px;
   color: var(--muted);
@@ -7925,6 +8037,11 @@ textarea {
   background: #f5ece2;
 }
 
+.feature-detail-page.locked .feature-state-strip,
+.feature-state-strip.locked {
+  background: var(--blue-soft);
+}
+
 .feature-state-strip b {
   color: var(--ink);
 }
@@ -7976,6 +8093,14 @@ textarea {
 
 .feature-detail-page.on .feature-detail-toggle .feature-toggle-visual::after {
   transform: translateX(16px);
+}
+
+.feature-detail-page.locked .feature-detail-toggle {
+  cursor: not-allowed;
+}
+
+.feature-detail-page.locked .feature-toggle-visual {
+  background: #9aa7b5;
 }
 
 .feature-detail-toggle b {
@@ -8140,6 +8265,14 @@ textarea {
   resize: vertical;
 }
 
+.feature-param-control input:disabled,
+.feature-param-control select:disabled,
+.feature-param-control textarea:disabled {
+  background: #edf1f5;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .feature-param-check {
   display: inline-flex;
   width: fit-content;
@@ -8151,6 +8284,12 @@ textarea {
   background: var(--surface);
   color: var(--ink);
   cursor: pointer;
+}
+
+.feature-param-check:has(input:disabled) {
+  background: var(--blue-soft);
+  color: var(--blue);
+  cursor: not-allowed;
 }
 
 .feature-param-check input {
@@ -9959,5 +10098,14 @@ pre {
 
   dl {
     grid-template-columns: 1fr;
+  }
+
+  .proactive-mode-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .proactive-mode-detail {
+    grid-column: 1 / -1;
+    justify-self: stretch;
   }
 }

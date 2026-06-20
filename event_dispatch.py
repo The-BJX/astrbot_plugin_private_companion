@@ -1396,7 +1396,7 @@ class EventDispatchMixin:
         if isinstance(current, dict) and now - _safe_float(current.get("updated_ts"), current.get("first_ts"), 0) <= wait + 0.8:
             current["wait_seconds"] = wait
             current["kind"] = buffer_kind
-            if buffer_kind in {"group_high_intensity", "group_short_wakeup"} and _safe_float(current.get("deadline_ts"), 0) <= 0:
+            if buffer_kind in {"image", "forward", "group_high_intensity", "group_short_wakeup"} and _safe_float(current.get("deadline_ts"), 0) <= 0:
                 first_ts = _safe_float(current.get("first_ts"), now, now)
                 current["deadline_ts"] = first_ts + wait
             if smart_debounce:
@@ -1432,6 +1432,8 @@ class EventDispatchMixin:
         }
         if buffer_kind in {"group_high_intensity", "group_short_wakeup"}:
             buffer["deadline_ts"] = now + wait
+        if buffer_kind in {"image", "forward"}:
+            buffer["deadline_ts"] = now + wait
         buffers[key] = buffer
         if smart_debounce:
             buffers[key]["smart_debounce"] = dict(smart_debounce)
@@ -1448,6 +1450,19 @@ class EventDispatchMixin:
 
     def _smart_message_debounce_enabled(self) -> bool:
         return bool(getattr(self, "enable_message_debounce", True)) and bool(getattr(self, "enable_smart_message_debounce", False))
+
+    def _message_debounce_command_text(self, event: AstrMessageEvent, text: str) -> bool:
+        """Command-like messages should not be delayed or merged as chat follow-ups."""
+        if bool(getattr(event, "is_command", False)) or bool(getattr(event, "is_admin_command", False)):
+            return True
+        cleaned = _single_line(text, 260).strip()
+        if not cleaned:
+            return False
+        if cleaned.startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴", "陪伴群", "/陪伴群", "群陪伴", "群聊陪伴")):
+            return True
+        if cleaned.startswith(("/", "／", "!", "！", "#")) and re.search(r"[\w\u4e00-\u9fff]", cleaned[1:]):
+            return True
+        return False
 
     def _smart_message_debounce_store(self) -> dict[str, Any]:
         store = self.data.setdefault("smart_message_debounce", {})
@@ -1631,17 +1646,44 @@ class EventDispatchMixin:
         cleaned = _single_line(text, 260)
         if not cleaned:
             return False
+        if self._smart_message_debounce_suspense_intro_reason(cleaned):
+            return True
         if re.search(r"(等下|等一下|稍等|我想想|我组织下|先别回|等等|还有|另外|然后|接着|顺便|就是)$", cleaned):
             return True
         if re.search(r"[,，、:：;；]$", cleaned):
             return True
         return False
 
+    def _smart_message_debounce_suspense_intro_reason(self, text: str) -> str:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return ""
+        compact = re.sub(r"\s+", "", cleaned)
+        compact = re.sub(r"[?？。.!！~～…]+$", "", compact)
+        bot_name = re.sub(r"\s+", "", str(getattr(self, "bot_name", "") or ""))
+        if bot_name and compact.startswith(bot_name) and len(compact) > len(bot_name):
+            compact = compact[len(bot_name):]
+        if not compact or len(compact) > 10:
+            return ""
+        if re.fullmatch(r"(你)?知道(吗|嘛|么|不|吧)?", compact):
+            return "悬念式问句"
+        if re.fullmatch(r"(你)?(懂|明白|晓得|听懂)(吗|嘛|么|不)?", compact):
+            return "确认式铺垫"
+        if re.fullmatch(r"(你)?猜(猜)?(看|呢|嘛|吗|么)?", compact):
+            return "猜测式铺垫"
+        if re.fullmatch(r"(我)?(跟|和)?你说(个事|一下|哦|嗷|哈)?", compact):
+            return "说话起手式"
+        if re.fullmatch(r"(问|说)(你)?个事", compact):
+            return "说话起手式"
+        return ""
+
     def _smart_message_debounce_fast_complete_reason(self, text: str) -> str:
         cleaned = _single_line(text, 260)
         if not cleaned:
             return "空文本"
         compact = re.sub(r"\s+", "", cleaned)
+        if self._smart_message_debounce_suspense_intro_reason(compact):
+            return ""
         if re.search(r"[?？。.!！]$", compact):
             return "句末完整标点"
         if re.search(r"^(其实)?我(是|叫|就是).{1,24}$", compact):
@@ -1811,6 +1853,48 @@ class EventDispatchMixin:
             )
             _set_smart_result("incomplete", wait_seconds=wait, original_wait_seconds=wait, source="buffer", reason="已有收口缓冲")
             return wait
+        suspense_reason = self._smart_message_debounce_suspense_intro_reason(cleaned)
+        if suspense_reason:
+            self._remember_smart_message_debounce_decision(
+                scope=scope,
+                sender_id=sender_id,
+                text=cleaned,
+                decision="incomplete",
+                confidence=0.9,
+                reason=suspense_reason,
+            )
+            self._record_smart_message_debounce_log(
+                scope=scope,
+                sender_id=sender_id,
+                text=cleaned,
+                decision="incomplete",
+                confidence=0.9,
+                reason=suspense_reason,
+                wait_seconds=wait,
+                outcome="wait",
+                note="短引子常用于铺垫下一句,直接等待补话。",
+                source="fast_rule",
+                private_chat=private_chat,
+            )
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            _set_smart_result(
+                "incomplete",
+                wait_seconds=wait,
+                original_wait_seconds=wait,
+                elapsed_ms=elapsed_ms,
+                source="fast_rule",
+                reason=suspense_reason,
+            )
+            logger.info(
+                "[PrivateCompanion] 智能防抖本地判定等待补话: scope=%s sender=%s elapsed=%sms reason=%s wait=%.1fs text=%s",
+                scope,
+                sender_id,
+                elapsed_ms,
+                _single_line(suspense_reason, 80),
+                wait,
+                _single_line(cleaned, 80),
+            )
+            return wait
         fast_complete_reason = self._smart_message_debounce_fast_complete_reason(cleaned)
         if fast_complete_reason:
             self._remember_smart_message_debounce_decision(
@@ -1881,6 +1965,7 @@ class EventDispatchMixin:
 {chr(10).join(example_lines) or "无"}
 
 判断规则：
+- “知道吗/你知道吗/懂吗/明白吗/猜猜/问你个事/跟你说”这类短引子通常是在铺垫下一句，倾向 incomplete。
 - 如果用户像是在起手、列举、转折、说“等下/还有/然后/我想想”、句子停在逗号冒号分号，倾向 incomplete。
 - 如果是完整问题、完整请求、完整情绪表达、问候、贴贴、摸摸、表情或短回复，倾向 complete。
 - 不要因为消息短就等待；只有真的像还会补一句才 incomplete。
@@ -1889,12 +1974,20 @@ class EventDispatchMixin:
         raw = ""
         model_error = ""
         timeout_seconds = max(0.2, min(5.0, _safe_float(getattr(self, "smart_message_debounce_model_timeout_seconds", 0.8), 0.8, 0.2)))
+        provider_selector = getattr(self, "_task_provider", None)
+        if callable(provider_selector):
+            debounce_provider_id = provider_selector(
+                getattr(self, "smart_message_debounce_provider_id", ""),
+                getattr(self, "llm_provider_id", ""),
+            )
+        else:
+            debounce_provider_id = str(getattr(self, "smart_message_debounce_provider_id", "") or getattr(self, "llm_provider_id", "") or "")
         try:
             raw = await asyncio.wait_for(
                 self._llm_call(
                     prompt,
                     max_tokens=80,
-                    provider_id=getattr(self, "smart_message_debounce_provider_id", "") or None,
+                    provider_id=debounce_provider_id or None,
                     task="smart_message_debounce",
                 ),
                 timeout=timeout_seconds,

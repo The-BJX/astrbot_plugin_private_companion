@@ -303,7 +303,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.0.11",
+    "4.0.12",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -456,6 +456,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         c = config
 
         self.enabled = self._cfg_bool(c, "enabled", True)
+        self.enable_proactive_only_mode = self._cfg_bool(c, "enable_proactive_only_mode", False)
         self.check_interval_seconds = self._cfg_int(c, "check_interval_seconds", 60, 30)
         self.idle_minutes = self._cfg_int(c, "idle_minutes", 60, 5)
         self.min_interval_minutes = self._cfg_int(c, "min_interval_minutes", 120, 10)
@@ -752,6 +753,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.dialogue_episode_provider_id = self._cfg_str(c, "DIALOGUE_EPISODE_PROVIDER_ID", "")
         self.relationship_analysis_provider_id = self._cfg_str(c, "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "")
         self.response_review_provider_id = self._cfg_str(c, "RESPONSE_REVIEW_PROVIDER_ID", "")
+        self.troubleshooting_provider_id = self._cfg_str(c, "TROUBLESHOOTING_PROVIDER_ID", "")
         self.response_review_max_chars = self._cfg_int(c, "response_review_max_chars", 260, 80, 900)
         self.passive_topic_memory_hours = self._cfg_int(c, "passive_topic_memory_hours", 8, 1, 72)
         self.episode_memory_refresh_messages = self._cfg_int(c, "episode_memory_refresh_messages", 8, 3, 40)
@@ -1251,6 +1253,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not self.enabled:
             return
         self._note_inbound_activity_for_scope(event)
+        if self._proactive_only_blocks_passive_event(event):
+            return
         if not self.enable_recall_enhancement:
             return
         raw = self._event_raw_payload(event)
@@ -1329,6 +1333,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         """发送前兜底清理内部控制块，避免 timer/TTSBLOCK 泄漏到聊天。"""
         if not self.enabled:
             return
+        if self._proactive_only_blocks_passive_event(event):
+            return
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []
         if not chain:
@@ -1358,6 +1364,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         """若触发/唤醒消息在回复发出前被撤回，则静默取消本次回复。"""
         if not self.enabled:
             return
+        if self._proactive_only_blocks_passive_event(event):
+            return
         recalled_message_id = await self._should_cancel_reply_for_missing_or_recalled_trigger(event)
         if not recalled_message_id:
             return
@@ -1378,6 +1386,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     async def suppress_forbidden_outbound_before_send(self, event: AstrMessageEvent):
         """自己的待发送消息命中违禁词时，优先在发送前拦截。"""
         if not self.enabled:
+            return
+        if self._proactive_only_blocks_passive_event(event):
             return
         if not self.enable_recall_enhancement or not self.enable_forbidden_word_recall:
             return
@@ -1408,6 +1418,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     async def suppress_framework_error_leak_before_send(self, event: AstrMessageEvent):
         """避免 AstrBot/Core 的技术错误兜底文本直接发进聊天。"""
         if not self.enabled:
+            return
+        if self._proactive_only_blocks_passive_event(event):
             return
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []
@@ -1443,12 +1455,16 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     @filter.on_decorating_result()
     async def apply_tts_enhancement_before_send_hook(self, event: AstrMessageEvent):
         """发送前处理 TTS强化标签和自动语音转换。"""
+        if self._proactive_only_blocks_passive_event(event):
+            return
         await self.apply_tts_enhancement_before_send(event)
 
     @filter.on_decorating_result()
     async def strip_group_internal_identity_anchors(self, event: AstrMessageEvent):
         """发送前清理群聊内部身份锚点，避免调试标记泄露到回复。"""
         if not self.enabled:
+            return
+        if self._proactive_only_blocks_passive_event(event):
             return
         if not self.enable_group_companion:
             return
@@ -1474,6 +1490,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         """模型输出“不回复”控制语时静默吞掉，避免把内部判断发到群里。"""
         if not self.enabled:
             return
+        if self._proactive_only_blocks_passive_event(event):
+            return
         if not self.enable_group_companion:
             return
         if not self._extract_group_id_from_event(event):
@@ -1498,6 +1516,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     async def apply_segmented_llm_reply_scope(self, event: AstrMessageEvent):
         """按回复范围与分段策略整理 LLM 输出，减少长回复和误引用。"""
         if not self.enabled:
+            return
+        if self._proactive_only_blocks_passive_event(event):
             return
         if not self.enable_segmented_proactive_reply:
             return
@@ -1817,6 +1837,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         """群聊回复发送前自动补引用，保持上下文对齐。"""
         if not self.enabled:
             return
+        if self._proactive_only_blocks_passive_event(event):
+            return
         quote_message_id = self._group_current_reply_quote_message_id(event)
         if not quote_message_id:
             return
@@ -1843,6 +1865,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     @filter.llm_tool(name="pc_qzone_view_feed")
     async def pc_qzone_view_feed(self, event: AstrMessageEvent, user_id: str = "", pos: int = 0, like: bool = False, reply: bool = False) -> str:
         """查看某位用户 QQ 空间说说,可按需点赞或评论。"""
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_qzone_view_feed_impl(event, user_id=user_id, pos=pos, like=like, reply=reply)
 
     @filter.llm_tool(name="pc_qzone_publish_feed")
@@ -1853,6 +1877,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             text(string): 要发布到 QQ 空间的说说正文。
             use_latest_draft(boolean): 可选,是否使用最近生成的生活说说草稿。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_qzone_publish_feed_impl(event, text, **kwargs)
 
     @filter.llm_tool(name="pc_get_group_id_by_name")
@@ -1862,6 +1888,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         Args:
             group_name(string): 群名关键词或群号。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_get_group_id_by_name_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_get_user_id_by_name")
@@ -1872,6 +1900,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             group_id(string): 目标群号；私聊中可填写要查询的群号。
             nickname(string): 关系网名称、别名、群名片、昵称或 QQ。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_get_user_id_by_name_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_get_specified_group_members")
@@ -1882,6 +1912,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             group_id(string): 目标群号。
             keyword(string): 可选筛选关键词、昵称、群名片或 QQ。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_get_specified_group_members_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_relay_message")
@@ -1899,6 +1931,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             delay_until_recipient_seen(boolean): 是否等目标群友在群里出现后再转述。
             expire_hours(number): 延迟转述有效小时数。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_relay_message_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_send_to_group")
@@ -1912,6 +1946,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_send_to_group_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_send_to_private_user")
@@ -1924,6 +1960,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_send_to_private_user_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_send_to_groups")
@@ -1937,6 +1975,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_send_to_groups_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_send_to_private_users")
@@ -1949,6 +1989,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_send_to_private_users_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_schedule_group_relay")
@@ -1963,6 +2005,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
             expire_hours(number): 挂起有效小时数。
         """
+        if self._proactive_only_blocks_passive_event(event):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_schedule_group_relay_impl(event, **kwargs)
 
     async def _append_environment_perception_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
@@ -2421,6 +2465,64 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         event.set_result(empty_result)
         event.stop_event()
 
+    def _proactive_only_blocks_passive_event(self, event: AstrMessageEvent | None) -> bool:
+        return bool(getattr(self, "enable_proactive_only_mode", False)) and not bool(
+            getattr(event, "private_companion_proactive_framework", False)
+        )
+
+    async def _record_proactive_only_private_feedback(
+        self,
+        event: AstrMessageEvent,
+        *,
+        user_id: str,
+        sender_display_name: str,
+        text: str,
+        received_ts: float,
+    ) -> None:
+        """主动专用模式下只记录用户回应,不接管被动回复链路。"""
+        async with self._data_lock:
+            users = self.data.get("users", {})
+            canonical_user_id = self._canonical_private_user_id(user_id)
+            user = users.get(canonical_user_id) if isinstance(users, dict) else None
+            if not isinstance(user, dict):
+                return
+            user_id = canonical_user_id
+            if not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)):
+                return
+            if self._is_recent_poke_echo(user, text):
+                logger.info("[PrivateCompanion] 主动专用模式忽略 poke 回流事件: user=%s", user_id)
+                return
+            if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
+                self._schedule_data_save()
+                return
+            user["umo"] = event.unified_msg_origin
+            self._note_private_display_name_observation(user, user_id, sender_display_name, now=received_ts)
+            user["last_seen"] = received_ts
+            if text:
+                user["last_user_message"] = text
+                user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
+                user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
+                self._apply_user_rest_silence_from_message(user, text, now=received_ts)
+            if _safe_float(user.get("awaiting_reply_since"), 0) > 0:
+                user["reply_count"] = _safe_int(user.get("reply_count"), 0) + 1
+                self._note_action_reply_feedback(
+                    user,
+                    str(user.get("last_proactive_action") or "message"),
+                    text,
+                )
+                user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
+                user["awaiting_reply_since"] = 0
+                user["last_reply_at"] = received_ts
+                user["pending_followup_event"] = {}
+                user["planned_proactive_quota_exempt"] = False
+            user["ignored_streak"] = 0
+            self._schedule_data_save()
+        logger.info(
+            "[PrivateCompanion] 主动消息专用模式已跳过私聊被动增强: user=%s text=%s",
+            user_id,
+            _single_line(text, 80) or "非文本消息",
+        )
+
     @filter.on_llm_request()
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM 请求前注入陪伴状态、群聊上下文、工具边界和合并消息阅读上下文。"""
@@ -2430,6 +2532,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             self._release_framework_session_lock_for_event(event, label="llm_request_no_system_prompt")
             return
         self._remember_external_llm_request_for_token_stats(event, req)
+        if self.enable_proactive_only_mode and not bool(getattr(event, "private_companion_proactive_framework", False)):
+            self._release_framework_session_lock_for_event(event, label="proactive_only_mode")
+            return
         is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
         rest_allowed, rest_reason = await self._should_reply_during_rest(event, is_private_chat=is_private_chat)
         if not rest_allowed:
@@ -2641,10 +2746,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             buffered_image_mode = delayed_image_mode
         vision_task = buffered_image_context.get("vision_task") if isinstance(buffered_image_context, dict) else None
         if not buffered_image_vision and isinstance(vision_task, asyncio.Task):
+            vision_wait_timeout = max(
+                2.5,
+                min(
+                    12.0,
+                    _safe_float(getattr(self, "private_image_vision_wait_seconds", 30.0), 30.0, 0.0),
+                ),
+            )
             try:
-                buffered_image_vision = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=2.5), buffered_image_vision_limit)
+                buffered_image_vision = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=vision_wait_timeout), buffered_image_vision_limit)
             except asyncio.TimeoutError:
-                logger.info("[PrivateCompanion] 私聊图片视觉转述仍在进行,本轮先注入路径兜底")
+                logger.info("[PrivateCompanion] 私聊图片视觉转述仍在进行,本轮先注入路径兜底: timeout=%.1fs", vision_wait_timeout)
             except Exception as exc:
                 logger.info("[PrivateCompanion] 私聊图片视觉转述获取失败: %s", _single_line(exc, 120))
         buffered_images_include_gif = (
@@ -2812,7 +2924,14 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 )
         reply_image_sources: list[str] = []
         reply_image_prompt_anchor = ""
-        if not buffered_images and not bool(getattr(event, "private_companion_deferred_private_image_only_ready", False)):
+        skip_reply_image_for_forward_context = bool(getattr(event, "private_companion_forward_context_injected", False))
+        if skip_reply_image_for_forward_context:
+            logger.info("[PrivateCompanion] 本轮已注入合并消息上下文,跳过引用图片重复视觉: user=%s", user_id)
+        if (
+            not skip_reply_image_for_forward_context
+            and not buffered_images
+            and not bool(getattr(event, "private_companion_deferred_private_image_only_ready", False))
+        ):
             reply_image_sources = await self._find_reply_image_sources_for_event(event)
             if reply_image_sources:
                 reply_image_limit = self._private_image_vision_text_limit(len(reply_image_sources))
@@ -3008,12 +3127,16 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     @filter.on_llm_response()
     async def normalize_tts_enhancement_response(self, event: AstrMessageEvent, resp: LLMResponse):
         """规范化 TTS 标签错拼，避免 <ttts> 等内容漏到发送链路。"""
+        if self._proactive_only_blocks_passive_event(event):
+            return
         await self.protect_tts_enhancement_response_blocks(event, resp)
 
     @filter.on_llm_response()
     async def record_external_llm_token_usage(self, event: AstrMessageEvent, resp: LLMResponse):
         """统计非插件内部调用的 AstrBot 主回复 Token，单独展示且不计入插件限额。"""
         if not self.enabled:
+            return
+        if self._proactive_only_blocks_passive_event(event):
             return
         prompt = str(getattr(event, "private_companion_external_token_prompt", "") or "")
         started = _safe_float(getattr(event, "private_companion_external_token_start", 0), 0)
@@ -3043,6 +3166,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         release_now = False
         try:
             if not self.enabled:
+                release_now = True
+                return
+            if self._proactive_only_blocks_passive_event(event):
                 release_now = True
                 return
             if not bool(getattr(event, "is_private_chat", lambda: False)()):
@@ -3535,6 +3661,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         text = _single_line(event.message_str, 120)
         if text.startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴")):
             return
+        if self._message_debounce_command_text(event, text):
+            return
+        if self.enable_proactive_only_mode:
+            await self._record_proactive_only_private_feedback(
+                event,
+                user_id=user_id,
+                sender_display_name=sender_display_name,
+                text=text,
+                received_ts=received_ts,
+            )
+            return
         receipt_text = _single_line(event.message_str, 800)
         if receipt_text and await self._maybe_handle_atrelay_private_receipt_reply(event, user_id, sender_display_name, receipt_text):
             return
@@ -3560,6 +3697,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     user_id,
                     _single_line(forward_id, 40) or "inline",
                     bool(forward_payload),
+                )
+        reference_media_with_text = False
+        if text and not forward_only_prompt:
+            reference_media_with_text = await self._event_references_media_or_forward_with_text(event, text)
+            if reference_media_with_text:
+                logger.info(
+                    "[PrivateCompanion] 私聊引用媒体/合并消息附带文字,跳过文本收口等待: user=%s text=%s",
+                    user_id,
+                    _single_line(text, 80),
                 )
 
         raw_users = self.data.get("users", {})
@@ -3615,7 +3761,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
                 self._schedule_data_save()
                 return
-            if is_target_user and text and not forward_only_prompt:
+            if is_target_user and text and not forward_only_prompt and not reference_media_with_text:
                 self._maybe_record_smart_message_debounce_followup(
                     scope=f"private:{user_id}",
                     sender_id=user_id,
@@ -3752,7 +3898,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 self._schedule_data_save()
                 event.stop_event()
                 return
-            elif is_target_user and not forward_only_prompt:
+            elif is_target_user and not forward_only_prompt and not reference_media_with_text:
                 key = self._semantic_buffer_key(f"private:{user_id}", user_id)
                 buffers = getattr(self, "_semantic_message_buffers", None)
                 existing_buffer = buffers.get(key) if isinstance(buffers, dict) else None
@@ -3774,6 +3920,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     if cleaned_text and cleaned_text not in [_single_line(item.get("text"), 260) for item in messages if isinstance(item, dict)]:
                         messages.append({"ts": _now_ts(), "text": cleaned_text, "sender_name": ""})
                     existing_buffer["updated_ts"] = _now_ts()
+                    if _safe_float(existing_buffer.get("deadline_ts"), 0.0) <= 0:
+                        first_ts = _safe_float(existing_buffer.get("first_ts"), received_ts, received_ts)
+                        existing_buffer["deadline_ts"] = first_ts + self._message_debounce_seconds("image")
                     logger.info(
                         "[PrivateCompanion] 消息收口合并补话: kind=image mode=fixed scope=private:%s sender=%s wait=%.1fs count=%s text=%s",
                         user_id,
@@ -3913,6 +4062,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not text:
             return
         if text.startswith(("陪伴群", "/陪伴群", "群陪伴", "群聊陪伴")):
+            return
+        if self._message_debounce_command_text(event, text):
+            return
+        if self.enable_proactive_only_mode:
+            logger.debug("[PrivateCompanion] 主动消息专用模式已跳过群聊被动观察")
             return
         group_id = self._extract_group_id_from_event(event)
         if not group_id or not self._group_enabled_for_event(group_id):
@@ -4171,7 +4325,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             setattr(event, "private_companion_group_contextual_followup", bool(continuation))
             if wakeup_state_effect:
                 setattr(event, "private_companion_group_wakeup_state_effect", dict(wakeup_state_effect))
-            if high_intensity_state.get("active") and talking_to_bot:
+            group_reference_media_with_text = False
+            if talking_to_bot and text:
+                group_reference_media_with_text = await self._event_references_media_or_forward_with_text(event, text)
+                if group_reference_media_with_text:
+                    logger.info(
+                        "[PrivateCompanion] 群聊引用媒体/合并消息附带文字,跳过群聊收口等待: group=%s sender=%s text=%s",
+                        group_id,
+                        sender_id,
+                        _single_line(text, 80),
+                    )
+            if high_intensity_state.get("active") and talking_to_bot and not group_reference_media_with_text:
                 high_key = self._group_high_intensity_buffer_key(group_id)
                 if self._note_semantic_message_buffer(
                     high_key,
@@ -4203,7 +4367,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     return
             group_smart_wait = 0.0
             group_buffer_key = self._semantic_buffer_key(f"group:{group_id}", sender_id)
-            if talking_to_bot and not high_intensity_state.get("active"):
+            if talking_to_bot and not high_intensity_state.get("active") and not group_reference_media_with_text:
                 self._maybe_record_smart_message_debounce_followup(
                     scope=f"group:{group_id}",
                     sender_id=sender_id,
@@ -4229,6 +4393,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             if (
                 talking_to_bot
                 and not high_intensity_state.get("active")
+                and not group_reference_media_with_text
                 and self._note_semantic_message_buffer(
                     group_buffer_key,
                     text,

@@ -537,6 +537,38 @@ class ForwardMessageMixin:
                     return sources
         return []
 
+    def _event_has_reply_component(self, event: AstrMessageEvent) -> bool:
+        for item in self._event_components(event):
+            type_name = self._component_type_name(item)
+            if type_name == "reply" or "reply" in type_name:
+                return True
+        return False
+
+    async def _event_references_media_or_forward_with_text(self, event: AstrMessageEvent, text: str) -> bool:
+        if not _single_line(text, 260):
+            return False
+        found_reply = False
+        for item in self._event_components(event):
+            type_name = self._component_type_name(item)
+            if type_name != "reply" and "reply" not in type_name:
+                continue
+            found_reply = True
+            try:
+                forward_id, forward_payload = await self._extract_forward_from_reply(event, item)
+                if forward_id or forward_payload:
+                    if forward_payload and not forward_id:
+                        forward_id = self._build_inline_forward_id(forward_payload)
+                    self._remember_forward_descriptor_for_event(event, forward_id, forward_payload)
+                    return True
+            except Exception:
+                pass
+            try:
+                if await self._extract_image_sources_from_reply(event, item):
+                    return True
+            except Exception:
+                pass
+        return False
+
     async def _find_forward_descriptor_for_event(self, event: AstrMessageEvent) -> tuple[str, dict[str, Any]]:
         cached = getattr(event, "_private_companion_forward_descriptor", None)
         if (
@@ -1289,6 +1321,10 @@ class ForwardMessageMixin:
             logger.info("[PrivateCompanion] 合并消息请求开始注入检查: text=%s", message_text or "(empty)")
         context = await self._format_forward_message_context_for_prompt(event, req)
         if context:
+            try:
+                setattr(event, "private_companion_forward_context_injected", True)
+            except Exception:
+                pass
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{context}".strip()
             recorder = getattr(self, "_record_request_prompt_fragment", None)
             if callable(recorder):

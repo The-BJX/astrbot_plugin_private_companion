@@ -10,6 +10,12 @@
     "hint": "总开关。关闭后后台主动消息循环不会启动，但配置仍保留。",
     "default": false
   },
+  "enable_proactive_only_mode": {
+    "description": "主动消息专用模式",
+    "type": "bool",
+    "hint": "默认关闭。开启后只保留插件主动私聊的日程、生成和发送；普通私聊/群聊消息不再进入本插件的被动增强、图片/转发处理、防抖、群聊观察或提示词注入。用户回复主动消息时仍会轻量记录为已回应。",
+    "default": false
+  },
   "bot_name": {
     "description": "Bot 名字 / 页面展示名",
     "type": "string",
@@ -255,6 +261,13 @@
     "default": "",
     "_special": "select_provider"
   },
+  "TROUBLESHOOTING_PROVIDER_ID": {
+    "description": "排障检查模型（留空跟随回复自检）",
+    "type": "string",
+    "hint": "用于扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。建议选择便宜、指令遵循稳定、分类判断保守的小模型；留空会先回退到回复自检改写模型，再回退到陪伴通用/主模型。",
+    "default": "",
+    "_special": "select_provider"
+  },
   "RELATIONSHIP_ANALYSIS_PROVIDER_ID": {
     "description": "关系站位分析模型（留空跟随陪伴通用模型）",
     "type": "string",
@@ -443,14 +456,14 @@
   "enable_smart_message_debounce": {
     "description": "启用智能文本收口",
     "type": "bool",
-    "hint": "默认关闭。开启后先用本地规则快速放行完整问题、问候、短互动和普通完整表达；只有疑似半句话时才短时调用轻量模型确认，并记录误判样本供下次判断参考。",
+    "hint": "默认关闭。开启后先用本地规则快速放行明确完整的问题、问候、短互动和普通完整表达；“知道吗/问你个事/你猜”等短引子会直接短等补话，其他疑似半句话才短时调用轻量模型确认，并记录误判样本供下次判断参考。",
     "default": false,
     "condition": "enable_message_debounce"
   },
   "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": {
     "description": "智能收口小模型 Provider ID",
     "type": "string",
-    "hint": "用于判断疑似没说完文本的轻量模型。完整问句、短互动和普通完整表达会先由本地快判直接放行，不会调用模型；留空时跟随插件主模型。",
+    "hint": "用于判断疑似没说完文本的轻量模型。明确完整的问题、短互动和普通完整表达会先由本地快判直接放行；短引子会直接等待补话。留空时跟随插件主模型。",
     "default": "",
     "condition": "enable_smart_message_debounce"
   },

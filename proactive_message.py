@@ -2556,10 +2556,28 @@ class ProactiveMessageMixin:
             "屏幕插件不可用",
             "未授权",
             "不可用",
+            "Invalid base64 image_url",
+            "图片预处理结果为空",
+            "所有视觉链路都失败",
+            "视觉 provider 调用失败",
+            "当前 provider 不支持原生视频上传",
             "没看清",
             "稍后再让我看看",
             "没有得到屏幕观察结果",
             "识屏分析失败",
+        )
+        return any(token in text for token in fail_tokens)
+
+    def _is_screen_peek_provider_failure(self, context: str) -> bool:
+        text = str(context or "")
+        fail_tokens = (
+            "Invalid base64 image_url",
+            "图片预处理结果为空",
+            "所有视觉链路都失败",
+            "视觉 provider 调用失败",
+            "Asset upload returned",
+            "BadRequest",
+            "InvalidParameter",
         )
         return any(token in text for token in fail_tokens)
 
@@ -2605,10 +2623,17 @@ class ProactiveMessageMixin:
                 history_user_text=f"主动陪伴想轻轻看一眼 {name} 现在在忙什么。",
                 task_id="private_companion_screen_peek",
             )
-            return "screen_peek：\n" + (_single_line(result, 300) if result else "没有得到屏幕观察结果")
+            context = "screen_peek：\n" + (_single_line(result, 300) if result else "没有得到屏幕观察结果")
+            if self._is_screen_peek_provider_failure(context):
+                self._note_screen_peek_failure(user, context)
+            return context
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] screen_peek 主动行为失败: {e}")
-            return f"screen_peek：失败,{e}"
+            error_text = _single_line(e, 240)
+            logger.warning(f"[PrivateCompanion] screen_peek 主动行为失败: {error_text}")
+            context = f"screen_peek：失败,{error_text}"
+            if self._is_screen_peek_provider_failure(context):
+                self._note_screen_peek_failure(user, context)
+            return context
 
     def _get_screen_companion_plugin(self) -> Any:
         for module_name in ("astrbot_plugin_screen_companion.main", "data.plugins.astrbot_plugin_screen_companion.main"):

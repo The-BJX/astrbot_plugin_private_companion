@@ -62,6 +62,7 @@ const providerLabels = {
   NARRATION_PROVIDER_ID: "工具结果转述",
   HISTORY_SUMMARY_PROVIDER_ID: "昨日对话摘要",
   RESPONSE_REVIEW_PROVIDER_ID: "回复自检改写",
+  TROUBLESHOOTING_PROVIDER_ID: "排障检查",
   RELATIONSHIP_ANALYSIS_PROVIDER_ID: "关系站位分析",
   COMPANION_MEMORY_PROVIDER_ID: "长期画像整理",
   DIALOGUE_EPISODE_PROVIDER_ID: "私聊片段整理",
@@ -224,6 +225,11 @@ const providerGuides = {
     fit: "适合便宜、短文本改写自然、边界判断稳的模型。",
     fallback: "留空时回退到陪伴通用模型，再回退到主模型。",
   },
+  TROUBLESHOOTING_PROVIDER_ID: {
+    purpose: "扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。",
+    fit: "适合便宜、低延迟、指令遵循稳定、分类判断保守的小模型。",
+    fallback: "留空时先跟随回复自检改写模型，再回退到陪伴通用模型和主模型。",
+  },
   RELATIONSHIP_ANALYSIS_PROVIDER_ID: {
     purpose: "分析关系阶段、亲近度、打扰边界和互动站位，影响后续语气判断。",
     fit: "适合情绪和关系判断细腻、分类稳定、不会过度脑补的模型。",
@@ -291,7 +297,7 @@ const providerGroups = [
     id: "core",
     title: "基础与兜底",
     desc: "主模型、陪伴通用和最终回复前后的基础能力。",
-    keys: ["LLM_PROVIDER_ID", "MAI_STYLE_PROVIDER_ID", "RESPONSE_REVIEW_PROVIDER_ID", "NARRATION_PROVIDER_ID"],
+    keys: ["LLM_PROVIDER_ID", "MAI_STYLE_PROVIDER_ID", "RESPONSE_REVIEW_PROVIDER_ID", "TROUBLESHOOTING_PROVIDER_ID", "NARRATION_PROVIDER_ID"],
   },
   {
     id: "daily",
@@ -325,6 +331,7 @@ const providerGroupByKey = providerGroups.reduce((acc, group) => {
 }, {});
 
 const featureMeta = {
+  enable_proactive_only_mode: ["主动消息专用模式", "只保留主动私聊调度、生成和发送；普通私聊/群聊不再进入本插件被动增强。"],
   enable_mai_style_integration: ["陪伴风格整合", "把关系站位、记忆和自然对话规则注入回复。"],
   enable_companion_memory: ["长期画像", "沉淀用户偏好、边界、关系线索和可复用事实。"],
   enable_expression_learning: ["表达学习", "学习用户常用短句、语气和称呼，提升贴近感。"],
@@ -344,7 +351,7 @@ const featureMeta = {
   enable_cycle_state: ["生理期模拟", "在人格适合人类身体设定时，允许当前扮演状态偶尔加入生理期前、处于生理期或生理期后的状态。"],
   enable_skill_growth_simulation: ["技能成长", "能力状态与边界；自定义技能请到观察页的技能成长卡片管理。"],
   enable_message_debounce: ["消息收口防抖", "把文本、图片、转发后的补充说明合并进同一轮；旧版语义收口等待已并入文本补话等待。"],
-  enable_smart_message_debounce: ["智能文本收口", "先本地快判完整文本，只在疑似没说完时短时调用小模型。"],
+  enable_smart_message_debounce: ["智能文本收口", "先本地快判明确完整文本；“知道吗/问你个事/你猜”等短引子会先等补话。"],
   enable_recall_enhancement: ["撤回增强", "感知撤回事件，支持发送前取消回复、短期防撤回转述和违禁词自动撤回。"],
   enable_recall_cancel_reply: ["撤回取消回复", "撤回增强的子能力：触发/唤醒消息在 Bot 发出回复前被撤回时，静默取消本次回复和后续分段。"],
   enable_recall_message_cache: ["撤回消息缓存", "撤回增强的子能力：短期缓存消息摘要，撤回后可在过期前转述。"],
@@ -573,6 +580,37 @@ const embeddedFeatureParentByKey = {
 
 const embeddedFeatureKeys = new Set(Object.keys(embeddedFeatureParentByKey));
 
+const proactiveOnlyLockedFeatureKeys = new Set([
+  "inject_passive_states",
+  "enable_companion_reply_planner",
+  "enable_intent_emotion_analysis",
+  "enable_response_self_review",
+  "enable_llm_timer_scheduling",
+  "enable_passive_topic_suppression",
+  "enable_message_debounce",
+  "enable_recall_enhancement",
+  "enable_private_image_self_recognition",
+  "enable_forward_message_adaptation",
+  "enable_group_companion",
+  "enable_skill_growth_passive_injection",
+  "enable_private_reading_preference_influence",
+  "enable_worldbook_member_recognition",
+  "enable_atrelay_tools",
+  "enable_livingmemory_integration",
+]);
+
+function proactiveOnlyModeEnabled() {
+  return toBool(state.featureDraft?.enable_proactive_only_mode);
+}
+
+function featureLockedByProactiveOnlyMode(key) {
+  if (key === "enable_proactive_only_mode") return false;
+  return proactiveOnlyModeEnabled() && (
+    proactiveOnlyLockedFeatureKeys.has(key)
+    || proactiveOnlyLockedFeatureKeys.has(topLevelFeatureKey(key))
+  );
+}
+
 function visibleFeatureSwitchKey(key) {
   if (hiddenCompatibilityConfigKeys.has(key)) return false;
   const detailSettingKeys = new Set(Object.values(featureSettingGroups || {}).flat());
@@ -678,6 +716,7 @@ const configLabels = {
   recall_forbidden_words: "撤回违禁词表",
   recall_forbidden_scope: "违禁词撤回范围",
   recall_forbidden_word_case_sensitive: "违禁词大小写敏感",
+  enable_proactive_only_mode: "主动消息专用模式",
   text_message_debounce_seconds: "文本补话等待秒数",
   image_message_debounce_seconds: "图片补话等待秒数",
   forward_message_debounce_seconds: "转发补话等待秒数",
@@ -877,6 +916,7 @@ const configLabels = {
 };
 
 const configDescriptions = {
+  enable_proactive_only_mode: "开启后，本插件只保留主动私聊的日程、主动生成和发送链路；普通私聊、群聊消息不会再被本插件做状态/TTS/图片/转发/群聊上下文注入，也不会触发被动回复增强。用户回复主动消息时仍会被轻量记为已回应。它会让普通被动回复的 prompt 更稳定，显著提高缓存命中率。",
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
   plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于角色设定补充，它会影响私聊被动回复和关系判断。",
   private_user_aliases: "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射，例如：688C2CE7...=100012345。",
@@ -903,6 +943,7 @@ const configDescriptions = {
   enable_almanac_perception: "开启后生成轻量宜忌氛围标签，只作表达参考。",
   enable_yesterday_screen_diary_context: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，作为今日状态、日程和生活节奏背景；不会读取今天实时屏幕。",
   screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
+  TROUBLESHOOTING_PROVIDER_ID: "用于排障中心的模型复核。留空时先跟随回复自检改写模型，再回退到陪伴通用/主模型。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
   timer_pre_silence_minutes: "已有明确自预约/定时主动时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。",
@@ -940,8 +981,8 @@ const configDescriptions = {
   daily_token_soft_limit: "今日插件内部 LLM 消耗达到该值后进入软降载。0 表示关闭软限额，只保留每日硬限额。",
   inbound_message_debounce_seconds: "只用于去掉平台或适配器短时间重复上报的同一条消息；不是等待用户补话的时间。",
   enable_message_debounce: "消息收口总开关。开启后，文本、图片、合并转发会按各自等待秒数给用户留补充说明的时间。",
-  enable_smart_message_debounce: "开启后，普通文本先走本地快判：完整问候、短互动和完整问题会直接放行；只有疑似半句话才调用小模型。默认关闭。",
-  SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: "用于判断“疑似没说完”的轻量文本 Provider。完整文本不会调用模型；留空时跟随插件主模型。",
+  enable_smart_message_debounce: "开启后，普通文本先走本地快判：明确完整的问候、短互动和问题会直接放行；“知道吗/问你个事/你猜”等短引子会短等补话，其他疑似半句话才调用小模型。默认关闭。",
+  SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: "用于判断“疑似没说完”的轻量文本 Provider。明确完整文本不会调用模型，短引子会直接等待补话；留空时跟随插件主模型。",
   smart_message_debounce_model_timeout_seconds: "小模型判断的最长等待时间。超时后立刻使用本地启发式兜底，避免正常回复被拖慢。",
   smart_message_debounce_wait_seconds: "判断用户还没说完时的总等待预算；小模型判断耗时会计入这个时间，不会判断完再额外等满。",
   smart_message_debounce_learning_window_seconds: "如果模型刚判断已说完，但用户在该窗口内继续补话，就记录为误判样本。",
@@ -1151,6 +1192,7 @@ const featureSettingGroups = {
   enable_dialogue_episode_memory: ["episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
   enable_open_loop_tracking: ["max_dialogue_episodes"],
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
+  enable_proactive_only_mode: [],
   enable_humanized_states: ["humanized_state_intensity", "inject_passive_states", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
@@ -1287,7 +1329,7 @@ const featureSettingSections = {
     },
     {
       title: "补话等待",
-      note: "分别控制文本、图片和合并转发后等待用户继续补充的时间；旧版语义等待已并入文本。",
+      note: "分别控制文本、图片和合并转发后等待用户继续补充的时间；开启智能文本收口后，文本固定等待会隐藏。",
       keys: ["text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds"],
     },
     {
@@ -2555,32 +2597,64 @@ function troubleshootingChainTestMarkup(results) {
       result.file_size ? `${formatBytes(result.file_size)}` : "",
       result.ran_at_text || "",
     ].filter(Boolean).join(" · ");
-    const steps = Array.isArray(result.steps) ? result.steps : [];
-    const stepsMarkup = steps.length ? `
-      <details class="chain-test-steps">
-        <summary>查看链路阶段</summary>
-        ${steps.map((step) => `
-          <div class="${escapeHtml(step.status || "info")}">
-            <b>${escapeHtml(step.name || "-")}</b>
-            <span>${escapeHtml(step.detail || "")}</span>
-          </div>
-        `).join("")}
-      </details>
-    ` : "";
+    const stepsMarkup = troubleshootingChainStepsMarkup(result.steps);
+    const previewMarkup = troubleshootingChainPreviewMarkup(test.type, result);
+    const detailText = troubleshootingChainDetailText(test, result, hasResult);
     return `
       <section class="troubleshooting-chain-test ${escapeHtml(status)}">
         <div>
           <b>${escapeHtml(test.title)}</b>
-          <p>${escapeHtml(hasResult ? (result.detail || result.error || test.text) : test.text)}</p>
+          <p>${escapeHtml(detailText)}</p>
           ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
           ${result.path ? `<small class="path">${escapeHtml(result.path)}</small>` : ""}
-          ${result.text_preview ? `<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>` : ""}
+          ${previewMarkup}
           ${stepsMarkup}
         </div>
         <button type="button" data-troubleshooting-test="${escapeHtml(test.type)}">${escapeHtml(test.button)}</button>
       </section>
     `;
   }).join("");
+}
+
+function troubleshootingChainDetailText(test, result, hasResult) {
+  if (!hasResult) return test.text;
+  if (result.error) return result.error;
+  if (test.type === "skill_similarity" && result.ok) {
+    const localCount = Number(result.local_count || 0);
+    const modelCount = Number(result.model_count || 0);
+    return result.detail || `本地发现 ${localCount} 组候选，模型给出 ${modelCount} 条建议`;
+  }
+  return result.detail || test.text;
+}
+
+function troubleshootingChainStepsMarkup(stepsRaw) {
+  const steps = Array.isArray(stepsRaw) ? stepsRaw : [];
+  if (!steps.length) return "";
+  return `
+    <details class="chain-test-steps">
+      <summary>查看链路阶段</summary>
+      ${steps.map((step) => `
+        <div class="${escapeHtml(step.status || "info")}">
+          <b>${escapeHtml(step.name || "-")}</b>
+          <span>${escapeHtml(step.detail || "")}</span>
+        </div>
+      `).join("")}
+    </details>
+  `;
+}
+
+function troubleshootingChainPreviewMarkup(type, result) {
+  if (type === "skill_similarity") {
+    const suggestions = Array.isArray(result.suggestions) ? result.suggestions.filter(Boolean) : [];
+    if (!suggestions.length && !result.text_preview) return "";
+    return `
+      <details class="chain-test-steps chain-test-preview">
+        <summary>查看相似项建议${result.extra_count ? `（另有 ${escapeHtml(result.extra_count)} 条未展示）` : ""}</summary>
+        ${suggestions.length ? suggestions.map((item) => `<p>${escapeHtml(item)}</p>`).join("") : `<p>${escapeHtml(result.text_preview || "")}</p>`}
+      </details>
+    `;
+  }
+  return result.text_preview ? `<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>` : "";
 }
 
 function troubleshootingDebounceTraceMarkup(data) {
@@ -6368,10 +6442,23 @@ function renderModuleSettings() {
   const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
   if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
   document.querySelectorAll(".module-form").forEach((form) => markModuleFormClean(form));
+  updateMessageDebounceConfigVisibility();
   updateSegmentedConfigVisibility($("#privateModuleForm"));
   renderSegmentedPreview();
   renderExternalAbilities();
   renderPresetCards();
+}
+
+function updateMessageDebounceConfigVisibility() {
+  const smartEnabled = Object.prototype.hasOwnProperty.call(state.featureDraft || {}, "enable_smart_message_debounce")
+    ? Boolean(state.featureDraft.enable_smart_message_debounce)
+    : toBool(state.overview?.settings?.enable_smart_message_debounce);
+  document.querySelectorAll("[data-fixed-text-debounce-field]").forEach((row) => {
+    row.hidden = smartEnabled;
+    row.querySelectorAll("[name]").forEach((input) => {
+      input.disabled = smartEnabled;
+    });
+  });
 }
 
 function renderCurrentPersonaStatus(settings) {
@@ -7758,6 +7845,7 @@ function renderListCoverage(group, draft = null) {
 
 function renderFeatureSwitches() {
   const filter = ($("#featureFilter")?.value || "").trim().toLowerCase();
+  renderProactiveOnlyModeCard();
   const knownKeys = new Set(featureGroups.flatMap((group) => group.keys));
   const extraKeys = Object.keys(state.featureDraft || {}).filter((key) => !knownKeys.has(key) && visibleFeatureSwitchKey(key));
   const groups = extraKeys.length
@@ -7766,8 +7854,10 @@ function renderFeatureSwitches() {
   const visibleDraftKeys = visibleTopLevelFeatureKeys(state.featureDraft || {});
   const total = visibleDraftKeys.length;
   const enabled = visibleDraftKeys.filter((key) => toBool(state.featureDraft[key])).length;
+  const proactiveLocked = visibleDraftKeys.filter((key) => featureLockedByProactiveOnlyMode(key)).length;
   const riskyEnabled = ["enable_group_interjection", "enable_bilibili_boredom_watch", isPrivateReadingAvailable() ? "enable_private_reading_boredom_read" : "", isPrivateReadingAvailable() ? "enable_private_reading_ask_recommendation" : "", "enable_unanswered_screen_peek_followup"]
     .filter((key) => toBool(state.featureDraft[key])).length;
+  const activeSafeFeatureKeys = safeFeatureKeys.filter((key) => !featureLockedByProactiveOnlyMode(key));
   $("#featureSwitchSummary").innerHTML = `
     <section class="feature-summary-card ok">
       <span>已开启</span>
@@ -7776,13 +7866,13 @@ function renderFeatureSwitches() {
     </section>
     <section class="feature-summary-card">
       <span>基础安全项</span>
-      <b>${escapeHtml(safeFeatureKeys.filter((key) => toBool(state.featureDraft[key])).length)} / ${escapeHtml(safeFeatureKeys.length)}</b>
-      <small>隐私、记忆、回复稳定性</small>
+      <b>${escapeHtml(activeSafeFeatureKeys.filter((key) => toBool(state.featureDraft[key])).length)} / ${escapeHtml(activeSafeFeatureKeys.length)}</b>
+      <small>${escapeHtml(proactiveOnlyModeEnabled() ? "已排除模式锁定项" : "隐私、记忆、回复稳定性")}</small>
     </section>
     <section class="feature-summary-card ${riskyEnabled ? "warn" : ""}">
-      <span>高主动子项</span>
-      <b>${escapeHtml(riskyEnabled)}</b>
-      <small>含详情页子开关</small>
+      <span>${escapeHtml(proactiveOnlyModeEnabled() ? "模式锁定" : "高主动子项")}</span>
+      <b>${escapeHtml(proactiveOnlyModeEnabled() ? proactiveLocked : riskyEnabled)}</b>
+      <small>${escapeHtml(proactiveOnlyModeEnabled() ? "被主动消息专用模式覆盖" : "含详情页子开关")}</small>
     </section>
   `;
 
@@ -7835,17 +7925,50 @@ function renderFeatureSwitches() {
   });
 }
 
+function renderProactiveOnlyModeCard() {
+  const root = $("#proactiveOnlyModeCard");
+  if (!root) return;
+  const key = "enable_proactive_only_mode";
+  const checked = toBool(state.featureDraft[key]);
+  root.innerHTML = `
+    <section class="proactive-mode-card ${checked ? "on" : "off"}">
+      <label class="feature-toggle-hit proactive-mode-toggle" aria-label="${escapeHtml(featureLabel(key))}">
+        <input type="checkbox" data-proactive-only-mode-toggle ${checked ? "checked" : ""}>
+        <span class="feature-toggle-visual"></span>
+      </label>
+      <div class="proactive-mode-main">
+        <div class="proactive-mode-kicker">运行模式 · 缓存友好</div>
+        <h3>${escapeHtml(featureLabel(key))}</h3>
+        <p>只保留主动私聊调度、生成和发送；普通私聊/群聊不再进入本插件被动增强、TTS、图片/转发、群聊观察或工具链。</p>
+        <p>由于被动回复不再混入大量动态提示词，主模型 prompt 更稳定，能显著提高缓存命中率；下方被覆盖的被动功能会自动锁定但保留原配置。</p>
+        <small>${escapeHtml(key)}</small>
+      </div>
+      <button type="button" class="proactive-mode-detail" data-feature-open="${escapeHtml(key)}">查看说明</button>
+    </section>
+  `;
+  root.querySelector("[data-proactive-only-mode-toggle]")?.addEventListener("change", (event) => {
+    state.featureDraft[key] = Boolean(event.target.checked);
+    renderFeatureSwitches();
+  });
+  root.querySelector("[data-feature-open]")?.addEventListener("click", () => {
+    state.selectedFeatureKey = key;
+    renderFeatureSwitches();
+  });
+}
+
 function featureSwitchItem(key) {
   const checked = toBool(state.featureDraft[key]);
+  const locked = featureLockedByProactiveOnlyMode(key);
   return `
-    <section class="feature-switch-item ${checked ? "on" : "off"}" title="${escapeHtml(featureDescription(key))}">
+    <section class="feature-switch-item ${checked ? "on" : "off"} ${locked ? "locked" : ""}" title="${escapeHtml(locked ? "主动消息专用模式开启时，此功能在普通被动链路中被锁定覆盖，原配置会保留。" : featureDescription(key))}">
       <label class="feature-toggle-hit" aria-label="${escapeHtml(featureLabel(key))}">
-        <input type="checkbox" data-feature-key="${escapeHtml(key)}" ${checked ? "checked" : ""}>
+        <input type="checkbox" data-feature-key="${escapeHtml(key)}" ${checked ? "checked" : ""} ${locked ? "disabled" : ""}>
         <span class="feature-toggle-visual"></span>
       </label>
       <button type="button" class="feature-switch-text" data-feature-open="${escapeHtml(key)}">
         <b>${escapeHtml(featureLabel(key))}</b>
-        <span class="feature-state-text">${escapeHtml(checked ? "开启" : "关闭")}</span>
+        <span class="feature-state-text">${escapeHtml(locked ? "已锁定" : checked ? "开启" : "关闭")}</span>
+        ${locked ? `<em>被主动消息专用模式覆盖，原配置保留</em>` : ""}
         <small>${escapeHtml(key)}</small>
       </button>
     </section>
@@ -7853,6 +7976,7 @@ function featureSwitchItem(key) {
 }
 
 function featureGroupForKey(key) {
+  if (key === "enable_proactive_only_mode") return "运行模式";
   const parentKey = topLevelFeatureKey(key);
   const group = featureGroups.find((item) => item.keys.includes(parentKey));
   return group ? group.title : "其他";
@@ -7874,23 +7998,25 @@ function featureRelatedSettings(key) {
 }
 
 function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = state.overview?.settings || {}) {
+  const boolSetting = (name) => {
+    if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return Boolean(state.featureDraft[name]);
+    return toBool(settings[name]);
+  };
   if (featureKey === "enable_humanized_states") {
     const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID"]);
     if (restChildren.has(settingKey)) {
-      const restEnabled = Object.prototype.hasOwnProperty.call(state.featureDraft || {}, "enable_rest_reply_simulation")
-        ? Boolean(state.featureDraft.enable_rest_reply_simulation)
-        : Boolean(settings.enable_rest_reply_simulation);
+      const restEnabled = boolSetting("enable_rest_reply_simulation");
       return restEnabled;
     }
+    return true;
+  }
+  if (featureKey === "enable_message_debounce") {
+    if (settingKey === "text_message_debounce_seconds" && boolSetting("enable_smart_message_debounce")) return false;
     return true;
   }
   if (featureKey !== "enable_tts_enhancement") return true;
   const mode = String(settings.tts_frequency_control_mode || "global");
   const rawGenerationMode = String(settings.tts_generation_mode || "fast_tag").toLowerCase();
-  const boolSetting = (name) => {
-    if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return Boolean(state.featureDraft[name]);
-    return toBool(settings[name]);
-  };
   const generationMode = {
     hybrid: "fast_tag",
     direct: "fast_tag",
@@ -7969,17 +8095,19 @@ function featureSettingInputType(key, value) {
 function featureSettingInput(key, value) {
   const spec = featureSettingInputType(key, value);
   const safeKey = escapeHtml(key);
+  const disabled = featureLockedByProactiveOnlyMode(key);
+  const disabledAttr = disabled ? " disabled" : "";
   if (spec.type === "checkbox") {
     return `
       <label class="feature-param-check">
-        <input type="checkbox" data-feature-param="${safeKey}" ${value ? "checked" : ""}>
-        <span>${escapeHtml(value ? "开启" : "关闭")}</span>
+        <input type="checkbox" data-feature-param="${safeKey}" ${value ? "checked" : ""}${disabledAttr}>
+        <span>${escapeHtml(disabled ? "已锁定" : value ? "开启" : "关闭")}</span>
       </label>
     `;
   }
   if (spec.type === "select") {
     return `
-      <select data-feature-param="${safeKey}">
+      <select data-feature-param="${safeKey}"${disabledAttr}>
         ${(spec.options || []).map(([optionValue, label]) => `
           <option value="${escapeHtml(optionValue)}"${String(value ?? "") === String(optionValue) ? " selected" : ""}>${escapeHtml(label)}</option>
         `).join("")}
@@ -7990,7 +8118,7 @@ function featureSettingInput(key, value) {
     return featureProviderSelect(key, value);
   }
   if (spec.type === "textarea") {
-    return `<textarea data-feature-param="${safeKey}" rows="3">${escapeHtml(Array.isArray(value) ? value.join("\n") : value ?? "")}</textarea>`;
+    return `<textarea data-feature-param="${safeKey}" rows="3"${disabledAttr}>${escapeHtml(Array.isArray(value) ? value.join("\n") : value ?? "")}</textarea>`;
   }
   const numeric = spec.type === "number" || typeof value === "number";
   const step = spec.step ?? (percentSettingKeys.has(key) ? "1" : probabilitySettingKeys.has(key) || key === "skill_growth_rate" ? "0.01" : "any");
@@ -8004,6 +8132,7 @@ function featureSettingInput(key, value) {
       ${numeric ? `step="${step}"` : ""}
       ${min ? `min="${min}"` : ""}
       ${max ? `max="${max}"` : ""}
+      ${disabledAttr}
     />
   `;
 }
@@ -8073,6 +8202,8 @@ function collectFeatureDetailPayload(featureKey, root = document) {
 
 function featureDependencyLines(key) {
   const dependencies = [];
+  if (featureLockedByProactiveOnlyMode(key)) dependencies.push(["运行模式覆盖", "主动消息专用模式已开启；此功能在普通被动链路中被锁定，原配置保留，关闭该模式后恢复生效。"]);
+  if (key === "enable_proactive_only_mode") dependencies.push(["注意", "开启后被动增强与群聊观察会被总模式跳过"]);
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
   if (["enable_companion_memory", "enable_expression_learning", "enable_companion_reply_planner", "enable_intent_emotion_analysis", "enable_response_self_review", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking"].includes(key)) {
@@ -8094,6 +8225,12 @@ function featureDependencyLines(key) {
 }
 
 const featureDetailGuides = {
+  enable_proactive_only_mode: {
+    summary: "把插件收束成“只负责主动来找用户”的模式，适合不想让它参与普通私聊/群聊被动回复的人。",
+    trigger: "普通私聊、群聊事件和非主动框架 LLM 请求到达时生效。",
+    enabled: "插件仍会跑日程、状态、主动意愿和私聊主动发送；普通聊天不会注入本插件状态、TTS、图片/转发摘要或群聊上下文，也不会使用插件工具。普通被动 prompt 更稳定，缓存命中率更高；用户回复主动消息仍会被轻量记录为已回应。",
+    disabled: "按各功能开关正常参与私聊被动增强、群聊观察、图片/转发处理和提示词注入。",
+  },
   enable_mai_style_integration: {
     summary: "把插件整理出的关系、记忆、状态和说话风格放进普通回复里，是陪伴回复增强的核心入口。",
     trigger: "每次 Bot 正常回复前生效。",
@@ -8593,6 +8730,7 @@ function configLabel(name) {
 
 function featureDetailPage(key) {
   const enabled = toBool(state.featureDraft[key]);
+  const locked = featureLockedByProactiveOnlyMode(key);
   const related = featureRelatedSettings(key);
   const relatedMap = Object.fromEntries(related.map((item) => [item.key, item]));
   const dependencies = featureDependencyLines(key);
@@ -8642,13 +8780,14 @@ function featureDetailPage(key) {
     : `<div><dt>-</dt><dd>无额外依赖</dd></div>`;
   const impactRows = impacts.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
   return `
-    <section class="feature-detail-page ${enabled ? "on" : "off"}">
+    <section class="feature-detail-page ${enabled ? "on" : "off"} ${locked ? "locked" : ""}">
       <nav class="feature-detail-breadcrumb">
         <button type="button" data-feature-back>功能开关</button>
         <span>/ ${escapeHtml(featureGroupForKey(key))}</span>
       </nav>
       <div class="feature-state-strip ${enabled ? "on" : "off"}">
-        <b>${escapeHtml(enabled ? "开启" : "关闭")}</b>
+        <b>${escapeHtml(locked ? "已锁定" : enabled ? "开启" : "关闭")}</b>
+        ${locked ? `<span>主动消息专用模式正在覆盖这个功能；保存的原始开关值不会被修改。</span>` : ""}
       </div>
       <header class="feature-detail-head">
         <div>
@@ -8657,9 +8796,9 @@ function featureDetailPage(key) {
           <p>${escapeHtml(featureDetailExplanation(key))}</p>
         </div>
         <label class="feature-detail-toggle">
-          <input type="checkbox" data-feature-detail-toggle="${escapeHtml(key)}" ${enabled ? "checked" : ""}>
+          <input type="checkbox" data-feature-detail-toggle="${escapeHtml(key)}" ${enabled ? "checked" : ""} ${locked ? "disabled" : ""}>
           <span class="feature-toggle-visual"></span>
-          <b>${escapeHtml(enabled ? "开启" : "关闭")}</b>
+          <b>${escapeHtml(locked ? "已锁定" : enabled ? "开启" : "关闭")}</b>
         </label>
       </header>
       <div class="feature-detail-grid">
@@ -8719,6 +8858,12 @@ function bindFeatureDetailActions() {
             state.featureDraft.enable_rest_reply_simulation = input.checked;
             state.overview.settings = state.overview.settings || {};
             state.overview.settings.enable_rest_reply_simulation = input.checked;
+            renderFeatureSwitches();
+          }
+          if (state.selectedFeatureKey === "enable_message_debounce" && input.dataset.featureParam === "enable_smart_message_debounce") {
+            state.featureDraft.enable_smart_message_debounce = input.checked;
+            state.overview.settings = state.overview.settings || {};
+            state.overview.settings.enable_smart_message_debounce = input.checked;
             renderFeatureSwitches();
           }
           if (
@@ -8946,6 +9091,7 @@ function currentProviderValues() {
 function resolveProviderId(key, values = currentProviderValues()) {
   if (values[key]) return values[key];
   if (noFallbackProviderKeys.has(key)) return "";
+  if (key === "TROUBLESHOOTING_PROVIDER_ID" && values.RESPONSE_REVIEW_PROVIDER_ID) return values.RESPONSE_REVIEW_PROVIDER_ID;
   if (key !== "LLM_PROVIDER_ID" && values.MAI_STYLE_PROVIDER_ID) return values.MAI_STYLE_PROVIDER_ID;
   return values.LLM_PROVIDER_ID || "";
 }
@@ -10221,7 +10367,7 @@ $("#saveFeaturesBtn").addEventListener("click", async () => {
 
 $("#enableSafeFeaturesBtn").addEventListener("click", () => {
   safeFeatureKeys.forEach((key) => {
-    if (Object.prototype.hasOwnProperty.call(state.featureDraft, key)) {
+    if (Object.prototype.hasOwnProperty.call(state.featureDraft, key) && !featureLockedByProactiveOnlyMode(key)) {
       state.featureDraft[key] = true;
     }
   });

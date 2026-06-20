@@ -930,11 +930,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 provider_selector = getattr(self.plugin, "_task_provider", None)
                 if callable(provider_selector):
                     provider_id = provider_selector(
+                        getattr(self.plugin, "troubleshooting_provider_id", ""),
                         getattr(self.plugin, "response_review_provider_id", ""),
+                        getattr(self.plugin, "mai_style_provider_id", ""),
                         getattr(self.plugin, "llm_provider_id", ""),
                     )
                 else:
-                    provider_id = str(getattr(self.plugin, "response_review_provider_id", "") or getattr(self.plugin, "llm_provider_id", "") or "")
+                    provider_id = str(
+                        getattr(self.plugin, "troubleshooting_provider_id", "")
+                        or getattr(self.plugin, "response_review_provider_id", "")
+                        or getattr(self.plugin, "mai_style_provider_id", "")
+                        or getattr(self.plugin, "llm_provider_id", "")
+                        or ""
+                    )
                 prompt = self._skill_similarity_review_prompt(data, local_items)
                 try:
                     raw = await caller(
@@ -965,14 +973,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             for item in local_items[:8]
         ]
         all_suggestions = [*local_preview, *model_items]
-        detail = "；".join(all_suggestions[:3]) if all_suggestions else "技能项目前看起来没有明显相似/冲突问题"
+        detail = (
+            f"本地发现 {len(local_items)} 组候选，模型给出 {len(model_items)} 条建议"
+            if all_suggestions
+            else "技能项目前看起来没有明显相似/冲突问题"
+        )
         return {
             "ok": True,
             "title": "技能相似项检查",
             "provider": self._single_line(provider_id, 100),
             "detail": self._single_line(detail, 220),
-            "text_preview": self._single_line(" | ".join(all_suggestions[:8]), 220),
-            "extra_count": max(0, len(all_suggestions) - 3),
+            "text_preview": self._single_line(" | ".join(all_suggestions[:5]), 220),
+            "suggestions": [self._single_line(item, 220) for item in all_suggestions[:10]],
+            "local_count": len(local_items),
+            "model_count": len(model_items),
+            "suggestion_count": len(all_suggestions),
+            "extra_count": max(0, len(all_suggestions) - 5),
             "steps": steps,
             "elapsed_ms": int((time.time() - started) * 1000),
             "error": "",
@@ -981,6 +997,30 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _skill_similarity_local_candidates(self, data: dict[str, Any]) -> list[dict[str, str]]:
         state = data.get("skill_growth") if isinstance(data.get("skill_growth"), dict) else {}
         skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        generic_terms = {
+            "学习",
+            "上课",
+            "下课",
+            "作业",
+            "复习",
+            "预习",
+            "考试",
+            "测验",
+            "练习",
+            "刷题",
+            "做题",
+            "题目",
+            "课堂",
+            "课程",
+            "笔记",
+            "讲题",
+            "错题",
+            "背诵",
+            "背书",
+            "阅读",
+            "听课",
+            "训练",
+        }
         items: list[dict[str, Any]] = []
         for raw in skills.values():
             if not isinstance(raw, dict):
@@ -990,11 +1030,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 continue
             keywords = raw.get("keywords") if isinstance(raw.get("keywords"), list) else []
             aliases = raw.get("aliases") if isinstance(raw.get("aliases"), list) else []
-            terms: set[str] = set()
-            for raw_term in [name, *keywords, *aliases]:
+            keyword_terms: set[str] = set()
+            for raw_term in keywords:
                 term = self._single_line(raw_term, 24)
-                if term:
-                    terms.add(term)
+                if term and term not in generic_terms:
+                    keyword_terms.add(term)
             identity_terms: set[str] = set()
             for raw_term in [name, *aliases]:
                 term = self._single_line(raw_term, 24)
@@ -1006,7 +1046,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "category": self._single_line(raw.get("category"), 24),
                     "hidden": bool(raw.get("hidden")),
                     "frozen": bool(raw.get("frozen")),
-                    "terms": terms,
+                    "keyword_terms": keyword_terms,
                     "identity_terms": identity_terms,
                 }
             )
@@ -1022,9 +1062,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 elif len(left["name"]) >= 2 and len(right["name"]) >= 2 and (left["name"] in right["name"] or right["name"] in left["name"]):
                     reason = "名称相互包含"
                 else:
-                    overlap = left["terms"] & right["terms"]
+                    overlap = left["keyword_terms"] & right["keyword_terms"]
                     if left["category"] and left["category"] == right["category"] and len(overlap) >= 3:
-                        reason = f"同分类关键词高度重叠: {'、'.join(sorted(overlap)[:4])}"
+                        reason = f"同分类专有关键词重叠: {'、'.join(sorted(overlap)[:4])}"
                 if not reason:
                     continue
                 key = tuple(sorted([left["name"], right["name"]]) + [reason])
@@ -1049,6 +1089,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         return (
             "你是插件排障助手。请检查技能成长列表中是否存在疑似重复技能、别名冲突、过泛关键词或应该隐藏/冻结的项。\n"
             "只根据给出的列表判断，不要发散。不要修改数据，只给建议。\n"
+            "不要把“上课、作业、复习、考试、练习、笔记、题目”等通用学习流程词当作技能相似证据。\n"
+            "只有名称/别名明显指向同一能力，或多个专有关键词高度重叠时，才建议合并。\n"
             "请输出 1-6 条短建议，每条不超过 45 字；如果没有问题，只输出“未发现需要合并的技能”。\n\n"
             "本地候选：\n" + "\n".join(candidate_lines) + "\n\n"
             "技能列表：\n" + "\n".join(skill_lines)
@@ -3202,6 +3244,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
     def _feature_flags(self) -> dict[str, bool]:
         keys = [
+            "enable_proactive_only_mode",
             "enable_mai_style_integration",
             "enable_companion_memory",
             "enable_expression_learning",
@@ -3338,6 +3381,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "NARRATION_PROVIDER_ID",
             "HISTORY_SUMMARY_PROVIDER_ID",
             "RESPONSE_REVIEW_PROVIDER_ID",
+            "TROUBLESHOOTING_PROVIDER_ID",
             "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
             "COMPANION_MEMORY_PROVIDER_ID",
             "DIALOGUE_EPISODE_PROVIDER_ID",
@@ -3519,6 +3563,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_message_debounce",
             "enable_smart_message_debounce",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+            "smart_message_debounce_model_timeout_seconds",
             "smart_message_debounce_wait_seconds",
             "smart_message_debounce_learning_window_seconds",
             "smart_message_debounce_examples_limit",
@@ -4174,6 +4219,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "NARRATION_PROVIDER_ID": "narration_provider_id",
             "HISTORY_SUMMARY_PROVIDER_ID": "history_summary_provider_id",
             "RESPONSE_REVIEW_PROVIDER_ID": "response_review_provider_id",
+            "TROUBLESHOOTING_PROVIDER_ID": "troubleshooting_provider_id",
             "RELATIONSHIP_ANALYSIS_PROVIDER_ID": "relationship_analysis_provider_id",
             "COMPANION_MEMORY_PROVIDER_ID": "companion_memory_provider_id",
             "DIALOGUE_EPISODE_PROVIDER_ID": "dialogue_episode_provider_id",
@@ -4376,6 +4422,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     @staticmethod
     def _allowed_feature_keys() -> set[str]:
         return {
+            "enable_proactive_only_mode",
             "enable_mai_style_integration",
             "enable_companion_memory",
             "enable_expression_learning",
@@ -4477,6 +4524,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "NARRATION_PROVIDER_ID",
             "HISTORY_SUMMARY_PROVIDER_ID",
             "RESPONSE_REVIEW_PROVIDER_ID",
+            "TROUBLESHOOTING_PROVIDER_ID",
             "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
             "COMPANION_MEMORY_PROVIDER_ID",
             "DIALOGUE_EPISODE_PROVIDER_ID",
@@ -4495,6 +4543,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _allowed_setting_keys() -> set[str]:
         return {
             "bot_name",
+            "enable_proactive_only_mode",
             "plugin_specific_persona_id",
             "target_user_ids",
             "private_user_aliases",
@@ -4562,6 +4611,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_message_debounce",
             "enable_smart_message_debounce",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+            "smart_message_debounce_model_timeout_seconds",
             "smart_message_debounce_wait_seconds",
             "smart_message_debounce_learning_window_seconds",
             "smart_message_debounce_examples_limit",
@@ -5100,10 +5150,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0.0, min(15.0, float(value)))
             except (TypeError, ValueError):
                 return 0.0 if key != "image_message_debounce_seconds" else 8.0
-        if key in {"smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds"}:
+        if key in {"smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds"}:
             try:
-                return max(0.0, min(30.0, float(value)))
+                upper = 5.0 if key == "smart_message_debounce_model_timeout_seconds" else 30.0
+                lower = 0.2 if key == "smart_message_debounce_model_timeout_seconds" else 0.0
+                return max(lower, min(upper, float(value)))
             except (TypeError, ValueError):
+                if key == "smart_message_debounce_model_timeout_seconds":
+                    return 0.8
                 return 3.0 if key == "smart_message_debounce_wait_seconds" else 8.0
         if key == "smart_message_debounce_examples_limit":
             try:

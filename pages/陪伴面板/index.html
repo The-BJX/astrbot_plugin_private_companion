@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260617-emotional-gate-detail" />
+  <link rel="stylesheet" href="./app.css?v=20260621-proactive-only-lock" />
 </head>
 <body>
   <main class="shell">
@@ -759,7 +759,7 @@ QQ空间 = 公开札记
               <label>后台检查间隔秒 <input name="check_interval_seconds" type="number" min="30" /></label>
               <label>重复上报去重秒数 <input name="inbound_message_debounce_seconds" type="number" min="0" max="30" step="0.5" /></label>
               <label class="toggle-row"><input name="enable_message_debounce" type="checkbox" /> <span>启用消息收口防抖</span></label>
-              <label>文本补话等待秒数 <input name="text_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
+              <label data-fixed-text-debounce-field>文本补话等待秒数 <input name="text_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
               <label>图片补话等待秒数 <input name="image_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
               <label>转发补话等待秒数 <input name="forward_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
               <label class="toggle-row"><input name="enable_unanswered_screen_peek_followup" type="checkbox" /> <span>主动后沉默时可窥屏</span></label>
@@ -1066,6 +1066,7 @@ QQ空间 = 公开札记
           </article>
           <article class="wide">
             <h2>功能开关</h2>
+            <div id="proactiveOnlyModeCard"></div>
             <div id="featureSwitchSummary" class="feature-switch-summary"></div>
             <div class="feature-switch-toolbar">
               <input id="featureFilter" type="search" placeholder="筛选功能名 / 配置键" />
@@ -1104,6 +1105,6 @@ QQ空间 = 公开札记
     </section>
   </main>
 
-  <script src="./app.js?v=20260621-feature-switch-compact"></script>
+  <script src="./app.js?v=20260621-proactive-only-lock"></script>
 </body>
 </html>
