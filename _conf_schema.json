@@ -2917,6 +2917,25 @@
       "enable_humanized_states": true
     }
   },
+  "passive_injection_position": {
+    "description": "动态提示词注入位置",
+    "type": "string",
+    "hint": "控制被动状态、请求级环境感知和 TTS 本轮频控等动态片段注入到哪里。当前请求末尾更利于服务端缓存；系统提示词约束更强但更容易降低缓存命中；自动当前等同当前请求末尾。",
+    "options": [
+      "prompt",
+      "system_prompt",
+      "auto"
+    ],
+    "labels": [
+      "当前请求末尾",
+      "系统提示词",
+      "自动（缓存优先）"
+    ],
+    "default": "prompt",
+    "condition": {
+      "inject_passive_states": true
+    }
+  },
   "enable_cycle_state": {
     "description": "启用生理期模拟",
     "type": "bool",

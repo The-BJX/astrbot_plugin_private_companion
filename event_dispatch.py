@@ -713,6 +713,182 @@ class EventDispatchMixin:
                 text = str(getattr(event, "message_str", "") or "")
         return _single_line(text, limit)
 
+    async def _event_image_sources_for_recall_cache(self, event: AstrMessageEvent, *, limit: int = 5) -> list[dict[str, str]]:
+        scope = re.sub(r"[^0-9A-Za-z_.-]+", "_", self._event_scope_key(event) or "unknown")
+        target_dir = Path(self.data_dir) / "recall_message_images" / scope
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return []
+        raw_sources: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in raw_sources:
+                raw_sources.append(text)
+
+        async def resolve_component_source(comp: Any) -> str:
+            source = ""
+            extractor = getattr(self, "_image_component_source", None)
+            if callable(extractor):
+                try:
+                    source = _single_line(extractor(comp), 1000)
+                except Exception:
+                    source = ""
+            if source:
+                return source
+            converter = getattr(comp, "convert_to_file_path", None)
+            if callable(converter):
+                try:
+                    maybe = converter()
+                    return str(await maybe if hasattr(maybe, "__await__") else maybe or "").strip()
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 撤回图片组件转换失败: %s", exc)
+            return ""
+
+        for comp in self._event_components(event):
+            class_name = comp.__class__.__name__.lower()
+            if isinstance(comp, dict):
+                class_name = str(comp.get("type") or "").lower()
+            if class_name != "image":
+                continue
+            add(await resolve_component_source(comp))
+
+        message_obj = getattr(event, "message_obj", None)
+        extractor = getattr(self, "_extract_image_sources_from_message_obj", None)
+        if callable(extractor):
+            for source in extractor(message_obj):
+                add(source)
+        raw_extractor = getattr(self, "_raw_private_image_sources", None)
+        if callable(raw_extractor):
+            for source in raw_extractor(event):
+                add(source)
+
+        persisted: list[dict[str, str]] = []
+        now_ms = int(_now_ts() * 1000)
+
+        def add_persisted(source: str, tier: str) -> None:
+            text = str(source or "").strip()
+            tier = _single_line(tier, 40)
+            if not text and tier != "placeholder":
+                return
+            if any(item.get("source") == text and item.get("tier") == tier for item in persisted):
+                return
+            persisted.append({"source": text, "tier": tier})
+
+        def persist_data_url(source: str, stem: str) -> str:
+            text = str(source or "").strip()
+            try:
+                if text.startswith("base64://"):
+                    raw = base64.b64decode(text[len("base64://"):], validate=False)
+                    suffix = ".jpg"
+                elif text.startswith("data:") and "," in text:
+                    meta, payload = text.split(",", 1)
+                    if ";base64" not in meta.lower():
+                        return ""
+                    raw = base64.b64decode(payload, validate=False)
+                    lowered = meta.lower()
+                    suffix = ".png" if "png" in lowered else ".webp" if "webp" in lowered else ".gif" if "gif" in lowered else ".jpg"
+                else:
+                    return ""
+                if not raw:
+                    return ""
+                target = target_dir / f"{stem}{suffix}"
+                target.write_bytes(raw)
+                return str(target)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 撤回图片 data url 暂存失败: %s", exc)
+                return ""
+
+        for index, source in enumerate(raw_sources[: max(1, limit)], 1):
+            text = str(source or "").strip()
+            if not text:
+                continue
+            data_path = persist_data_url(text, f"{now_ms}_{index}")
+            if data_path:
+                add_persisted(data_path, "local")
+                continue
+            if re.match(r"^https?://", text, flags=re.I):
+                downloader = getattr(self, "_persist_private_remote_image_source", None)
+                if callable(downloader):
+                    try:
+                        downloaded = await asyncio.wait_for(downloader(text, target_dir, f"{now_ms}_{index}"), timeout=8.0)
+                    except Exception as exc:
+                        logger.debug("[PrivateCompanion] 撤回图片远程暂存失败: %s", exc)
+                        downloaded = ""
+                    if downloaded:
+                        add_persisted(downloaded, "local")
+                        continue
+                add_persisted(text, "url")
+                continue
+            local_text = text[len("file://"):] if text.startswith("file://") else text
+            try:
+                source_path = Path(local_text)
+                exists = source_path.exists() and source_path.is_file()
+            except (OSError, ValueError):
+                exists = False
+            if exists:
+                suffix = source_path.suffix.lower() if source_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"} else ".jpg"
+                target = target_dir / f"{now_ms}_{index}{suffix}"
+                try:
+                    shutil.copy2(source_path, target)
+                    add_persisted(str(target), "local")
+                    continue
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 撤回图片本地暂存失败: %s", exc)
+            if not re.match(r"^(?:[A-Za-z]:[\\/]|/|\\\\|file://)", text):
+                # OneBot/NapCat may expose only a platform-side image file id.
+                # Keep it as a best-effort sendable Image(file=...) reference.
+                add_persisted(text, "platform_file")
+        return persisted[: max(1, limit)]
+
+    def _recall_image_items_from_snapshot(self, row: dict[str, Any]) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        raw_items = row.get("image_items") if isinstance(row.get("image_items"), list) else []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or "").strip()
+            tier = _single_line(item.get("tier"), 40) or ("local" if source else "placeholder")
+            items.append({"source": source, "tier": tier})
+        if items:
+            return items
+        for source in row.get("images") if isinstance(row.get("images"), list) else []:
+            text = str(source or "").strip()
+            if not text:
+                continue
+            tier = "url" if re.match(r"^https?://", text, flags=re.I) else "local"
+            if not re.match(r"^https?://", text, flags=re.I) and not text.startswith(("data:", "base64://", "file://")):
+                try:
+                    path = Path(text)
+                    if not (path.exists() and path.is_file()):
+                        tier = "platform_file"
+                except (OSError, ValueError):
+                    tier = "platform_file"
+            items.append({"source": text, "tier": tier})
+        return items
+
+    def _recall_image_status_summary(self, row: dict[str, Any]) -> str:
+        items = self._recall_image_items_from_snapshot(row)
+        if not items:
+            if "[图片]" in str(row.get("text") or ""):
+                return "只有图片占位"
+            return ""
+        counts = {"local": 0, "platform_file": 0, "url": 0, "placeholder": 0}
+        for item in items:
+            tier = item.get("tier") or "placeholder"
+            counts[tier if tier in counts else "placeholder"] += 1
+        parts: list[str] = []
+        if counts["local"]:
+            parts.append(f"原图已缓存 {counts['local']} 张")
+        if counts["platform_file"]:
+            parts.append(f"仅有平台 file id {counts['platform_file']} 张")
+        if counts["url"]:
+            parts.append(f"仅有 URL {counts['url']} 张")
+        if counts["placeholder"]:
+            parts.append(f"只有图片占位 {counts['placeholder']} 张")
+        return "；".join(parts)
+
     def _cleanup_recall_message_cache(self) -> None:
         cache = getattr(self, "_recall_message_cache", None)
         if not isinstance(cache, dict):
@@ -729,7 +905,7 @@ class EventDispatchMixin:
             for key, _ in ordered[: len(cache) - max_items]:
                 cache.pop(key, None)
 
-    def _cache_message_for_recall(self, event: AstrMessageEvent) -> None:
+    async def _cache_message_for_recall(self, event: AstrMessageEvent) -> None:
         if not getattr(self, "enable_recall_enhancement", True):
             return
         if not getattr(self, "enable_recall_message_cache", True):
@@ -743,6 +919,20 @@ class EventDispatchMixin:
         text = self._event_text_for_recall_cache(event, limit=max(80, _safe_int(getattr(self, "recall_message_cache_text_chars", 500), 500, 80)))
         if not text:
             return
+        raw_message = str(raw.get("raw_message") or raw.get("message") or "")
+        has_image = "[图片]" in text or "[CQ:image" in raw_message
+        if not has_image:
+            for comp in self._event_components(event):
+                class_name = comp.__class__.__name__.lower()
+                if isinstance(comp, dict):
+                    class_name = str(comp.get("type") or "").lower()
+                if class_name == "image":
+                    has_image = True
+                    break
+        image_items = await self._event_image_sources_for_recall_cache(event, limit=5) if has_image else []
+        if has_image and not image_items:
+            image_items = [{"source": "", "tier": "placeholder"}]
+        image_sources = [item.get("source", "") for item in image_items if isinstance(item, dict) and item.get("source")]
         cache = getattr(self, "_recall_message_cache", None)
         if not isinstance(cache, dict):
             cache = {}
@@ -757,6 +947,9 @@ class EventDispatchMixin:
             "sender_id": self._event_sender_id(event),
             "sender_name": _single_line(self._sender_display_name(event), 60),
             "text": text,
+            "images": image_sources,
+            "image_items": image_items,
+            "image_count": len(image_items),
         }
         for candidate in message_ids:
             cache[candidate] = snapshot
@@ -772,7 +965,14 @@ class EventDispatchMixin:
         for key in stale:
             recalled.pop(key, None)
 
-    def _record_recalled_message_id(self, message_id: str, *, scope: str = "", notice_type: str = "") -> None:
+    def _record_recalled_message_id(
+        self,
+        message_id: str,
+        *,
+        scope: str = "",
+        notice_type: str = "",
+        sender_id: str = "",
+    ) -> None:
         message_id = _single_line(message_id, 120)
         if not message_id:
             return
@@ -783,6 +983,26 @@ class EventDispatchMixin:
         self._cleanup_recalled_message_ids()
         cache = getattr(self, "_recall_message_cache", None)
         snapshot = dict(cache.get(message_id) or {}) if isinstance(cache, dict) and isinstance(cache.get(message_id), dict) else {}
+        if not snapshot:
+            snapshot = {
+                "message_id": message_id,
+                "message_id_aliases": [message_id],
+                "ts": _now_ts(),
+                "scope": _single_line(scope, 160),
+                "sender_id": _single_line(sender_id, 80),
+                "sender_name": "",
+                "text": "[内容未进入短期缓存]",
+                "images": [],
+                "image_items": [],
+                "image_count": 0,
+                "cache_miss": True,
+            }
+            logger.info(
+                "[PrivateCompanion] 撤回消息快照未命中: scope=%s message_id=%s notice=%s",
+                _single_line(scope, 160) or "-",
+                message_id,
+                _single_line(notice_type, 40) or "-",
+            )
         aliases = [message_id]
         if isinstance(snapshot.get("message_id_aliases"), list):
             aliases.extend(_single_line(item, 120) for item in snapshot.get("message_id_aliases") or [])
@@ -967,9 +1187,68 @@ class EventDispatchMixin:
         for index, row in enumerate(rows, 1):
             sender = _single_line(row.get("sender_name"), 40) or _single_line(row.get("sender_id"), 40) or "未知"
             text = _single_line(row.get("text"), 360)
+            if row.get("cache_miss"):
+                text = "[已收到撤回通知，但原消息没有进入短期缓存，无法恢复内容]"
+            image_status = self._recall_image_status_summary(row)
+            if image_status:
+                text = f"{text}（{image_status}）"
             elapsed = self._format_timestamp_elapsed(row.get("recalled_ts", 0))
             lines.append(f"{index}. {sender}｜{elapsed}撤回：{text}")
         return "\n".join(lines)
+
+    def _image_component_for_recall_source(self, source: str) -> Any | None:
+        text = str(source or "").strip()
+        if not text:
+            return None
+        local_text = text[len("file://"):] if text.startswith("file://") else text
+        if not re.match(r"^https?://", text, flags=re.I) and not text.startswith(("data:", "base64://")):
+            try:
+                path = Path(local_text)
+                exists = path.exists() and path.is_file()
+            except (OSError, ValueError):
+                exists = False
+            if exists:
+                text = str(path)
+                for method_name in ("fromFileSystem", "from_file_system"):
+                    method = getattr(Image, method_name, None)
+                    if callable(method):
+                        try:
+                            return method(text)
+                        except Exception:
+                            continue
+            elif re.match(r"^(?:[A-Za-z]:[\\/]|/|\\\\|file://)", text):
+                return None
+        candidates = (
+            {"file": text, "url": text},
+            {"file": text},
+            {"url": text},
+        )
+        for kwargs in candidates:
+            try:
+                return Image(**kwargs)
+            except Exception:
+                continue
+        return None
+
+    def _recalled_message_media_components_for_event(self, event: AstrMessageEvent, *, limit: int = 5) -> list[Any]:
+        rows = self._recent_recalled_messages_for_scope(self._event_scope_key(event), limit=limit)
+        components: list[Any] = []
+        for index, row in enumerate(rows, 1):
+            images = [
+                item.get("source", "")
+                for item in self._recall_image_items_from_snapshot(row)
+                if item.get("source")
+            ]
+            image_components: list[Any] = []
+            for source in images[:5]:
+                component = self._image_component_for_recall_source(str(source or ""))
+                if component is not None:
+                    image_components.append(component)
+            if not image_components:
+                continue
+            components.append(Plain(f"\n第 {index} 条撤回原图："))
+            components.extend(image_components)
+        return components
 
     def _user_asks_recalled_messages(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", str(text or "")).lower()
@@ -1016,6 +1295,11 @@ class EventDispatchMixin:
         for index, row in enumerate(rows, 1):
             sender = _single_line(row.get("sender_name"), 40) or _single_line(row.get("sender_id"), 40) or "未知"
             text = _single_line(row.get("text"), 360)
+            if row.get("cache_miss"):
+                text = "[已收到撤回通知，但原消息没有进入短期缓存，不能编造具体内容]"
+            image_status = self._recall_image_status_summary(row)
+            if image_status:
+                text = f"{text}（{image_status}；如需可恢复图片,请使用撤回消息命令查看）"
             elapsed = self._format_timestamp_elapsed(row.get("recalled_ts", 0))
             lines.append(f"{index}. {sender}｜{elapsed}撤回：{text}")
         return "\n".join(lines)

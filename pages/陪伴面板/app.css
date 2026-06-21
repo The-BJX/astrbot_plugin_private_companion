@@ -7698,12 +7698,17 @@ textarea {
   font-size: 20px;
 }
 
+.proactive-mode-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
 .proactive-mode-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 14px;
   align-items: center;
-  margin-top: 12px;
   border: 1px solid rgba(47, 117, 102, 0.22);
   border-left: 5px solid var(--accent);
   border-radius: 10px;
@@ -7724,6 +7729,12 @@ textarea {
 .proactive-mode-toggle {
   display: grid;
   place-items: center;
+}
+
+.feature-toggle-hit > input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .proactive-mode-card.on .feature-toggle-visual {
@@ -7952,6 +7963,55 @@ textarea {
 .feature-switch-item.on .feature-state-text {
   background: var(--accent-soft);
   color: var(--accent-strong);
+}
+
+.proactive-mode-injection-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  border: 1px solid rgba(47, 117, 102, 0.18);
+  border-radius: 10px;
+  padding: 14px 15px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(226, 241, 236, 0.58));
+  box-shadow: var(--shadow-ring);
+}
+
+.proactive-mode-injection-card h3 {
+  margin: 7px 0 5px;
+  font-size: 16px;
+}
+
+.proactive-mode-injection-card p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.proactive-mode-injection-card small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.proactive-mode-injection-control {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.proactive-mode-injection-control select {
+  min-width: 170px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+}
+
+.proactive-mode-injection-control [data-proactive-injection-reset] {
+  border-color: rgba(47, 117, 102, 0.24);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
 }
 
 .feature-switch-item.locked {
@@ -10091,6 +10151,13 @@ pre {
 
   .proactive-mode-card {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .proactive-mode-injection-card,
+  .proactive-mode-injection-control {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .proactive-mode-detail {

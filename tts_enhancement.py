@@ -946,7 +946,18 @@ TTS 朗读文本：
         marker = "<!-- private_companion_tts_enhancement_v1 -->"
         prompt = str(getattr(req, "system_prompt", "") or "")
 
-        async def record_tts_fragment(title: str, key: str, text: str, mode: str = "") -> None:
+        def append_dynamic_tts_fragment(fragment_marker: str, text: str) -> str:
+            helper = getattr(self, "_append_turn_prompt_fragment_by_position", None)
+            if callable(helper):
+                try:
+                    if helper(req, fragment_marker, text):
+                        return "prompt"
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] TTS 指定位置动态注入失败,回退 system_prompt: %s", _single_line(exc, 120))
+            req.system_prompt = f"{getattr(req, 'system_prompt', '') or ''}\n\n{text}".strip()
+            return "system_prompt"
+
+        async def record_tts_fragment(title: str, key: str, text: str, mode: str = "", placement: str = "system_prompt") -> None:
             recorder = getattr(self, "_record_prompt_injection_snapshot", None)
             if not callable(recorder):
                 return
@@ -970,6 +981,7 @@ TTS 朗读文本：
                     "模式": getattr(self, "tts_generation_mode", "fast_tag"),
                     "频控": getattr(self, "tts_frequency_control_mode", "global"),
                     "provider": provider_kind,
+                    "注入位置": placement,
                 },
             )
 
@@ -1004,8 +1016,8 @@ TTS 朗读文本：
                 "请只输出普通文字回复，不要包含 <pc_tts>...</pc_tts>、<tts>...</tts>、语音、朗读、音频、发声、Record 或任何等价语音内容。"
                 "如果用户要求语音，也先用文字自然回应当前内容，不要承诺已经发送语音。"
             )
-            req.system_prompt = f"{req.system_prompt}\n\n{reverse_prompt}".strip()
-            await record_tts_fragment("TTS 强约束禁用注入", "tts.block", reverse_prompt, mode="strong_block")
+            placement = append_dynamic_tts_fragment("<!-- private_companion_tts_block_v1 -->", reverse_prompt)
+            await record_tts_fragment("TTS 强约束禁用注入", "tts.block", reverse_prompt, mode="strong_block", placement=placement)
         elif (
             not user_requested_tts
             and mode == "fast_tag"
@@ -1019,10 +1031,8 @@ TTS 朗读文本：
                 "这条频率控制优先级高于前面的 TTS 基础规则、示例和主用户倾向；没有用户明确要求时，即使语气很适合语音，也不要使用语音。"
                 "如果用户本轮明确要求语音，仍应以回应用户需求为主，可以使用 <pc_tts>。"
             )
-            req.system_prompt = (
-                f"{req.system_prompt}\n\n{frequency_prompt}"
-            ).strip()
-            await record_tts_fragment("TTS 频率控制注入", "tts.frequency", frequency_prompt, mode="frequency")
+            placement = append_dynamic_tts_fragment("<!-- private_companion_tts_frequency_v1 -->", frequency_prompt)
+            await record_tts_fragment("TTS 频率控制注入", "tts.frequency", frequency_prompt, mode="frequency", placement=placement)
         if mode == "fast_tag" and self._should_force_tts_for_main_user_event(event) and not strong_block_reason:
             frequency_mode = getattr(self, "tts_frequency_control_mode", "global")
             if frequency_mode == "legacy":
@@ -1030,20 +1040,16 @@ TTS 朗读文本：
             else:
                 force_rule = "这轮消息来自主用户或明确 @ 到主用户。如果语音比纯文字更自然，可以采用一段 <pc_tts>...</pc_tts>；不要刻意使用语音，仍需遵守目标语种、中文释义和会话最小间隔。"
             force_prompt = f"【本轮 TTS 强化触发】\n{force_rule}"
-            req.system_prompt = (
-                f"{req.system_prompt}\n\n{force_prompt}"
-            ).strip()
-            await record_tts_fragment("TTS 主用户倾向注入", "tts.force", force_prompt, mode="main_user")
+            placement = append_dynamic_tts_fragment("<!-- private_companion_tts_force_v1 -->", force_prompt)
+            await record_tts_fragment("TTS 主用户倾向注入", "tts.force", force_prompt, mode="main_user", placement=placement)
         if user_requested_tts and mode == "fast_tag" and not strong_block_reason:
             user_request_prompt = (
                 "【用户语音请求】\n"
                 "用户本轮明确希望听到语音或你的声音。请以回应用户需求为主：如果当前回复适合用语音表达，可以直接写一段 <pc_tts>...</pc_tts>；"
                 "这类顺应用户请求的语音不受自动语音触发概率限制，但仍需自然克制、遵守目标语种和中文释义，不要为了格式而硬加。"
             )
-            req.system_prompt = (
-                f"{req.system_prompt}\n\n{user_request_prompt}"
-            ).strip()
-            await record_tts_fragment("用户语音请求注入", "tts.user_request", user_request_prompt, mode="user_request")
+            placement = append_dynamic_tts_fragment("<!-- private_companion_tts_user_request_v1 -->", user_request_prompt)
+            await record_tts_fragment("用户语音请求注入", "tts.user_request", user_request_prompt, mode="user_request", placement=placement)
 
     async def protect_tts_enhancement_response_blocks(self, event: Any, resp: Any) -> None:
         if not getattr(self, "enable_tts_enhancement", False):

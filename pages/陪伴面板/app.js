@@ -770,6 +770,7 @@ const configLabels = {
   humanized_state_intensity: "拟人状态强度",
   enable_humanized_states: "拟人身体状态",
   inject_passive_states: "被动状态注入",
+  passive_injection_position: "动态提示词注入位置",
   enable_rest_reply_simulation: "休息回复闸门",
   rest_reply_mode: "休息回复判定模式",
   rest_reply_probability: "休息中概率回复(%)",
@@ -930,6 +931,7 @@ const configDescriptions = {
   humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
   enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
+  passive_injection_position: "选择被动状态、环境感知和 TTS 本轮频控等动态片段的注入位置。当前请求末尾更利于缓存；系统提示词约束更强但更容易降低缓存命中。",
   enable_rest_reply_simulation: "开启后，日程处于睡眠、午休或休息段时，普通被动回复会先经过休息闸门；未放行时静默不回复。",
   rest_reply_mode: "仅概率醒来只按概率放行；模型判断会让模型按消息重要性、是否明确叫醒、情绪/安全需要等打分。",
   rest_reply_probability: "仅概率醒来模式使用。越低越不容易在睡眠/休息中被普通消息叫醒。",
@@ -1592,6 +1594,7 @@ const featureSettingTypes = {
   tts_frequency_control_mode: { type: "select", options: [["global", "全局频控：间隔+概率控制双路径"], ["legacy", "旧版行为：按各路径原逻辑触发"]] },
   tts_constraint_mode: { type: "select", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：硬禁语音"]] },
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
+  passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   REST_WAKEUP_PROVIDER_ID: { type: "provider" },
   tts_voice_language: { type: "select", options: [["ja", "日语"], ["zh", "中文"], ["en", "英语"]] },
   tts_conversion_provider_id: { type: "provider" },
@@ -7946,21 +7949,44 @@ function renderProactiveOnlyModeCard() {
   if (!root) return;
   const key = "enable_proactive_only_mode";
   const checked = toBool(state.featureDraft[key]);
+  const settings = state.overview?.settings || {};
+  const injectionPosition = String(settings.passive_injection_position || "prompt");
   root.innerHTML = `
-    <section class="proactive-mode-card ${checked ? "on" : "off"}">
-      <label class="feature-toggle-hit proactive-mode-toggle" aria-label="${escapeHtml(featureLabel(key))}">
-        <input type="checkbox" data-proactive-only-mode-toggle ${checked ? "checked" : ""}>
-        <span class="feature-toggle-visual"></span>
-      </label>
-      <div class="proactive-mode-main">
-        <div class="proactive-mode-kicker">运行模式 · 缓存友好</div>
-        <h3>${escapeHtml(featureLabel(key))}</h3>
-        <p>只保留主动私聊调度、生成和发送；普通私聊/群聊不再进入本插件被动增强、TTS、图片/转发、群聊观察或工具链。</p>
-        <p>由于被动回复不再混入大量动态提示词，主模型 prompt 更稳定，能显著提高缓存命中率；下方被覆盖的被动功能会自动锁定但保留原配置。</p>
-        <small>${escapeHtml(key)}</small>
-      </div>
-      <button type="button" class="proactive-mode-detail" data-feature-open="${escapeHtml(key)}">查看说明</button>
-    </section>
+    <div class="proactive-mode-stack">
+      <section class="proactive-mode-card ${checked ? "on" : "off"}">
+        <label class="feature-toggle-hit proactive-mode-toggle" aria-label="${escapeHtml(featureLabel(key))}">
+          <input type="checkbox" data-proactive-only-mode-toggle ${checked ? "checked" : ""}>
+          <span class="feature-toggle-visual"></span>
+        </label>
+        <div class="proactive-mode-main">
+          <div class="proactive-mode-kicker">运行模式 · 缓存友好</div>
+          <h3>${escapeHtml(featureLabel(key))}</h3>
+          <p>只保留主动私聊调度、生成和发送；普通私聊/群聊不再进入本插件被动增强、TTS、图片/转发、群聊观察或工具链。</p>
+          <p>由于被动回复不再混入大量动态提示词，主模型 prompt 更稳定，能显著提高缓存命中率；下方被覆盖的被动功能会自动锁定但保留原配置。</p>
+          <small>${escapeHtml(key)}</small>
+        </div>
+        <button type="button" class="proactive-mode-detail" data-feature-open="${escapeHtml(key)}">查看说明</button>
+      </section>
+      <form class="proactive-mode-injection-card" data-proactive-injection-form>
+        <div>
+          <div class="proactive-mode-kicker">注入策略 · 缓存前缀</div>
+          <h3>${escapeHtml(configLabel("passive_injection_position"))}</h3>
+          <p>${escapeHtml(configDescriptions.passive_injection_position || "")}</p>
+          <small>${escapeHtml("passive_injection_position")}</small>
+        </div>
+        <div class="proactive-mode-injection-control">
+          <select name="passive_injection_position">
+            ${[
+              ["prompt", "当前请求末尾"],
+              ["system_prompt", "系统提示词"],
+              ["auto", "自动（缓存优先）"],
+            ].map(([value, label]) => `<option value="${escapeHtml(value)}"${injectionPosition === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+          </select>
+          <button type="submit">保存位置</button>
+          <button type="button" data-proactive-injection-reset>恢复默认</button>
+        </div>
+      </form>
+    </div>
   `;
   root.querySelector("[data-proactive-only-mode-toggle]")?.addEventListener("change", (event) => {
     state.featureDraft[key] = Boolean(event.target.checked);
@@ -7969,6 +7995,26 @@ function renderProactiveOnlyModeCard() {
   root.querySelector("[data-feature-open]")?.addEventListener("click", () => {
     state.selectedFeatureKey = key;
     renderFeatureSwitches();
+  });
+  root.querySelector("[data-proactive-injection-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const value = form.querySelector('[name="passive_injection_position"]')?.value || "prompt";
+    await runAction(
+      () => postJson("/settings/update", { settings: { passive_injection_position: value } }),
+      "已保存动态提示词注入位置",
+      form.querySelector("button[type='submit']"),
+    );
+  });
+  root.querySelector("[data-proactive-injection-reset]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const select = root.querySelector('[name="passive_injection_position"]');
+    if (select) select.value = "prompt";
+    await runAction(
+      () => postJson("/settings/update", { settings: { passive_injection_position: "prompt" } }),
+      "已恢复默认注入位置",
+      button,
+    );
   });
 }
 
@@ -8342,6 +8388,12 @@ const featureDetailGuides = {
     trigger: "私聊或允许的群聊回复前。",
     enabled: "回复会参考精力、情绪、睡眠、健康、饥饿、周期或叠加状态，但不汇报字段。",
     disabled: "状态主要影响主动行为，普通回复不一定体现状态。",
+  },
+  passive_injection_position: {
+    summary: "选择动态提示词注入到当前请求末尾还是系统提示词。",
+    trigger: "被动状态注入或请求级环境感知生效时。",
+    enabled: "当前请求末尾更利于服务端缓存；系统提示词约束更强；自动目前按缓存优先处理。",
+    disabled: "不影响被动状态总开关，只决定注入位置。",
   },
   enable_cycle_state: {
     summary: "作为拟人身体状态的一部分，偶尔生成生理期前、处于生理期或生理期后的状态底色。",

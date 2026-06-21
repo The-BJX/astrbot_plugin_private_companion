@@ -303,7 +303,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.0.13",
+    "4.0.14",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -593,6 +593,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             "温柔日常,奇幻,恐怖,追逐,悬疑,荒诞,怀旧,暧昧春梦",
         )
         self.inject_passive_states = self._cfg_bool(c, "inject_passive_states", True)
+        self.passive_injection_position = self._normalize_passive_injection_position(
+            self._cfg_str(c, "passive_injection_position", "prompt")
+        )
         self.proactive_share_probability = self._cfg_int(c, "proactive_share_probability", 45, 0, 100) / 100
         self.enable_daily_greetings = self._cfg_bool(c, "enable_daily_greetings", True)
         self.greeting_idle_minutes = self._cfg_int(c, "greeting_idle_minutes", 30, 0, 240)
@@ -1256,8 +1259,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not self.enabled:
             return
         self._note_inbound_activity_for_scope(event)
-        if self._proactive_only_blocks_passive_event(event):
-            return
         if not self.enable_recall_enhancement:
             return
         raw = self._event_raw_payload(event)
@@ -1274,7 +1275,12 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 or getattr(event, "unified_msg_origin", ""),
                 160,
             )
-            self._record_recalled_message_id(message_id, scope=scope, notice_type=notice_type)
+            self._record_recalled_message_id(
+                message_id,
+                scope=scope,
+                notice_type=notice_type,
+                sender_id=_single_line(raw.get("user_id"), 80),
+            )
             if notice_type == "friend_recall":
                 recall_user_id = _single_line(raw.get("user_id"), 80)
                 if recall_user_id:
@@ -1292,7 +1298,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             )
             return
 
-        self._cache_message_for_recall(event)
+        await self._cache_message_for_recall(event)
         if not self.enable_forbidden_word_recall or not self._forbidden_recall_words():
             return
         message_id = self._event_message_id(event)
@@ -2015,18 +2021,66 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     async def _append_environment_perception_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         marker = "<!-- private_companion_environment_v1 -->"
         current_prompt = req.system_prompt or ""
-        if marker in current_prompt:
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        if marker in current_prompt or marker in current_turn_prompt:
             return
         environment_injection = await self._format_environment_perception(event)
         if environment_injection:
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{environment_injection}".strip()
+            placement = "prompt" if self._append_turn_prompt_fragment_by_position(req, marker, environment_injection) else "system_prompt"
+            if placement == "system_prompt":
+                req.system_prompt = f"{current_prompt}\n\n{marker}\n{environment_injection}".strip()
             await self._record_request_prompt_fragment(
                 event,
                 title="请求级环境感知注入",
                 key="environment.request",
                 text=environment_injection,
                 source="environment",
+                metadata={"注入位置": placement},
             )
+
+    @staticmethod
+    def _normalize_passive_injection_position(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        aliases = {
+            "auto": "auto",
+            "自动": "auto",
+            "cache": "auto",
+            "cache_friendly": "auto",
+            "缓存友好": "auto",
+            "prompt": "prompt",
+            "request": "prompt",
+            "turn": "prompt",
+            "tail": "prompt",
+            "user_prompt": "prompt",
+            "current_prompt": "prompt",
+            "当前请求": "prompt",
+            "当前请求末尾": "prompt",
+            "请求末尾": "prompt",
+            "用户消息末尾": "prompt",
+            "system": "system_prompt",
+            "system_prompt": "system_prompt",
+            "系统提示": "system_prompt",
+            "系统提示词": "system_prompt",
+            "强约束": "system_prompt",
+        }
+        return aliases.get(text, text if text in {"auto", "prompt", "system_prompt"} else "prompt")
+
+    def _append_turn_prompt_fragment_by_position(self, req: ProviderRequest, marker: str, text: str) -> bool:
+        position = self._normalize_passive_injection_position(getattr(self, "passive_injection_position", "prompt"))
+        if position == "system_prompt":
+            return False
+        content = str(text or "").strip()
+        if not content:
+            return False
+        try:
+            current = str(getattr(req, "prompt", "") or "")
+            if marker in current:
+                return True
+            setattr(req, "prompt", f"{current}\n\n{marker}\n{content}".strip())
+            return True
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 指定位置 prompt 注入失败,回退 system_prompt: %s", _single_line(exc, 120))
+            return False
 
     async def _record_request_prompt_fragment(
         self,
@@ -3081,14 +3135,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         injection = prompt_surface.render()
         marker = "<!-- private_companion_state_v1 -->"
         current_prompt = req.system_prompt or ""
-        if marker in current_prompt:
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        if marker in current_prompt or marker in current_turn_prompt:
             await self._append_conditional_tool_instructions_to_request(event, req)
             return
         if not injection:
             logger.debug("[PrivateCompanion] 被动状态提示词片段为空,跳过状态 marker 注入")
             await self._append_conditional_tool_instructions_to_request(event, req)
             return
-        req.system_prompt = f"{current_prompt}\n\n{marker}\n{injection}".strip()
+        injection_placement = "prompt" if self._append_turn_prompt_fragment_by_position(req, marker, injection) else "system_prompt"
+        if injection_placement == "system_prompt":
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{injection}".strip()
         await self._append_conditional_tool_instructions_to_request(event, req)
         state_log_parts = [
             f"心理能量={state.get('energy', 70)}/100",
@@ -3114,14 +3171,16 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 metadata={
                     "状态": "｜".join(state_log_parts),
                     "当前日程": current_schedule,
+                    "注入位置": injection_placement,
                     "会话": _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown",
                     "发送者": _single_line(self._event_sender_id(event), 80),
                 },
             )
         logger.info(
-            "[PrivateCompanion] 已注入被动状态提示词到 %s: mode=%s chars=%s 状态=%s；当前日程=%s",
+            "[PrivateCompanion] 已注入被动状态提示词到 %s: mode=%s placement=%s chars=%s 状态=%s；当前日程=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 80) or "unknown_session",
             "light" if lightweight_passive else "full",
+            injection_placement,
             len(injection),
             "｜".join(state_log_parts),
             current_schedule,
@@ -3424,6 +3483,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     response = "撤回消息转述没有开启。"
                 else:
                     response = self._format_recalled_messages_for_event(event, limit=5)
+                    response_extra_components = self._recalled_message_media_components_for_event(event, limit=5)
             elif action in {"TTS语种", "tts语种", "语音语种", "TTS", "tts"}:
                 tts_value = value
                 if action in {"TTS", "tts"}:

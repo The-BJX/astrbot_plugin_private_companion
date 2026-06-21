@@ -24,6 +24,7 @@ class CommandHandlersMixin:
             return
         message = str(event.message_str or "").strip()
         action = ""
+        response_chain = None
         parts = message.split(maxsplit=2)
         if len(parts) >= 2:
             action = parts[1].strip()
@@ -91,6 +92,9 @@ class CommandHandlersMixin:
                     response = "撤回消息转述没有开启。"
                 else:
                     response = self._format_recalled_messages_for_event(event, limit=5)
+                    extra_components = self._recalled_message_media_components_for_event(event, limit=5)
+                    if extra_components:
+                        response_chain = self._build_outbound_chain(response, extra_components=extra_components)
             elif action in {"状态", "气氛", ""}:
                 response = self._format_group_status(group)
             else:
@@ -107,5 +111,8 @@ class CommandHandlersMixin:
                     "陪伴群 开启\n"
                     "陪伴群 关闭"
                 )
-        yield event.plain_result(response)
+        if response_chain:
+            yield event.chain_result(response_chain)
+        else:
+            yield event.plain_result(response)
         event.stop_event()

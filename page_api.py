@@ -4604,6 +4604,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
             "humanized_state_intensity",
+            "passive_injection_position",
             "enable_rest_reply_simulation",
             "rest_reply_mode",
             "rest_reply_probability",
@@ -4816,6 +4817,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             return self._normalize_id_list(value)
         if key == "plugin_specific_persona_id":
             return str(value or "").strip()[:160]
+        if key == "passive_injection_position":
+            normalizer = getattr(self.plugin, "_normalize_passive_injection_position", None)
+            if callable(normalizer):
+                return normalizer(value)
+            text = str(value or "prompt").strip().lower()
+            return text if text in {"auto", "prompt", "system_prompt"} else "prompt"
         if key == "private_user_aliases":
             return str(value or "").strip()[:4000]
         if key == "worldbook_config_paths":

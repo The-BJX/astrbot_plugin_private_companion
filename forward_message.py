@@ -1230,6 +1230,18 @@ class ForwardMessageMixin:
             lines.append(f"引用消息ID：{message_id}")
         if texts:
             lines.append("卡片文字：" + "；".join(texts[:5]))
+            compact_text = re.sub(r"\s+", "", " ".join(texts))
+            if "最近撤回消息" in compact_text and "撤回" in compact_text:
+                recalled_rows = self._recent_recalled_messages_for_scope(self._event_scope_key(event), limit=5)
+                status_parts = [self._recall_image_status_summary(row) for row in recalled_rows]
+                status_text = "；".join(part for part in status_parts if part)
+                if status_text:
+                    lines.append(
+                        f"引用内容是插件的撤回查询摘要，不是原始撤回消息本体；当前短期缓存图片状态：{status_text}。"
+                        "不要把摘要里的[图片]当成已看见原图。"
+                    )
+                else:
+                    lines.append("引用内容是插件的撤回查询摘要，不是原始撤回消息本体；摘要里的[图片]只表示对方撤回过图片。")
         if links:
             lines.append("卡片链接：" + "；".join(links[:4]))
         if images:
