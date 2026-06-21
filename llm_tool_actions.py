@@ -25,7 +25,7 @@ class LlmToolActionsMixin:
 【QQ 空间动态工具】
 当用户明确要求你查看说说、QQ 空间动态、点赞/评论说说,或要求你发一条说说时,可以使用 Private Companion 的 QQ 空间工具。
 - 查看说说：使用 `pc_qzone_view_feed`。不知道目标 QQ 时默认当前用户。
-- 发布说说：使用 `pc_qzone_publish_feed`。必须把最终要发布的正文放进 `text` 参数,例如 `{"text":"今天想慢一点。"}`；如果用户明确要求“发布刚才/最近生成的生活说说草稿”,可传 `{"use_latest_draft":true}`；不要空调用,不要把草稿当作已发布。
+- 发布说说：使用 `pc_qzone_publish_feed`。必须把最终要发布的正文放进 `text` 参数,例如 `{"text":"今天想慢一点。"}`；如需带图,可传 `{"text":"配图说说","images":["本地图片路径或图片URL"]}`；如果用户明确要求“发布刚才/最近生成的生活说说草稿”,可传 `{"use_latest_draft":true}`；不要空调用,不要把草稿当作已发布。
 - 发布内容必须服从当前人格与世界观,但不要泄露私聊隐私、内部状态数值、关系网资料或插件实现。
 - 工具失败时简短说明失败原因,不要假装已经发布或点赞。
 """.strip()
@@ -67,20 +67,32 @@ class LlmToolActionsMixin:
 
     async def _pc_qzone_publish_feed_impl(self, event: AstrMessageEvent, text: str = "", **kwargs) -> str:
         content = _single_line(text or kwargs.get("content") or kwargs.get("message") or kwargs.get("draft"), 300)
+        images: list[str] = []
+        for key in ("images", "image_paths", "image_urls"):
+            value = kwargs.get(key)
+            if isinstance(value, (list, tuple)):
+                images.extend(str(item).strip() for item in value if str(item or "").strip())
+            elif isinstance(value, str) and value.strip():
+                images.append(value.strip())
+        for key in ("image", "image_path", "image_url", "path"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value.strip():
+                images.append(value.strip())
+        images = list(dict.fromkeys(images))[:9]
         if not content and kwargs.get("use_latest_draft"):
             state = self.data.get("qzone_integration") if isinstance(self.data.get("qzone_integration"), dict) else {}
             content = _single_line(state.get("last_life_publish_draft") or state.get("last_life_publish_text"), 300)
-        if not content:
+        if not content and not images:
             return json.dumps(
                 {
                     "status": "need_text",
                     "success": False,
-                    "message": "缺少 text 参数。请把要发布的说说正文作为 text 传入；若要发布最近自动生成的生活草稿,传 use_latest_draft=true。",
-                    "required_args": {"text": "要发布到 QQ 空间的说说正文"},
+                    "message": "缺少 text 或 images 参数。请把要发布的说说正文作为 text 传入；如需带图,传 images；若要发布最近自动生成的生活草稿,传 use_latest_draft=true。",
+                    "required_args": {"text": "要发布到 QQ 空间的说说正文", "images": "可选，本地图片路径或图片URL列表"},
                 },
                 ensure_ascii=False,
             )
-        result = await self._publish_qzone_text(content, event)
+        result = await self._publish_qzone_text(content, event, images=images)
         return json.dumps({"status": "success" if result.get("success") else "error", **result}, ensure_ascii=False)
 
     async def _pc_get_group_id_by_name_impl(self, event: AstrMessageEvent, **kwargs) -> str:

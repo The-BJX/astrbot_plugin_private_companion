@@ -882,6 +882,10 @@ class PrivateImageMixin:
                 return provider_id, provider_source, prompt, provider
         return "", "", "", None
 
+    def _has_private_image_visual_provider(self, umo: str = "") -> bool:
+        provider_id, _provider_source, _prompt, provider = self._select_private_image_visual_provider(umo)
+        return bool(provider_id and provider is not None)
+
     def _private_image_provider_failure_cache(self) -> dict[str, Any]:
         cache = getattr(self, "_private_image_provider_failures", None)
         if not isinstance(cache, dict):
@@ -932,6 +936,10 @@ class PrivateImageMixin:
         )
 
     def _private_image_model_image_items(self, image_sources: list[str]) -> list[tuple[str, str]]:
+        items, _source_count, _has_gif_frames = self._private_image_model_image_items_with_meta(image_sources)
+        return items
+
+    def _private_image_model_image_items_with_meta(self, image_sources: list[str]) -> tuple[list[tuple[str, str]], int, bool]:
         image_items: list[tuple[str, str]] = []
         seen_image_keys: set[str] = set()
         gif_enhancement_enabled = bool(getattr(self, "enable_private_image_gif_enhancement", True))
@@ -939,6 +947,7 @@ class PrivateImageMixin:
         sources = [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]
         max_model_images = max(len(sources), max(8, min(16, len(sources) * 2)))
         pending_gif_frames: list[list[tuple[str, str]]] = []
+        had_gif_frames = False
 
         def append_item(item: tuple[str, str]) -> bool:
             frame_key, frame_url = item
@@ -952,6 +961,7 @@ class PrivateImageMixin:
             image_key = self._private_image_source_cache_key(source)
             gif_items = self._private_image_gif_frame_model_items(source, image_key, max_frames=gif_max_frames) if gif_enhancement_enabled else []
             if gif_items:
+                had_gif_frames = True
                 if append_item(gif_items[0]) and len(gif_items) > 1:
                     pending_gif_frames.append(gif_items[1:])
                 if len(image_items) >= max_model_images:
@@ -980,7 +990,7 @@ class PrivateImageMixin:
             if not progressed:
                 break
             pending_gif_frames = next_round
-        return image_items
+        return image_items, len(sources), bool(had_gif_frames)
 
     def _private_image_gif_frame_model_items(self, source: str, image_key: str, *, max_frames: int = 4) -> list[tuple[str, str]]:
         raw = self._private_image_source_bytes_if_gif(source)
@@ -1159,21 +1169,38 @@ class PrivateImageMixin:
             kept.append(stripped)
         return _single_line("\n".join(kept), 900)
 
+    def _private_image_default_persona_prompt(self) -> str:
+        getter = getattr(self, "_get_default_persona_prompt", None)
+        if not callable(getter):
+            return ""
+        try:
+            return str(getter() or "")
+        except Exception:
+            return ""
+
     def _private_image_self_recognition_prompt(self) -> str:
         if not bool(getattr(self, "enable_private_image_self_recognition", True)):
             return ""
+        context_prompt = self._private_image_self_recognition_context_prompt()
+        if not context_prompt:
+            return ""
+        return (
+            f"{context_prompt}\n"
+            "只在最后一行输出归属标签：图像归属判断：疑似当前角色/非当前角色/无法判断。"
+        )
+
+    def _private_image_self_recognition_context_prompt(self) -> str:
+        if not bool(getattr(self, "enable_private_image_self_recognition", True)):
+            return ""
         bot_name = _single_line(getattr(self, "bot_name", ""), 40)
+        default_persona = self._private_image_default_persona_prompt()
         schedule_persona = str(getattr(self, "schedule_persona_prompt", "") or "")
         custom_hint = self._private_image_role_self_recognition_hint()
-        visual_profile_parts: list[str] = []
-        for label in ("姓名", "年龄", "生日", "性别", "识别点", "外貌", "发型发色", "瞳色", "服饰风格", "种族", "职业/身份"):
-            value = self._roleplay_labeled_value(schedule_persona, label)
-            if value:
-                visual_profile_parts.append(f"{label}：{value}")
+        visual_profile_parts = self._private_image_visual_profile_parts(default_persona, schedule_persona)
         visual_profile = "\n".join(visual_profile_parts)
         parts = [
             f"当前角色名称/可能出现在图中的名字：{bot_name}" if bot_name else "",
-            f"结构化外观线索：\n{visual_profile}" if visual_profile else "",
+            f"角色外观线索：\n{visual_profile}" if visual_profile else "",
             f"额外角色自我识别线索：{custom_hint}" if custom_hint else "",
         ]
         context = "\n".join(part for part in parts if part)
@@ -1181,15 +1208,65 @@ class PrivateImageMixin:
             return ""
         return (
             "【角色识别线索】\n"
-            "以下只用于给图片归属打标签,不要展开推理,不要复述规则。当前角色不是发图用户。\n"
-            "这里的“当前角色自己/当前角色的表情包”可以包括头像、Q版、二创、表情包、同人图和风格化卡通形象,但必须保留当前角色的核心外观锚点。\n"
-            "归属判断采用保守规则：发型/发色/瞳色/物种/标志性服饰任一核心锚点与角色线索明显冲突时,不要判为当前角色自己,请写无法判断或用户发来的无关图片。\n"
-            "例如角色是短发,画面主体却是长发、双马尾、麻花辫或高马尾；角色是黑发,画面主体却是蓝发/紫发/粉发等,都属于明显冲突。\n"
-            "只有画面主体同时命中多个当前角色显著视觉锚点,且没有上述冲突时,才可判断为当前角色自己；如果明显是表情包或贴纸语境,判断为当前角色的表情包。\n"
-            "视觉锚点过少、只能泛泛说可爱/少女/二次元、与角色线索冲突,或主体明显是无关人物/物品时,请写无法判断或用户发来的无关图片。\n"
+            "以下只用于给图片归属打三档标签,不要展开推理,不要复述规则。当前角色不是发图用户。\n"
+            "“疑似当前角色”包括当前角色本人、头像、Q版、二创、表情包、聊天截图等,但必须命中核心外观或名字锚点。\n"
+            "核心发型、发色、瞳色、物种或标志性服饰明显冲突时,标为“非当前角色”或“无法判断”。\n"
+            "视觉锚点过少、只能泛泛说可爱/少女/二次元时,标为“无法判断”；明显无关人物/物品时,标为“非当前角色”。\n"
             f"{context}\n"
-            "只在最后一行输出归属标签：图像归属判断：当前角色自己/当前角色的表情包/当前角色的聊天截图/发图用户本人/用户发来的无关图片/无法判断。"
         )
+
+    def _private_image_visual_profile_parts(self, default_persona: str = "", schedule_persona: str = "") -> list[str]:
+        labels = (
+            "姓名", "年龄", "生日", "性别", "识别点", "视觉特征", "外貌", "外观", "形象",
+            "发型发色", "发型", "发色", "瞳色", "眼睛", "服饰风格", "服装", "衣着", "种族", "职业/身份",
+        )
+        parts: list[str] = []
+        seen: set[str] = set()
+
+        def add(line: str) -> None:
+            item = _single_line(line, 220)
+            key = re.sub(r"\s+", "", item)
+            if item and key not in seen:
+                seen.add(key)
+                parts.append(item)
+
+        for source_name, source in (("AstrBot人格", default_persona), ("日程角色设定", schedule_persona)):
+            text = str(source or "")
+            if not text.strip():
+                continue
+            for label in labels:
+                value = self._roleplay_labeled_value(text, label)
+                if value:
+                    add(f"{source_name}{label}：{value}")
+            freeform = self._private_image_freeform_visual_clues(text)
+            if freeform:
+                add(f"{source_name}外貌摘录：{freeform}")
+        return parts[:12]
+
+    def _private_image_freeform_visual_clues(self, text: str) -> str:
+        source = str(text or "")
+        if not source.strip():
+            return ""
+        visual_tokens = (
+            "外貌", "长相", "发型", "头发", "发色", "瞳色", "眼睛", "眼眸", "服饰", "穿着", "衣服",
+            "校服", "制服", "裙", "外套", "帽", "角", "耳朵", "尾巴", "翅膀", "光环", "纹身", "标志",
+            "银发", "白发", "黑发", "金发", "蓝发", "粉发", "紫发", "红发", "绿发", "短发", "长发", "双马尾",
+        )
+        user_tokens = ("用户", "主人", "对方", "称呼", "关系", "相处", "职业")
+        snippets: list[str] = []
+        seen: set[str] = set()
+        for raw in re.split(r"[\r\n。；;]+", source):
+            line = _single_line(raw, 180)
+            if not line or any(token in line for token in user_tokens):
+                continue
+            if any(token in line for token in visual_tokens):
+                key = re.sub(r"\s+", "", line)
+                if key not in seen:
+                    seen.add(key)
+                    snippets.append(line)
+            if len(snippets) >= 4:
+                break
+        return _single_line("；".join(snippets), 500)
 
     def _roleplay_labeled_value(self, text: str, label: str, *, limit: int = 180) -> str:
         source = str(text or "")
@@ -1197,7 +1274,8 @@ class PrivateImageMixin:
             return ""
         label_pattern = re.escape(str(label))
         known_labels = (
-            "姓名", "种族", "年龄", "生日", "性别", "识别点", "外貌", "发型发色", "瞳色", "服饰风格",
+            "姓名", "种族", "年龄", "生日", "性别", "识别点", "视觉特征", "外貌", "外观", "形象",
+            "发型发色", "发型", "发色", "瞳色", "眼睛", "服饰风格", "服装", "衣着",
             "职业/身份", "身份", "性格描述", "核心欲望/目标", "爱好", "禁忌",
             "关键设定", "其他补充信息", "所处世界", "所在世界", "时代背景",
             "基本法则/基调", "特殊规则", "主要活动场景", "世界观关系网",
@@ -1215,11 +1293,8 @@ class PrivateImageMixin:
 
     def _private_image_identity_disambiguation_instruction(self) -> str:
         return (
-            "若视觉摘要包含“图像归属判断”,请按该标签区分身份："
-            "当前角色/Bot/assistant 指当前回复者扮演的角色这一方,user/用户指发图者这一方。"
-            "但回复主目标始终是理解用户发这张图想表达什么；"
-            "归属判断只是补充线索,只有用户明确问归属、图片文字/梗依赖 Bot 身份,或自然接话需要时,才轻轻带到自我关联。"
-            "普通表情包优先按表情包文字、情绪和动作回应,不要把每张相似图都变成辨认当前角色自己。"
+            "归属判断只作辅助：当前角色/Bot 指回复者，用户指发图者。"
+            "优先回应用户借图表达的意思；只有用户问归属或梗依赖身份时再轻带自我关联。"
         )
 
     def _private_image_intent_line(self, text: str) -> str:
@@ -1243,16 +1318,43 @@ class PrivateImageMixin:
         return ""
 
     def _private_image_role_visual_text(self) -> str:
+        default_persona = self._private_image_default_persona_prompt()
         schedule_persona = str(getattr(self, "schedule_persona_prompt", "") or "")
         custom_hint = self._private_image_role_self_recognition_hint()
-        parts: list[str] = []
-        for label in ("识别点", "外貌", "发型发色", "瞳色", "服饰风格", "种族", "职业/身份"):
-            value = self._roleplay_labeled_value(schedule_persona, label)
-            if value:
-                parts.append(f"{label}：{value}")
+        parts = self._private_image_visual_profile_parts(default_persona, schedule_persona)
         if custom_hint:
             parts.append(custom_hint)
         return _single_line("\n".join(parts), 900)
+
+    def _private_image_direct_role_appearance_prompt(self) -> str:
+        lines: list[str] = []
+        bot_name = _single_line(getattr(self, "bot_name", ""), 40)
+        visual_text = _single_line(self._private_image_role_visual_text(), 520)
+        visual_text = re.sub(r"(?:AstrBot人格|日程角色设定)", "", visual_text)
+        if bot_name:
+            lines.append(f"角色名：{bot_name}")
+        if visual_text:
+            lines.append(f"外貌线索：{visual_text}")
+        if not lines:
+            return ""
+        lines.append("用途：仅辅助本轮图片识别，避免把无关人物或表情包误认成当前角色；不代表用户正在询问外貌。")
+        return "【当前角色外貌】\n" + "\n".join(lines)
+
+    def _private_image_role_visual_cache_signature(self) -> str:
+        role_text = re.sub(r"\s+", "", self._private_image_role_visual_text())
+        if not role_text:
+            return ""
+        anchors = (
+            "短发", "长发", "双马尾", "马尾", "麻花辫", "辫子", "卷发", "直发",
+            "黑发", "白发", "银发", "金发", "黄发", "蓝发", "紫发", "红发", "粉发", "棕发", "绿发", "灰发",
+            "黑髮", "白髮", "銀髮", "金髮", "藍髮", "紫髮", "紅髮", "粉髮", "棕髮", "綠髮", "灰髮",
+            "黑瞳", "蓝瞳", "紫瞳", "红瞳", "金瞳", "绿瞳", "异色瞳",
+            "兽耳", "猫耳", "狐耳", "角", "尾巴", "翅膀", "光环", "眼镜", "校服", "制服", "女仆装",
+        )
+        found = [anchor for anchor in anchors if anchor in role_text]
+        name = re.sub(r"\s+", "", _single_line(getattr(self, "bot_name", ""), 40))
+        raw = "|".join([name, *found])
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:12] if raw.strip("|") else ""
 
     @staticmethod
     def _private_image_has_any_token(text: str, tokens: tuple[str, ...]) -> bool:
@@ -1339,6 +1441,12 @@ class PrivateImageMixin:
 
     def _private_image_ownership_kind(self, ownership_line: str) -> str:
         compact = re.sub(r"\s+", "", str(ownership_line or "")).lower()
+        if re.search(r"\d+=", compact):
+            return "mixed"
+        if "非当前角色" in compact or "不是当前角色" in compact:
+            return "unrelated"
+        if "疑似当前角色" in compact:
+            return "bot_self"
         if "当前角色的表情包" in compact or "bot的表情包" in compact:
             return "bot_sticker"
         if "当前角色的聊天截图" in compact or "bot的聊天截图" in compact:
@@ -1395,43 +1503,28 @@ class PrivateImageMixin:
         asks_content = self._private_image_user_asks_content(user_text)
         if asks_content:
             return (
-                "回复目标：用户正在询问图片内容。请优先基于“可见内容”直接概括图里有什么、文字是什么、整体场景是什么；"
-                "同时结合“图像表达意图”说明它可能在表达什么。不要只回应情绪、不要反问来源、不要把历史图片当成本轮图片。"
-                "涉及露骨、暴力或敏感画面时只做克制概括，不复述露骨台词，不展开细节。"
+                "回复目标：用户在问图片内容。先概括可见内容，再接住表达意图；"
+                "不确定就说不确定，不要套历史图。"
             )
         if image_kind == "sticker":
             return (
-                "回复目标：这类图片按表情包/贴纸/GIF 理解。请同时利用“可见内容”和“图像表达意图”："
-                "先接住它传达的情绪、态度、动作变化、文字梗或调侃点，但不要丢掉画面主体、文字和动作这些内容依据。"
-                "请直接接住用户这次借图表达的意思，短句自然回复。"
+                "回复目标：按表情包/贴纸/GIF 接住情绪、动作变化、文字梗或调侃点；短句自然回复。"
             )
         if image_kind in {"photo", "screenshot", "manga", "chat"}:
             return (
-                "回复目标：这类图片按普通图片/截图/漫画/聊天记录处理。请同时利用“可见内容”和“图像表达意图”："
-                "先理解画面主体、文字和场景，再结合用户发图可能表达的态度、疑问或分享意图回应。"
-                "不要只把它当表情包接情绪，也不要把表达意图完全忽略。"
-                "不要复述图片台词、不要扮演图片角色、不要使用括号动作或神态旁白。"
+                "回复目标：按普通图片/截图/漫画/聊天记录处理。先看主体、文字和场景，再回应用户的疑问、吐槽或分享意图。"
             )
         if kind in {"bot_self", "bot_sticker", "bot_chat"}:
             return (
-                "回复目标：优先回应图片作为用户消息的表达意图,例如表情包文字、情绪、动作或梗。"
-                "这张图是用户发来的聊天内容,不是让回复者复述图片台词或扮演图片角色；"
-                "请直接回应用户这次调侃、吐槽、撒娇或分享的行为。"
-                "不要使用括号动作、神态旁白或舞台描写,只写真正会发给用户看的短聊天句。"
-                "归属判断指向当前回复者这一方时,只把它作为语气辅助；"
-            "除非用户在问归属或语境明显需要,不要主动把重点放在辨认当前角色自己。"
+                "回复目标：直接回应用户这次借图调侃、吐槽、撒娇或分享的意思；"
+                "归属指向当前角色时只作语气辅助，不要主动把重点放在认自己。"
             )
         if kind == "user_self":
             return (
-                "回复目标：优先回应图片作为用户消息的表达意图。"
-                "这张图是用户发来的聊天内容,不是让回复者复述图片台词或扮演图片角色；"
-                "不要使用括号动作、神态旁白或舞台描写。"
-                "归属判断指向用户本人时,注意不要说成是当前回复者自己。"
+                "回复目标：回应用户借图表达的意思；归属指向用户本人时，不要说成当前角色自己。"
             )
         return (
-            "回复目标：优先回应图片作为用户消息的表达意图；"
-            "不要复述图片台词、不要扮演图片角色、不要使用括号动作或神态旁白。"
-            "如果归属无法判断,不要强行认定属于任何一方。"
+            "回复目标：优先回应用户借图表达的意思；归属不明时不要强行认定。"
         )
 
     def _private_image_user_has_specific_vision_request(self, text: str) -> bool:
@@ -1474,6 +1567,17 @@ class PrivateImageMixin:
             "不知道就写无法判断,不要用旧摘要概括带过。"
         )
 
+    def _private_image_vision_cache_prompt_signature(self, base_prompt: str, user_text: str = "", *, contextual: bool = False) -> str:
+        """Keep cache keys stable when prompt wording changes, but refresh on core appearance changes."""
+        role_sig = self._private_image_role_visual_cache_signature()
+        return (
+            "private_image_vision_v4|"
+            f"contextual={1 if contextual else 0}|"
+            f"base={hashlib.sha1(str(base_prompt or '').encode('utf-8', errors='ignore')).hexdigest()[:16]}|"
+            f"role={role_sig}|"
+            f"user={hashlib.sha1(_single_line(user_text, 240).encode('utf-8', errors='ignore')).hexdigest()[:16] if contextual and user_text else ''}"
+        )
+
     async def _transcribe_private_inbound_images(self, image_sources: list[str], *, umo: str = "", user_text: str = "", force_contextual: bool = False) -> str:
         original_sources = [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]
         sources = await self._prepare_private_image_sources_for_model(
@@ -1482,18 +1586,39 @@ class PrivateImageMixin:
         )
         if not sources:
             return ""
-        image_items = self._private_image_model_image_items(sources)
+        image_items, source_image_count, has_gif_frames = self._private_image_model_image_items_with_meta(sources)
         image_keys = [key for key, _ in image_items]
         image_urls = [url for _, url in image_items]
         if not image_urls:
             return ""
+        refresher = getattr(self, "_refresh_default_persona_prompt", None)
+        if callable(refresher):
+            try:
+                result = refresher(umo)
+                if hasattr(result, "__await__"):
+                    await asyncio.wait_for(result, timeout=2.0)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 图片自我识别刷新人格缓存失败: %s", exc)
         image_aliases = self._private_image_cache_aliases_for_sources([*original_sources, *sources])
-        image_count = len(original_sources) or len(sources)
+        original_image_keys = self._private_image_cache_image_keys(original_sources or sources)
+        if original_image_keys:
+            image_keys = original_image_keys
+        image_count = source_image_count or len(original_sources) or len(sources)
         text_limit = self._private_image_vision_text_limit(image_count)
+        multi_ownership_hint = (
+            "多张图片的归属判断请按序输出在同一行,例如：图像归属判断：1=非当前角色；2=疑似当前角色；3=无法判断。\n"
+            if image_count >= 2
+            else ""
+        )
         combo_hint = (
             "如果用户文本明确把多张图称为抽签、抽卡、老虎机、赛博老虎机或组合结果,请按顺序综合理解这组结果,保留每张图的关键文字并概括最终含义。"
             if image_count >= 2 and self._private_image_user_mentions_combo_result(user_text)
             else "如果用户一次发多张图,请先分别保留每张图的关键可见内容；只有用户文本明确表示它们是一组组合结果时,才合并成一个梗来解读。"
+        )
+        gif_hint = (
+            "如果同一张动态 GIF 被抽成多帧,这些帧属于同一张动图；请按整体动图主体判断归属,不要因某一帧局部相似就误判。\n"
+            if has_gif_frames
+            else ""
         )
         default_prompt = (
             f"请把用户刚发的 {len(original_sources)} 张图片压缩成给聊天模型看的短摘要。先判断它们更像表情包/贴纸/GIF,还是照片/截图/漫画/聊天记录。"
@@ -1501,13 +1626,15 @@ class PrivateImageMixin:
             "图片类型：<照片/截图/漫画/表情包/聊天记录/其他>\n"
             "可见内容：<客观画面主体、文字、动作或最关键细节,125字内；多张图要按顺序保留每张图的关键文字/结果,不要只概括第一张>\n"
             "图像表达意图：<用户可能借图表达的情绪、态度、疑问、分享意图、动作变化或梗,125字内>\n"
-            "图像归属判断：<当前角色自己/当前角色的表情包/当前角色的聊天截图/发图用户本人/用户发来的无关图片/无法判断>\n"
+            "图像归属判断：<疑似当前角色/非当前角色/无法判断>\n"
+            f"{multi_ownership_hint}"
             "完整性规则：这是在原有基础上的增强,不是二选一。任何类型都要保留可见内容和表达意图；"
             "区别只是图片侧多给内容细节,表情包/GIF侧多给情绪、态度和梗点。"
             "使用规则：表情包/贴纸/GIF 的表达意图常来自文字、表情、动作和梗点；普通图片的表达意图常来自用户分享、询问、吐槽或展示的语境。"
             f"{combo_hint}"
             "无法确定就写无法判断；不要为了归属判断反复比较。"
             "如果同一张动态 GIF 被抽成多帧,请按时间顺序综合动作、表情变化和文字变化,不要把它们当成多张无关图片。"
+            f"{gif_hint}"
         )
         attempts = 0
         seen: set[str] = set()
@@ -1528,7 +1655,12 @@ class PrivateImageMixin:
             if self_recognition_prompt and self_recognition_prompt not in prompt:
                 prompt = f"{prompt}\n\n{self_recognition_prompt}"
             scope = "private_image_query" if contextual else "private_image"
-            cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt, scope=scope)
+            cache_prompt_sig = self._private_image_vision_cache_prompt_signature(
+                default_prompt,
+                user_text,
+                contextual=contextual,
+            )
+            cache_key = self._private_image_vision_cache_key(image_keys, provider_id, cache_prompt_sig, scope=scope)
             cached_text = self._get_private_image_vision_cache(
                 cache_key,
                 provider_id=provider_id,
@@ -1592,7 +1724,7 @@ class PrivateImageMixin:
                     image_keys=image_keys,
                     image_aliases=image_aliases,
                     image_count=image_count,
-                    prompt=prompt,
+                    prompt=cache_prompt_sig,
                     scope=scope,
                     preview=self._private_image_cache_preview_from_sources(cache_key, [*original_sources, *sources]),
                 )
@@ -2238,6 +2370,7 @@ class PrivateImageMixin:
             setattr(framework_event, "private_companion_delayed_image_sources", list(request_image_refs))
             buffered_image_mode = _single_line(buffer.get("image_mode"), 20)
             main_provider_supports_image = self._event_main_provider_supports_image(framework_event)
+            has_visual_provider = self._has_private_image_visual_provider(umo)
             has_dynamic_gif_sources = (
                 bool(getattr(self, "enable_private_image_gif_enhancement", True))
                 and self._private_image_sources_include_gif(raw_image_sources)
@@ -2259,8 +2392,8 @@ class PrivateImageMixin:
                     direct_provider_id = "current_main_provider"
                 setattr(framework_event, "private_companion_delayed_image_mode", "direct")
             elif request_image_refs:
-                setattr(framework_event, "private_companion_delayed_image_mode", "caption")
-            if not direct_image_mode and not vision_text and images:
+                setattr(framework_event, "private_companion_delayed_image_mode", "caption" if has_visual_provider else "no_vision")
+            if not direct_image_mode and has_visual_provider and not vision_text and images:
                 vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), self._private_image_vision_text_limit(len(images)))
                 setattr(framework_event, "private_companion_delayed_image_vision_text", vision_text)
                 ownership_line = self._private_image_ownership_line(vision_text)
@@ -2448,7 +2581,7 @@ class PrivateImageMixin:
                     _single_line(reply, 180),
                 )
             if not reply:
-                if not vision_text and images:
+                if not vision_text and images and has_visual_provider:
                     vision_text = self._completed_private_image_vision_task_text(vision_task)
                     if vision_text:
                         logger.info(
@@ -2463,12 +2596,12 @@ class PrivateImageMixin:
                     intent_line = self._private_image_intent_line(vision_text)
                     reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
                 fallback_prompt = (
-                    "用户刚刚只发了一张图片,没有补充文字。请用当前私聊人格自然回复一句,像 QQ 私聊短句；不要提模型、插件、视觉转述或路径,不要使用括号动作、神态旁白或舞台描写。\n"
+                    "用户只发了一张图片。请用当前私聊人格短句回应，不要提模型、插件、视觉转述或路径。\n"
                     f"{self._private_image_identity_disambiguation_instruction()}\n"
                     f"{reply_objective}\n"
                     f"图片内容摘要：{vision_text}"
                     if vision_text
-                    else "用户刚刚只发了一张图片,没有补充文字。当前没有可靠图片内容。请自然回复一句,不要编造画面,可以让用户补一句想让你看哪里。"
+                    else "用户只发了一张图片，但当前没有可靠图片内容。请自然回复一句，不要编造画面，可以让用户补一句想看哪里。"
                 )
                 fallback_reply = await self._llm_call(
                     fallback_prompt,

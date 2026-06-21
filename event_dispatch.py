@@ -277,7 +277,7 @@ _PROMPT_MODULE_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "group.persona_denoise": ("群聊人格降噪", "群聊回复时降低私聊腔、过度亲密和状态外露。"),
     "group.context": ("群聊上下文", "群聊回复时补充群氛围、当前发言者、最近话题和连续补充内容。"),
     "identity.non_target": ("非目标私聊防串", "私聊对象不是主陪伴用户时防止套用专属关系和记忆。"),
-    "forward.message": ("合并转发上下文", "合并转发、聊天记录或引用卡片进入回复时注入的阅读摘要。"),
+    "forward.message": ("合并转发上下文", "合并转发、聊天记录或引用卡片进入回复时注入的阅读内容或转述。"),
 }
 
 _PROMPT_MODULE_PREFIX_DESCRIPTIONS: tuple[tuple[str, tuple[str, str]], ...] = (

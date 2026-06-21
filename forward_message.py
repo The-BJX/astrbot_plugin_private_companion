@@ -833,30 +833,29 @@ class ForwardMessageMixin:
                 return context
         lines = [
             "【本轮合并消息】",
-            "用户这轮消息包含一段合并/转发聊天记录。请像自然翻阅聊天记录一样理解它：注意发言顺序、说话者、称呼、图片/表情占位、话题转折和可能的上下文，不要把它当成用户本人逐字说的话。",
-            "带有 [嵌套N] 的条目来自被转发记录里的内层合并消息，请保留层级理解；没有视觉摘要的 [图片] 只表示有图片存在，不要猜测图片内容、作品、游戏或人物关系。",
-            "除非用户明确要求总结、逐条解读或复述聊天记录，否则不要大段复述记录内容；优先用记录支撑对用户当前问题的简短判断或自然回应。",
-            "如果记录或图片摘要里已有作品名、活动名、日期等线索，请优先相信这些线索；看不清就说看不清，不要为了补全而外搜，也不要把相近作品、衍生作或同系列活动互相替换。",
+            "这轮用户发来一段合并/转发聊天记录，内容如下：",
         ]
         if nested_count:
-            lines.append(f"其中包含 {nested_count} 段嵌套合并消息，已尽量展开。")
+            lines.append(f"含 {nested_count} 段嵌套。")
         if image_urls:
             lines.append(f"记录中含 {len(image_urls)} 张图片占位。")
         if image_vision_text:
-            lines.append("【合并消息图片视觉摘要】")
+            lines.append("合并消息中的图片：")
             lines.append(image_vision_text)
         used = 0
         for index, row in enumerate(rows, 1):
             sender_id = row.get("sender_id") or ""
             identity_note = self._group_member_identity_note(sender_id, limit=90) if sender_id else ""
             if row.get("is_bot_self"):
-                identity_note = "这是你自己/Bot当时发出的消息" + (f"；{identity_note}" if identity_note else "")
+                identity_note = "Bot当时发出" + (f"；{identity_note}" if identity_note else "")
             note = f"（{identity_note}）" if identity_note else ""
-            when = f"{row.get('time')} " if row.get("time") else ""
+            when = _single_line(row.get("time"), 40) or "-"
             row_depth = _safe_int(row.get("depth"), 0, 0, 6)
             indent = "  " * row_depth
             nested_label = f"[嵌套{row_depth}] " if row_depth else ""
-            line = f"{indent}{index}. {nested_label}{when}{row.get('sender') or sender_id or '未知用户'}{note}: {row.get('text') or ''}"
+            sender = _single_line(row.get("sender") or sender_id or "未知用户", 60)
+            text = _single_line(row.get("text"), 500)
+            line = f"{indent}{index}. {nested_label}{sender}{note}｜{when}｜{text}"
             used += len(line)
             if used > self.forward_message_max_chars:
                 lines.append("……后续内容因长度限制已省略。")
@@ -890,35 +889,7 @@ class ForwardMessageMixin:
             )
             return ""
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        image_items: list[tuple[str, str]] = []
-        seen_image_keys: set[str] = set()
-        gif_enhancement_enabled = bool(getattr(self, "enable_private_image_gif_enhancement", True))
-        gif_max_frames = max(1, min(8, int(getattr(self, "private_image_gif_max_frames", 4) or 4)))
-        max_model_images = max(8, min(16, limit * gif_max_frames if limit else gif_max_frames * 2))
-        for source in sources:
-            image_key = self._private_image_source_cache_key(source)
-            gif_items = self._private_image_gif_frame_model_items(source, image_key, max_frames=gif_max_frames) if gif_enhancement_enabled else []
-            if gif_items:
-                for frame_key, frame_url in gif_items:
-                    if frame_key in seen_image_keys:
-                        continue
-                    seen_image_keys.add(frame_key)
-                    image_items.append((frame_key, frame_url))
-                    if len(image_items) >= max_model_images:
-                        break
-                if len(image_items) >= max_model_images:
-                    break
-                continue
-            url = self._private_image_source_to_model_url(source)
-            if not url:
-                continue
-            image_key = image_key or ("model_url:" + hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest())
-            if image_key in seen_image_keys:
-                continue
-            seen_image_keys.add(image_key)
-            image_items.append((image_key, url))
-            if len(image_items) >= max_model_images:
-                break
+        image_items, source_image_count, has_gif_frames = self._private_image_model_image_items_with_meta(sources)
         image_keys = [key for key, _ in image_items]
         image_urls = [url for _, url in image_items]
         if not image_urls:
@@ -929,14 +900,23 @@ class ForwardMessageMixin:
             )
             return ""
         image_aliases = self._private_image_cache_aliases_for_sources([*original_sources, *sources])
-        image_count = len(original_sources) or len(sources)
+        original_image_keys = self._private_image_cache_image_keys(original_sources or sources)
+        if original_image_keys:
+            image_keys = original_image_keys
+        image_count = source_image_count or len(original_sources) or len(sources)
+        gif_hint = (
+            "如果同一张动态 GIF 被抽成多帧,这些帧属于同一张动图；请按整体动图主体判断归属,不要因某一帧局部相似就误判。"
+            if has_gif_frames
+            else ""
+        )
         default_prompt = (
             "请按出现顺序把合并消息里的图片压缩成短摘要。每张图只写一行,不要写标题、分析过程或长篇描述。\n"
-            "格式：第N张：<图片类型>；内容=<可见文字/主体/动作/关键细节,125字内>；表达=<用户可能借图表达的情绪、态度、疑问、用途或梗,125字内>。\n"
+            "格式：第N张：<图片类型>；内容=<可见文字/主体/动作/关键细节,125字内>；表达=<用户可能借图表达的情绪、态度、疑问、用途或梗,125字内>；归属=<疑似当前角色/非当前角色/无法判断>。\n"
             "完整性规则：每张图都要同时保留客观内容和表达意图；这是在原有基础上的增强,不是二选一。"
             "若是照片/截图/漫画/聊天记录,内容描述更细一点；若是表情包/贴纸/GIF,表达意图和情绪梗分析更多一点。看不清就写看不清；不要猜测人物关系。"
             "若图中有游戏/作品/角色/活动/节日/日期等文字,必须尽量照抄可见原文；不能把同系列作品或相近活动名互换,不能用联网印象补全看不清的内容。"
             "如果同一张动态 GIF 被抽成多帧,请把连续帧当作同一个动态表情包理解,概括动作/表情变化。"
+            f"{gif_hint}"
         )
         attempts = 0
         seen_providers: set[str] = set()
@@ -958,10 +938,11 @@ class ForwardMessageMixin:
                 continue
             attempts += 1
             prompt = default_prompt
-            self_recognition_prompt = self._private_image_self_recognition_prompt()
+            self_recognition_prompt = self._private_image_self_recognition_context_prompt()
             if self_recognition_prompt and self_recognition_prompt not in prompt:
                 prompt = f"{prompt}\n\n{self_recognition_prompt}"
-            cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt, scope="forward_image")
+            cache_prompt_sig = self._private_image_vision_cache_prompt_signature(default_prompt)
+            cache_key = self._private_image_vision_cache_key(image_keys, provider_id, cache_prompt_sig, scope="forward_image")
             cached_text = self._get_private_image_vision_cache(
                 cache_key,
                 provider_id=provider_id,
@@ -1017,7 +998,7 @@ class ForwardMessageMixin:
                     image_keys=image_keys,
                     image_aliases=image_aliases,
                     image_count=image_count,
-                    prompt=prompt,
+                    prompt=cache_prompt_sig,
                     scope="forward_image",
                 )
                 return cleaned_text
@@ -1223,8 +1204,7 @@ class ForwardMessageMixin:
         image_vision_text = await self._transcribe_forward_message_images(event, images)
         lines = [
             "【本轮引用卡片/动态】",
-            "用户这轮是在问被引用的富卡片、动态或插件消息。下面是从被引用消息结构中抽出的内容；请优先依据这些内容和图片摘要回答，不要用搜索结果或历史话题替换当前引用内容。",
-            "如果图片摘要或卡片文字里已有作品名、活动名、日期等线索，请照原样理解；看不清就说看不清，不要把同系列作品或相近活动互相替换。",
+            "这轮用户引用了一条卡片/动态，内容如下：",
         ]
         if message_id:
             lines.append(f"引用消息ID：{message_id}")
@@ -1247,7 +1227,7 @@ class ForwardMessageMixin:
         if images:
             lines.append(f"卡片图片数：{len(images)}")
         if image_vision_text:
-            lines.append("引用卡片图片视觉摘要：")
+            lines.append("引用卡片中的图片：")
             lines.append(image_vision_text)
             logger.info(
                 "[PrivateCompanion] 引用卡片图片视觉摘要完成: message_id=%s images=%s preview=%s",
@@ -1279,18 +1259,20 @@ class ForwardMessageMixin:
         raw_lines: list[str] = []
         used = 0
         for index, row in enumerate(rows, 1):
-            when = f"{row.get('time')} " if row.get("time") else ""
+            when = _single_line(row.get("time"), 40) or "-"
             row_depth = _safe_int(row.get("depth"), 0, 0, 6)
             indent = "  " * row_depth
             nested_label = f"[嵌套{row_depth}] " if row_depth else ""
             sender_id = _single_line(row.get("sender_id"), 40)
             identity_note = ""
             if row.get("is_bot_self"):
-                identity_note = "这是你自己/Bot当时发出的消息"
+                identity_note = "Bot当时发出"
             elif sender_id:
                 identity_note = self._group_member_identity_note(sender_id, limit=90)
             note = f"（{identity_note}）" if identity_note else ""
-            line = f"{indent}{index}. {nested_label}{when}{row.get('sender') or '未知用户'}{note}: {row.get('text') or ''}"
+            sender = _single_line(row.get("sender") or "未知用户", 60)
+            text = _single_line(row.get("text"), 500)
+            line = f"{indent}{index}. {nested_label}{sender}{note}｜{when}｜{text}"
             used += len(line)
             if used > max(800, self.forward_message_max_chars):
                 raw_lines.append("……后续节点因长度限制已省略。")

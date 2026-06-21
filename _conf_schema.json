@@ -629,7 +629,7 @@
   "private_image_self_recognition_hint": {
     "description": "图片转述增强：识别当前角色自己的线索",
     "type": "string",
-    "hint": "用于私聊单图防抖后的视觉转述。只填写当前角色自己的头像、发色、服装、物种、常见表情包特征、OC 名称、聊天截图昵称等线索；不要填写用户性别、职业或与用户关系。视觉模型会据此判断图里是否疑似是当前角色自己。留空时仍会使用角色名字和角色设定作为基础线索。",
+    "hint": "用于私聊单图防抖后的视觉转述。只填写当前角色自己的头像、发色、服装、物种、常见表情包特征、OC 名称、聊天截图昵称等线索；不要填写用户性别、职业或与用户关系。视觉模型会据此判断图里是否疑似是当前角色自己。留空时仍会使用 AstrBot 人格与日程角色设定中的外貌线索。",
     "default": "",
     "condition": "enable_private_image_self_recognition"
   },
@@ -1722,6 +1722,29 @@
     "default": 0.18,
     "condition": {
       "enable_qzone_life_publish": true
+    }
+  },
+  "enable_qzone_generated_image_publish": {
+    "description": "主动说说可带生成图",
+    "type": "bool",
+    "hint": "开启后，自动生活说说或情绪说说在命中配图概率时，会调用现有生图后端生成一张公开动态配图。生图失败时只发文字，不阻断说说发布。",
+    "default": false,
+    "condition": {
+      "enable_qzone_integration": true
+    }
+  },
+  "qzone_generated_image_probability": {
+    "description": "主动说说带图概率",
+    "type": "float",
+    "hint": "主动说说每次准备发布时，额外尝试生成配图的概率。仅控制是否尝试配图，不改变说说本身触发概率。",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.25,
+    "condition": {
+      "enable_qzone_generated_image_publish": true
     }
   },
   "enable_private_reading_integration": {

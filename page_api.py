@@ -62,6 +62,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/group", self.get_group, ["GET"], "Private Companion Page group detail"),
             ("/group/update", self.update_group, ["POST"], "Private Companion Page update group"),
             ("/settings/update", self.update_settings, ["POST"], "Private Companion Page update settings"),
+            ("/proactive_only/unlock", self.update_proactive_only_unlock, ["POST"], "Private Companion Page proactive-only temporary unlock"),
             ("/diagnostics", self.get_diagnostics, ["GET"], "Private Companion Page diagnostics"),
             ("/troubleshooting", self.get_troubleshooting, ["GET"], "Private Companion Page troubleshooting"),
             ("/troubleshooting/test", self.run_troubleshooting_test, ["POST"], "Private Companion Page troubleshooting test"),
@@ -137,6 +138,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         "repeat_follow_enabled": bool(getattr(self.plugin, "enable_group_repeat_follow", False)),
                     },
                     "features": self._feature_flags(),
+                    "proactive_only": self._proactive_only_mode_snapshot(),
                     "providers": self._provider_settings(),
                     "settings": self._runtime_settings(),
                     "cache": self._cache_summary(data),
@@ -457,6 +459,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     changed[key] = self._normalize_setting_value(key, value)
             for key, value in changed.items():
                 self._apply_config_value(key, value, changed)
+            clearer = getattr(self.plugin, "_clear_proactive_only_temp_unlocks_if_mode_off", None)
+            if callable(clearer):
+                clearer()
             config_saved = True
             if changed:
                 config_saved = await self._save_config_if_possible()
@@ -475,6 +480,31 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             return overview
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新设置失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def update_proactive_only_unlock(self) -> dict[str, Any]:
+        try:
+            payload = await request.get_json(silent=True) or {}
+            key = self._single_line(payload.get("key"), 80)
+            action = self._single_line(payload.get("action"), 20) or "unlock"
+            sync_related = bool(payload.get("sync_related"))
+            normalizer = getattr(self.plugin, "_normalize_proactive_only_unlock_key", None)
+            normalized = normalizer(key) if callable(normalizer) else key
+            if not normalized:
+                return self._error("缺少要临时放行的功能")
+            applier = getattr(self.plugin, "_apply_proactive_only_temp_unlock", None)
+            if not callable(applier):
+                return self._error("当前插件缺少主动专用模式临时放行接口")
+            clear = action in {"clear", "remove", "cancel", "关闭", "取消"}
+            message = applier(normalized, sync_related=sync_related, clear=clear)
+            return self._ok(
+                {
+                    "message": message,
+                    "proactive_only": self._proactive_only_mode_snapshot(),
+                }
+            )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新主动专用临时放行失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def get_diagnostics(self) -> dict[str, Any]:
@@ -3320,6 +3350,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_web_exploration_boredom_search",
             "enable_qzone_integration",
             "enable_qzone_life_publish",
+            "enable_qzone_generated_image_publish",
             "enable_qzone_emotional_vent_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
@@ -3357,6 +3388,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         values["enable_bilibili_boredom_watch"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_boredom_watch", False))
         values["enable_qzone_integration"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_integration", False))
         values["enable_qzone_life_publish"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_life_publish", False))
+        values["enable_qzone_generated_image_publish"] = bool(
+            qzone_available
+            and getattr(self.plugin, "enable_qzone_generated_image_publish", False)
+        )
         values["enable_qzone_emotional_vent_publish"] = bool(
             qzone_available
             and getattr(self.plugin, "enable_emotion_simulation", False)
@@ -3368,6 +3403,49 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         values["enable_private_reading_ask_recommendation"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_ask_recommendation", False))
         values["enable_private_reading_preference_influence"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_preference_influence", True))
         return values
+
+    def _proactive_only_mode_snapshot(self) -> dict[str, Any]:
+        clearer = getattr(self.plugin, "_clear_proactive_only_temp_unlocks_if_mode_off", None)
+        if callable(clearer):
+            clearer()
+        unlocks_getter = getattr(self.plugin, "_proactive_only_unlock_store", None)
+        label_getter = getattr(self.plugin, "_proactive_only_unlock_label", None)
+        related_getter = getattr(self.plugin, "_related_proactive_only_unlock_keys", None)
+        unlocks = sorted(unlocks_getter() if callable(unlocks_getter) else [])
+
+        def label(key: str) -> str:
+            return label_getter(key) if callable(label_getter) else key
+
+        related: dict[str, list[dict[str, str]]] = {}
+        locked_keys = [
+            "inject_passive_states",
+            "enable_companion_reply_planner",
+            "enable_intent_emotion_analysis",
+            "enable_response_self_review",
+            "enable_llm_timer_scheduling",
+            "enable_passive_topic_suppression",
+            "enable_environment_perception",
+            "enable_message_debounce",
+            "enable_recall_enhancement",
+            "enable_private_image_self_recognition",
+            "enable_forward_message_adaptation",
+            "enable_group_companion",
+            "enable_skill_growth_passive_injection",
+            "enable_private_reading_preference_influence",
+            "enable_worldbook_member_recognition",
+            "enable_atrelay_tools",
+            "enable_livingmemory_integration",
+            "enable_tts_enhancement",
+            "enable_segmented_proactive_reply",
+        ]
+        for key in locked_keys:
+            keys = related_getter(key) if callable(related_getter) else []
+            related[key] = [{"key": item, "label": label(item)} for item in keys]
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_proactive_only_mode", False)),
+            "unlocked": [{"key": key, "label": label(key)} for key in unlocks],
+            "related": related,
+        }
 
     def _provider_settings(self) -> dict[str, str]:
         keys = [
@@ -3728,6 +3806,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_qzone_life_publish",
             "qzone_life_publish_min_interval_hours",
             "qzone_life_publish_probability",
+            "enable_qzone_generated_image_publish",
+            "qzone_generated_image_probability",
             "enable_qzone_emotional_vent_publish",
             "qzone_emotional_vent_threshold",
             "qzone_emotional_vent_cooldown_hours",
@@ -4504,6 +4584,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_web_exploration_boredom_search",
             "enable_qzone_integration",
             "enable_qzone_life_publish",
+            "enable_qzone_generated_image_publish",
             "enable_qzone_emotional_vent_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
@@ -4771,6 +4852,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_qzone_life_publish",
             "qzone_life_publish_min_interval_hours",
             "qzone_life_publish_probability",
+            "enable_qzone_generated_image_publish",
+            "qzone_generated_image_probability",
             "enable_qzone_emotional_vent_publish",
             "qzone_emotional_vent_threshold",
             "qzone_emotional_vent_cooldown_hours",
@@ -5228,6 +5311,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "external_event_self_link_probability",
             "web_exploration_share_probability",
             "qzone_life_publish_probability",
+            "qzone_generated_image_probability",
             "qzone_emotional_vent_probability",
             "private_reading_share_probability",
             "private_reading_ask_probability",
@@ -5270,6 +5354,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_web_exploration_boredom_search",
             "enable_qzone_integration",
             "enable_qzone_life_publish",
+            "enable_qzone_generated_image_publish",
             "enable_qzone_emotional_vent_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",

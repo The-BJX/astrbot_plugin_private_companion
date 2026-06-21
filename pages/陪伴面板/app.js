@@ -587,6 +587,7 @@ const proactiveOnlyLockedFeatureKeys = new Set([
   "enable_response_self_review",
   "enable_llm_timer_scheduling",
   "enable_passive_topic_suppression",
+  "enable_environment_perception",
   "enable_message_debounce",
   "enable_recall_enhancement",
   "enable_private_image_self_recognition",
@@ -597,6 +598,8 @@ const proactiveOnlyLockedFeatureKeys = new Set([
   "enable_worldbook_member_recognition",
   "enable_atrelay_tools",
   "enable_livingmemory_integration",
+  "enable_tts_enhancement",
+  "enable_segmented_proactive_reply",
 ]);
 
 function proactiveOnlyModeEnabled() {
@@ -609,6 +612,22 @@ function featureLockedByProactiveOnlyMode(key) {
     proactiveOnlyLockedFeatureKeys.has(key)
     || proactiveOnlyLockedFeatureKeys.has(topLevelFeatureKey(key))
   );
+}
+
+function proactiveOnlyUnlockedKeys() {
+  const items = state.overview?.proactive_only?.unlocked || [];
+  return new Set((Array.isArray(items) ? items : []).map((item) => String(item.key || item || "").trim()).filter(Boolean));
+}
+
+function featureTemporarilyUnlockedByProactiveOnly(key) {
+  if (!proactiveOnlyModeEnabled()) return false;
+  const unlocks = proactiveOnlyUnlockedKeys();
+  return unlocks.has("all") || unlocks.has(key) || unlocks.has(topLevelFeatureKey(key));
+}
+
+function proactiveOnlyRelatedUnlocks(key) {
+  const related = state.overview?.proactive_only?.related || {};
+  return Array.isArray(related[key]) ? related[key] : [];
 }
 
 function visibleFeatureSwitchKey(key) {
@@ -7942,6 +7961,7 @@ function renderFeatureSwitches() {
       renderFeatureSwitches();
     });
   });
+  bindProactiveOnlyTempUnlockActions($("#featureFlags"));
 }
 
 function renderProactiveOnlyModeCard() {
@@ -8021,6 +8041,8 @@ function renderProactiveOnlyModeCard() {
 function featureSwitchItem(key) {
   const checked = toBool(state.featureDraft[key]);
   const locked = featureLockedByProactiveOnlyMode(key);
+  const tempUnlocked = featureTemporarilyUnlockedByProactiveOnly(key);
+  const related = proactiveOnlyRelatedUnlocks(key);
   return `
     <section class="feature-switch-item ${checked ? "on" : "off"} ${locked ? "locked" : ""}" title="${escapeHtml(locked ? "主动消息专用模式开启时，此功能在普通被动链路中被锁定覆盖，原配置会保留。" : featureDescription(key))}">
       <label class="feature-toggle-hit" aria-label="${escapeHtml(featureLabel(key))}">
@@ -8029,10 +8051,12 @@ function featureSwitchItem(key) {
       </label>
       <button type="button" class="feature-switch-text" data-feature-open="${escapeHtml(key)}">
         <b>${escapeHtml(featureLabel(key))}</b>
-        <span class="feature-state-text">${escapeHtml(locked ? "已锁定" : checked ? "开启" : "关闭")}</span>
-        ${locked ? `<em>被主动消息专用模式覆盖，原配置保留</em>` : ""}
+        <span class="feature-state-text">${escapeHtml(locked ? (tempUnlocked ? "临时放行" : "已锁定") : checked ? "开启" : "关闭")}</span>
+        ${locked ? `<em>${escapeHtml(tempUnlocked ? "主动专用模式下已临时放行；关闭主动专用模式后会清空" : "被主动消息专用模式覆盖，原配置保留")}</em>` : ""}
+        ${locked && related.length ? `<em>建议同步：${escapeHtml(related.map((item) => item.label || item.key).join("、"))}</em>` : ""}
         <small>${escapeHtml(key)}</small>
       </button>
+      ${locked ? `<button type="button" class="feature-temp-unlock-btn" data-proactive-temp-unlock="${escapeHtml(key)}" data-action="${tempUnlocked ? "clear" : "unlock"}">${escapeHtml(tempUnlocked ? "取消放行" : "临时放行")}</button>` : ""}
     </section>
   `;
 }
@@ -8434,7 +8458,7 @@ const featureDetailGuides = {
   enable_environment_perception: {
     summary: "提供当前时间、日期、平台、聊天类型和消息媒介，让日程与回复不脱离现实语境。",
     trigger: "日程生成、状态刷新和回复前。",
-    enabled: "Bot 会知道现在大概是什么时间、在哪个平台、面对私聊还是群聊。",
+    enabled: "Bot 会知道现在大概是什么时间、在哪个平台、面对私聊还是群聊。主动消息专用模式下，普通被动回复里的环境感知注入会被锁定；后台状态和主动链路仍可使用。",
     disabled: "只使用较基础的上下文，时间与场景贴合度下降。",
   },
   enable_holiday_perception: {
@@ -8799,6 +8823,8 @@ function configLabel(name) {
 function featureDetailPage(key) {
   const enabled = toBool(state.featureDraft[key]);
   const locked = featureLockedByProactiveOnlyMode(key);
+  const tempUnlocked = featureTemporarilyUnlockedByProactiveOnly(key);
+  const relatedUnlocks = proactiveOnlyRelatedUnlocks(key);
   const related = featureRelatedSettings(key);
   const relatedMap = Object.fromEntries(related.map((item) => [item.key, item]));
   const dependencies = featureDependencyLines(key);
@@ -8854,8 +8880,8 @@ function featureDetailPage(key) {
         <span>/ ${escapeHtml(featureGroupForKey(key))}</span>
       </nav>
       <div class="feature-state-strip ${enabled ? "on" : "off"}">
-        <b>${escapeHtml(locked ? "已锁定" : enabled ? "开启" : "关闭")}</b>
-        ${locked ? `<span>主动消息专用模式正在覆盖这个功能；保存的原始开关值不会被修改。</span>` : ""}
+        <b>${escapeHtml(locked ? (tempUnlocked ? "临时放行" : "已锁定") : enabled ? "开启" : "关闭")}</b>
+        ${locked ? `<span>${escapeHtml(tempUnlocked ? "主动消息专用模式仍开启，但此功能已被临时放行；关闭主动专用模式后放行项会清空。" : "主动消息专用模式正在覆盖这个功能；保存的原始开关值不会被修改。")}</span>` : ""}
       </div>
       <header class="feature-detail-head">
         <div>
@@ -8866,9 +8892,20 @@ function featureDetailPage(key) {
         <label class="feature-detail-toggle">
           <input type="checkbox" data-feature-detail-toggle="${escapeHtml(key)}" ${enabled ? "checked" : ""} ${locked ? "disabled" : ""}>
           <span class="feature-toggle-visual"></span>
-          <b>${escapeHtml(locked ? "已锁定" : enabled ? "开启" : "关闭")}</b>
+          <b>${escapeHtml(locked ? (tempUnlocked ? "临时放行" : "已锁定") : enabled ? "开启" : "关闭")}</b>
         </label>
       </header>
+      ${locked ? `
+        <section class="feature-detail-card feature-temp-unlock-panel">
+          <h3>主动专用临时放行</h3>
+          <p>${escapeHtml(tempUnlocked ? "此功能已在主动消息专用模式下临时放行。关闭主动消息专用模式后，放行项会自动清空。" : "此功能当前被主动消息专用模式覆盖。你可以二次确认后临时放行，不会改写原配置。")}</p>
+          ${relatedUnlocks.length ? `<p>建议同步：${escapeHtml(relatedUnlocks.map((item) => item.label || item.key).join("、"))}</p>` : ""}
+          <div class="feature-temp-unlock-actions">
+            <button type="button" data-proactive-temp-unlock="${escapeHtml(key)}" data-action="${tempUnlocked ? "clear" : "unlock"}">${escapeHtml(tempUnlocked ? "取消临时放行" : "临时放行")}</button>
+            ${!tempUnlocked && relatedUnlocks.length ? `<button type="button" data-proactive-temp-unlock="${escapeHtml(key)}" data-action="unlock" data-sync-related="1">同步放行建议项</button>` : ""}
+          </div>
+        </section>
+      ` : ""}
       <div class="feature-detail-grid">
         <article class="feature-detail-card">
           <h3>基础信息</h3>
@@ -8977,6 +9014,35 @@ function bindFeatureDetailActions() {
   if (state.selectedFeatureKey === "enable_segmented_proactive_reply") {
     bindSegmentedPreview($("#featureFlags"));
   }
+  bindProactiveOnlyTempUnlockActions();
+}
+
+function bindProactiveOnlyTempUnlockActions(root = document) {
+  root.querySelectorAll("[data-proactive-temp-unlock]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const key = button.dataset.proactiveTempUnlock || "";
+      const action = button.dataset.action || "unlock";
+      const syncRelated = button.dataset.syncRelated === "1";
+      const confirmKey = `proactive-temp-${action}-${key}-${syncRelated ? "sync" : "single"}`;
+      const confirmText = action === "clear"
+        ? "再次点击取消临时放行"
+        : syncRelated
+          ? "再次点击确认同步放行"
+          : "再次点击确认临时放行";
+      if (!requireSecondClick(button, confirmKey, confirmText, confirmText)) return;
+      await runAction(
+        async () => {
+          const result = await postJson("/proactive_only/unlock", { key, action, sync_related: syncRelated });
+          state.overview = state.overview || {};
+          state.overview.proactive_only = result.proactive_only || state.overview.proactive_only || {};
+          renderFeatureSwitches();
+          return result;
+        },
+        action === "clear" ? "已取消临时放行" : "已临时放行",
+        button,
+      );
+    });
+  });
 }
 
 function renderProviders() {

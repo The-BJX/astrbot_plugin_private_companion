@@ -8032,6 +8032,35 @@ textarea {
   color: var(--blue);
 }
 
+.feature-temp-unlock-btn,
+.feature-temp-unlock-actions button {
+  border: 1px solid rgba(47, 117, 102, 0.24);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.feature-temp-unlock-btn:hover,
+.feature-temp-unlock-actions button:hover {
+  border-color: var(--accent);
+  background: #fff;
+}
+
+.feature-temp-unlock-panel {
+  margin: 12px 16px 0;
+}
+
+.feature-temp-unlock-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .feature-switch-text em {
   margin-top: 5px;
   color: var(--muted);

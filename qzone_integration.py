@@ -15,8 +15,10 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from .helpers import _now_ts, _safe_float, _safe_int, _single_line
+from .qzone_media import QzoneIntegrationError, QzoneMediaMixin
 
-class QzoneMixin:
+
+class QzoneMixin(QzoneMediaMixin):
     """QQ Zone integration helpers."""
 
     def _qzone_plugin_dir(self) -> Path:
@@ -230,10 +232,9 @@ class QzoneMixin:
             raise RuntimeError("Cookie 中缺少合法 uin")
         p_skey = parsed.get("p_skey") or parsed.get("pskey") or ""
         skey = parsed.get("skey") or ""
-        gtk = str(parsed.get("g_tk") or parsed.get("gtk") or parsed.get("bkn") or parsed.get("csrf_token") or "")
-        if not gtk.isdigit():
-            secret = p_skey or skey or parsed.get("skey2") or ""
-            gtk = self._qzone_gtk(secret) if secret else ""
+        existing_gtk = str(parsed.get("g_tk") or parsed.get("gtk") or parsed.get("bkn") or parsed.get("csrf_token") or "")
+        secret = p_skey or skey or parsed.get("skey2") or ""
+        gtk = self._qzone_gtk(secret) if secret else (existing_gtk if existing_gtk.isdigit() else "")
         if not gtk:
             raise RuntimeError("Cookie 中缺少 p_skey/skey，无法计算 g_tk")
         cookies = {**parsed, "uin": f"o{uin}"}
@@ -245,6 +246,7 @@ class QzoneMixin:
             "uin": int(uin),
             "skey": skey,
             "p_skey": p_skey,
+            "qzonetoken": parsed.get("qzonetoken") or parsed.get("qzone_token") or "",
             "gtk": gtk,
             "cookies": cookies,
             "cookie_header": self._qzone_cookie_header(cookies),
@@ -467,76 +469,6 @@ class QzoneMixin:
             msglist = []
         return self._qzone_parse_feeds(msglist)
 
-    async def _qzone_publish_post(
-        self,
-        event: AstrMessageEvent | None = None,
-        *,
-        text: str = "",
-        images: list[str] | None = None,
-    ) -> Any:
-        cookie_header = await self._qzone_get_cookies(event)
-        ctx = self._qzone_context_from_cookies(cookie_header)
-        content = _single_line(text, 300)
-        if not content and not images:
-            raise RuntimeError("说说内容为空")
-        referrer = f"https://user.qzone.qq.com/{ctx['uin']}"
-        data = {
-            "syn_tweet_verson": "1",
-            "paramstr": "1",
-            "who": "1",
-            "con": content,
-            "feedversion": "1",
-            "ver": "1",
-            "ugc_right": 1,
-            "to_sign": 0,
-            "hostuin": ctx["uin"],
-            "code_version": "1",
-            "richval": "",
-            "issyncweibo": 0,
-            "format": "json",
-            "qzreferrer": referrer,
-        }
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Referer": referrer,
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-        endpoints = [
-            "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6",
-            "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6",
-            "http://taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6",
-        ]
-        payload: dict[str, Any] = {}
-        failures: list[str] = []
-        for endpoint in endpoints:
-            payload = await self._qzone_request(
-                event,
-                "POST",
-                endpoint,
-                params={"g_tk": ctx["gtk"]},
-                data=data,
-                headers=headers,
-                cookie_header=cookie_header,
-            )
-            code = payload.get("code", 0)
-            if code in {0, "0"}:
-                break
-            failures.append(f"{urlparse(endpoint).netloc}: {_single_line(payload.get('message') or payload.get('msg') or f'code={code}', 120)}")
-        code = payload.get("code", 0)
-        if code not in {0, "0"}:
-            detail = "；".join(failures) or _single_line(payload.get("message") or payload.get("msg") or f"发布失败 code={code}", 160)
-            raise RuntimeError(_single_line(detail, 220))
-        return SimpleNamespace(
-            tid=str(payload.get("tid") or ""),
-            uin=int(ctx["uin"]),
-            name=str(ctx["uin"]),
-            text=content,
-            images=images or [],
-            create_time=payload.get("now") or int(time.time()),
-            status="approved",
-        )
-
     async def _qzone_like_post(self, event: AstrMessageEvent | None, post: Any) -> None:
         cookie_header = await self._qzone_get_cookies(event)
         ctx = self._qzone_context_from_cookies(cookie_header)
@@ -713,23 +645,6 @@ class QzoneMixin:
         logger.warning("[PrivateCompanion] QQ 空间说说草稿含内部状态且重写失败,使用兜底文案")
         return "夜色慢慢安静下来,窗外的风也轻了些。想把这一点点清醒和柔软留在今晚,明天再慢慢展开。"
 
-    async def _publish_qzone_text(self, text: str, event: AstrMessageEvent | None = None) -> dict[str, Any]:
-        if not self.enable_qzone_integration:
-            return {"success": False, "message": "QQ 空间动态层未启用"}
-        content = _single_line(text, 300)
-        if not content:
-            return {"success": False, "message": "说说内容为空"}
-        try:
-            post = await self._qzone_publish_post(event, text=content, images=[])
-            return {
-                "success": True,
-                "text": _single_line(getattr(post, "text", content), 300) or content,
-                "tid": str(getattr(post, "tid", "") or ""),
-                "uin": str(getattr(post, "uin", "") or ""),
-            }
-        except Exception as exc:
-            return {"success": False, "message": _single_line(exc, 160)}
-
     async def _test_qzone_publish_tool_chain(self, event: AstrMessageEvent | None = None) -> str:
         lines = ["QQ 空间发布链路模拟："]
         lines.append(f"- 整合开关：{'开启' if self.enable_qzone_integration else '关闭'}")
@@ -839,6 +754,132 @@ class QzoneMixin:
             lines.append("结果：内置服务已加载，但 QQ 空间访问失败。")
             return "\n".join(lines)
 
+    async def _maybe_generate_qzone_publish_image(
+        self,
+        *,
+        post_text: str,
+        reason: str,
+        daily_state: dict[str, Any] | None = None,
+        current_item: Any = None,
+        diary_context: str = "",
+        state: dict[str, Any] | None = None,
+    ) -> list[str]:
+        if not (
+            getattr(self, "enable_qzone_generated_image_publish", False)
+            and getattr(self, "enable_qzone_integration", False)
+        ):
+            return []
+        probability = max(0.0, min(1.0, _safe_float(getattr(self, "qzone_generated_image_probability", 0.25), 0.25)))
+        if probability <= 0 or random.random() > probability:
+            return []
+        if callable(getattr(self, "_daily_token_soft_limit_should_defer", None)) and self._daily_token_soft_limit_should_defer("photo_prompt"):
+            logger.info("[PrivateCompanion] QQ 空间主动配图跳过: token_soft_limit")
+            return []
+        generator = getattr(self, "_generate_photo_image", None)
+        if not callable(generator):
+            logger.info("[PrivateCompanion] QQ 空间主动配图跳过: image_generator_unavailable")
+            return []
+
+        style_name, style_instruction = self._get_photo_style_instruction()
+        current_desc = self._format_plan_item_for_prompt(current_item) or "无明确日程"
+        state_desc = self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {})
+        content_options = ""
+        try:
+            content_options = self._format_content_choice_options_for_prompt()
+        except Exception:
+            content_options = "生活小物、窗边光影、路上风景、桌面一角、随手自拍、偶遇小动物。"
+        prompt = f"""
+请为一条即将公开发布到 QQ 空间的说说生成一张配图提示词。
+只输出 JSON，不要解释。
+
+【说说正文】
+{_single_line(post_text, 300)}
+
+【人格】
+{self._get_default_persona_prompt()}
+
+【公开可写的状态余味】
+{state_desc}
+
+【当前/附近日程】
+{current_desc}
+
+【近日日记余味】
+{_single_line(diary_context, 500) or "暂无"}
+
+{self._format_worldview_adaptation_prompt()}
+
+【可选画面方向】
+{content_options}
+
+【生图风格】
+{style_name}
+风格要求：{style_instruction}
+
+输出 JSON：
+{{
+  "kind": "selfie 或 text2img；有人像/自拍时用 selfie，其他生活碎片用 text2img",
+  "prompt": "给生图后端的中文提示词，包含主体、场景、光线、构图、情绪；不要写聊天口吻",
+  "caption": "一句画面说明"
+}}
+
+要求：
+1. 图片必须像公开动态配图，不要包含私聊、系统、插件、模型、内部状态数值。
+2. 画面要贴合说说正文和当前日程，不要为了配图硬画无关内容。
+3. 没有明确自拍动机时优先 text2img；不要频繁默认自拍。
+4. 不要包含 NSFW、真实用户隐私、聊天截图或电脑屏幕内容。
+5. prompt 必须体现上面的生图风格要求。
+""".strip()
+        try:
+            text = await self._llm_call(
+                prompt,
+                max_tokens=260,
+                provider_id=self._task_provider(self.photo_prompt_provider_id, self.mai_style_provider_id),
+                task=f"qzone_{reason}_photo_prompt",
+            )
+            payload = self._extract_json_payload(text or "")
+            if isinstance(payload, dict):
+                workflow_kind = _single_line(payload.get("kind"), 20).lower()
+                image_prompt = _single_line(payload.get("prompt"), 600)
+                caption = _single_line(payload.get("caption"), 180)
+            else:
+                workflow_kind = "text2img"
+                image_prompt = _single_line(text, 600)
+                caption = image_prompt
+            if workflow_kind in {"portrait", "自拍", "人像"}:
+                workflow_kind = "selfie"
+            if workflow_kind not in {"selfie", "text2img"}:
+                workflow_kind = "text2img"
+            if not image_prompt:
+                image_prompt = f"QQ 空间公开动态配图，{_single_line(post_text, 160)}，{style_instruction}"
+            backend_name, image_path, workflow_note = await generator(
+                workflow_kind=workflow_kind,
+                prompt_text=image_prompt,
+                session_key=f"qzone_{reason}",
+            )
+        except Exception as exc:
+            logger.info("[PrivateCompanion] QQ 空间主动配图失败: %s", _single_line(exc, 120))
+            return []
+        if not image_path:
+            logger.info("[PrivateCompanion] QQ 空间主动配图跳过: %s", _single_line(workflow_note, 160))
+            return []
+        if not re.match(r"^(?:https?://|file://|data:)", str(image_path), flags=re.I) and not Path(str(image_path)).exists():
+            logger.info("[PrivateCompanion] QQ 空间主动配图跳过: image_path_missing path=%s", _single_line(image_path, 160))
+            return []
+        if isinstance(state, dict):
+            state["last_generated_image_path"] = _single_line(image_path, 260)
+            state["last_generated_image_at"] = _now_ts()
+            state["last_generated_image_reason"] = reason
+            state["last_generated_image_caption"] = _single_line(caption, 180)
+            state["last_generated_image_backend"] = _single_line(backend_name, 40)
+        logger.info(
+            "[PrivateCompanion] QQ 空间主动配图完成: reason=%s backend=%s path=%s",
+            reason,
+            _single_line(backend_name, 40),
+            _single_line(image_path, 160),
+        )
+        return [image_path]
+
     async def _maybe_publish_qzone_life_post(self) -> None:
         if not (self.enable_qzone_integration and self.enable_qzone_life_publish):
             return
@@ -902,7 +943,15 @@ class QzoneMixin:
         text = await self._sanitize_qzone_life_post_text(text, prompt=prompt)
         state["last_life_publish_draft"] = _single_line(text, 300)
         state["last_life_publish_draft_at"] = now
-        result = await self._publish_qzone_text(text)
+        image_sources = await self._maybe_generate_qzone_publish_image(
+            post_text=text,
+            reason="life_publish",
+            daily_state=daily_state if isinstance(daily_state, dict) else {},
+            current_item=current_item,
+            diary_context=diary_context,
+            state=state,
+        )
+        result = await self._publish_qzone_text(text, images=image_sources)
         if result.get("success"):
             state["last_life_publish_at"] = now
             state.pop("last_life_publish_failed_at", None)
@@ -912,6 +961,7 @@ class QzoneMixin:
             state["last_life_publish_status"] = f"failed:{_single_line(result.get('message'), 80)}"
         state["last_life_publish_checked_at"] = now
         state["last_life_publish_text"] = _single_line(result.get("text") or text, 180)
+        state["last_life_publish_images"] = len(image_sources) if result.get("success") else 0
         self._save_data_sync()
 
     async def _maybe_publish_qzone_emotional_vent(
@@ -1005,7 +1055,15 @@ class QzoneMixin:
             text = await self._sanitize_qzone_life_post_text(text, prompt=prompt)
             state["last_emotional_vent_draft"] = _single_line(text, 240)
             state["last_emotional_vent_draft_at"] = now
-            result = await self._publish_qzone_text(text)
+            image_sources = await self._maybe_generate_qzone_publish_image(
+                post_text=text,
+                reason="emotional_vent",
+                daily_state=daily_state if isinstance(daily_state, dict) else {},
+                current_item=current_item,
+                diary_context="",
+                state=state,
+            )
+            result = await self._publish_qzone_text(text, images=image_sources)
             if result.get("success"):
                 state["last_emotional_vent_at"] = now
                 state.pop("last_emotional_vent_failed_at", None)
@@ -1017,6 +1075,7 @@ class QzoneMixin:
                 logger.warning("[PrivateCompanion] 情绪发泄说说发布失败: %s", _single_line(result.get("message"), 120))
             state["last_emotional_vent_checked_at"] = now
             state["last_emotional_vent_text"] = _single_line(result.get("text") or text, 180)
+            state["last_emotional_vent_images"] = len(image_sources) if result.get("success") else 0
             self._save_data_sync()
         except Exception as exc:
             state["last_emotional_vent_failed_at"] = now
