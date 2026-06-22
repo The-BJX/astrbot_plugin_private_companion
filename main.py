@@ -325,6 +325,9 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_ALIASES = {
     "群聊观察": "enable_group_companion",
     "技能": "enable_skill_growth_passive_injection",
     "技能注入": "enable_skill_growth_passive_injection",
+    "吃什么": "enable_food_menu_recommendation",
+    "吃什么候选": "enable_food_menu_recommendation",
+    "候选菜单": "enable_food_menu_recommendation",
     "书柜偏好": "enable_private_reading_preference_influence",
     "夹层偏好": "enable_private_reading_preference_influence",
     "关系网": "enable_worldbook_member_recognition",
@@ -349,6 +352,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_LABELS = {
     "enable_forward_message_adaptation": "合并/转发消息阅读",
     "enable_group_companion": "群聊观察",
     "enable_skill_growth_passive_injection": "技能被动注入",
+    "enable_food_menu_recommendation": "吃什么候选",
     "enable_private_reading_preference_influence": "夹层阅读偏好影响",
     "enable_worldbook_member_recognition": "关系网成员识别",
     "enable_cross_user_memory_bridge": "跨用户记忆互通",
@@ -379,6 +383,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_GROUPS = {
         "enable_forward_message_adaptation",
         "enable_group_companion",
         "enable_skill_growth_passive_injection",
+        "enable_food_menu_recommendation",
         "enable_private_reading_preference_influence",
         "enable_worldbook_member_recognition",
         "enable_cross_user_memory_bridge",
@@ -403,7 +408,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.4.0",
+    "4.5.0",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -470,26 +475,43 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not cleaned:
             return 0.0
         check_now = _now_ts() if now is None else now
+        # Do not treat debugging, quoted history, or keyword discussion as a real
+        # "please stop proactive messages" signal. A stray phrase like "我休息"
+        # in a rule discussion should not block proactive greetings.
+        if re.search(r"(?:关键词|关键字|正则|规则|命中|误判|拦截|挡了|工具|日志|之前对话|历史消息|提示词|注入|主动问候|主动消息)", cleaned):
+            return 0.0
+        quoted_or_report = bool(
+            re.search(r"(?:他说|她说|它说|bot说|模型说|原文|内容是|比如|例如|类似|这句|那句)", cleaned)
+            or any(mark in cleaned for mark in ("“", "”", '"', "'"))
+        )
         cancel_pattern = (
             r"(?:我|俺|咱|人家).{0,10}(?:醒了|起床了|睡醒了|不睡了|回来了|可以聊)"
             r"|(?:睡醒了|起床了|不睡了|可以聊了|回来了)"
         )
         if re.search(cancel_pattern, cleaned):
             return -1.0
-        hard_quiet = re.search(r"(?:别|不要|先别|暂时别).{0,10}(?:打扰|吵|主动|发消息)", cleaned)
-        tomorrow = re.search(r"明天再(?:聊|说|回|看)", cleaned)
-        nap = re.search(r"(?:我|俺|咱|人家).{0,10}(?:午休|眯一会|歇会|躺会|休息一下|休息会)", cleaned)
+        hard_quiet = re.search(r"(?:别|不要|先别|暂时别|今晚别|今天别).{0,10}(?:打扰|吵|主动|发消息|找我)", cleaned)
+        tomorrow = re.search(r"(?:明天|明早|早上)再(?:聊|说|回|看|找我)", cleaned)
         sleep = re.search(
-            r"(?:晚安|睡觉去了|先睡了|去睡了|睡了哈|睡啦|我睡了|我先睡|我去睡|我困了|困死了|补觉)",
+            r"(?:晚安|睡觉去了|先睡了|去睡了|睡了哈|睡啦|我睡了|我先睡|我去睡|我要睡|我准备睡|我困了先睡|困死了先睡|补觉去了|我要补觉|先补觉)",
             cleaned,
         )
-        rest = re.search(r"(?:我|俺|咱|人家).{0,10}(?:休息|歇一下|躺一下|缓一会)", cleaned)
+        nap = re.search(
+            r"(?:我|俺|咱|人家).{0,10}(?:要|先|去|准备|现在|马上)?(?:午休|眯一会|歇会儿?|躺会儿?|休息一下|休息会儿?)",
+            cleaned,
+        )
+        rest = re.search(
+            r"(?:我|俺|咱|人家).{0,10}(?:要|先|去|准备|现在|马上)(?:休息(?:一下|会儿?|一会儿?)?|歇一下|躺一下|缓一会儿?)",
+            cleaned,
+        )
+        if quoted_or_report and not (hard_quiet or tomorrow or sleep):
+            return 0.0
         if hard_quiet or tomorrow or sleep:
             return self._next_user_rest_morning_ts(now=check_now)
         if nap:
-            return check_now + 2.5 * 3600
+            return check_now + 90 * 60
         if rest:
-            return check_now + 3.5 * 3600
+            return check_now + 2 * 3600
         return 0.0
 
     def _clear_user_rest_pending_plan_fallback(self, user: dict[str, Any]) -> None:
@@ -870,6 +892,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.enable_dialogue_episode_memory = self._cfg_bool(c, "enable_dialogue_episode_memory", True)
         self.enable_open_loop_tracking = self._cfg_bool(c, "enable_open_loop_tracking", True)
         self.enable_user_habit_learning = self._cfg_bool(c, "enable_user_habit_learning", True)
+        self.enable_food_menu_recommendation = self._cfg_bool(c, "enable_food_menu_recommendation", True)
         self.user_habit_min_count = self._cfg_int(c, "user_habit_min_count", 3, 2, 20)
         self.user_habit_max_items = self._cfg_int(c, "user_habit_max_items", 24, 8, 80)
         self.enable_skill_growth_simulation = self._cfg_bool(c, "enable_skill_growth_simulation", True)
@@ -3113,6 +3136,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             user["last_seen"] = received_ts
             if text:
                 user["last_user_message"] = text
+                user["last_user_message_at"] = received_ts
                 user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
                 self._apply_user_rest_silence_from_message(user, text, now=received_ts)
@@ -3443,6 +3467,13 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             inbound_text = _single_line(combined_text.replace("\n", " "), 260)
         if self._user_asks_recalled_messages(inbound_text):
             prompt_surface.add("recall.query", self._format_recalled_messages_for_natural_query(event, limit=5), priority=52, source="recall")
+        food_menu_context = (
+            self._format_food_menu_for_reply(inbound_text, limit=3)
+            if self._feature_enabled_or_temp_unlocked("enable_food_menu_recommendation")
+            else ""
+        )
+        if food_menu_context:
+            prompt_surface.add("food.menu", food_menu_context, priority=53, source="food")
         if (
             buffered_images
             and buffered_image_vision
@@ -4428,6 +4459,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             self._note_private_display_name_observation(fast_user, user_id, sender_display_name, now=received_ts)
             fast_user["last_seen"] = received_ts
             fast_user["last_user_message"] = text
+            fast_user["last_user_message_at"] = received_ts
             self._apply_user_rest_silence_from_message(fast_user, text, now=received_ts)
             fast_user["inbound_count"] = _safe_int(fast_user.get("inbound_count"), 0) + 1
             fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
@@ -4698,6 +4730,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             user["ignored_streak"] = 0
             if text:
                 user["last_user_message"] = text
+                user["last_user_message_at"] = received_ts
                 self._apply_user_rest_silence_from_message(user, text, now=received_ts)
                 self._apply_private_image_vision_negative_feedback(user, text)
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
@@ -4733,6 +4766,13 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             if food_feedback.get("is_food"):
                 user["last_food_feedback_at"] = _now_ts()
                 user["last_food_feedback_text"] = _single_line(text, 120)
+                used_food_items = self._mark_food_menu_item_used_from_text(text)
+                if used_food_items:
+                    user["last_food_menu_choice"] = {
+                        "ts": _now_ts(),
+                        "items": used_food_items,
+                        "text": _single_line(text, 120),
+                    }
             care_feedback_applied = bool(text) and self._apply_care_feedback_to_state(text)
             if care_feedback_applied:
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2

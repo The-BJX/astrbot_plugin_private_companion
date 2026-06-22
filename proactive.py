@@ -1158,6 +1158,14 @@ class ProactiveMixin:
             action = friend_safe["action"]
             topic = friend_safe["topic"]
             motive = friend_safe["motive"]
+        vague_seek_user = (
+            not planned_event
+            and str(action or "message") == "message"
+            and self._is_vague_seek_user_motive(reason, action, motive, topic)
+        )
+        if vague_seek_user:
+            scheduled = max(scheduled, now + random.uniform(1.5 * 3600, 3.5 * 3600))
+            scheduled = self._move_timestamp_into_reason_window(scheduled, reason)
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = reason
         user["planned_proactive_action"] = action
@@ -1183,6 +1191,11 @@ class ProactiveMixin:
         user["planned_proactive_quota_exempt"] = bool(
             isinstance(planned_event, dict) and planned_event.get("_free_screen_peek")
         )
+        candidate_score = 60 if planned_event else 42
+        candidate_note = _single_line(emotion_adjustment.get("note"), 160) or "日程/随机调度"
+        if vague_seek_user:
+            candidate_score = min(candidate_score, 24)
+            candidate_note = "泛动机主动已降权延后"
         item = self._record_proactive_candidate(
             str(user.get("user_id") or user.get("id") or ""),
             {
@@ -1192,10 +1205,10 @@ class ProactiveMixin:
                 "scheduled_ts": user["next_proactive_at"],
                 "topic": user["planned_proactive_topic"],
                 "motive": user["planned_proactive_motive"],
-                "score": 60 if planned_event else 42,
+                "score": candidate_score,
             },
             status="accepted",
-            note=_single_line(emotion_adjustment.get("note"), 160) or "日程/随机调度",
+            note=candidate_note,
         )
         user["planned_candidate_id"] = item.get("id", "")
 
@@ -1228,26 +1241,42 @@ class ProactiveMixin:
         if not cleaned:
             return 0.0
         check_now = _now_ts() if now is None else now
+        # Keyword/rule discussions should not become real proactive-message
+        # silence. Otherwise a stray "我休息" in debugging text can block greetings.
+        if re.search(r"(?:关键词|关键字|正则|规则|命中|误判|拦截|挡了|工具|日志|之前对话|历史消息|提示词|注入|主动问候|主动消息)", cleaned):
+            return 0.0
+        quoted_or_report = bool(
+            re.search(r"(?:他说|她说|它说|bot说|模型说|原文|内容是|比如|例如|类似|这句|那句)", cleaned)
+            or any(mark in cleaned for mark in ("“", "”", '"', "'"))
+        )
         cancel_pattern = (
             r"(?:我|俺|咱|人家).{0,10}(?:醒了|起床了|睡醒了|不睡了|回来了|可以聊)"
             r"|(?:睡醒了|起床了|不睡了|可以聊了|回来了)"
         )
         if re.search(cancel_pattern, cleaned):
             return -1.0
-        hard_quiet = re.search(r"(?:别|不要|先别|暂时别).{0,10}(?:打扰|吵|主动|发消息)", cleaned)
-        tomorrow = re.search(r"明天再(?:聊|说|回|看)", cleaned)
-        nap = re.search(r"(?:我|俺|咱|人家).{0,10}(?:午休|眯一会|歇会|躺会|休息一下|休息会)", cleaned)
+        hard_quiet = re.search(r"(?:别|不要|先别|暂时别|今晚别|今天别).{0,10}(?:打扰|吵|主动|发消息|找我)", cleaned)
+        tomorrow = re.search(r"(?:明天|明早|早上)再(?:聊|说|回|看|找我)", cleaned)
         sleep = re.search(
-            r"(?:晚安|睡觉去了|先睡了|去睡了|睡了哈|睡啦|我睡了|我先睡|我去睡|我困了|困死了|补觉)",
+            r"(?:晚安|睡觉去了|先睡了|去睡了|睡了哈|睡啦|我睡了|我先睡|我去睡|我要睡|我准备睡|我困了先睡|困死了先睡|补觉去了|我要补觉|先补觉)",
             cleaned,
         )
-        rest = re.search(r"(?:我|俺|咱|人家).{0,10}(?:休息|歇一下|躺一下|缓一会)", cleaned)
+        nap = re.search(
+            r"(?:我|俺|咱|人家).{0,10}(?:要|先|去|准备|现在|马上)?(?:午休|眯一会|歇会儿?|躺会儿?|休息一下|休息会儿?)",
+            cleaned,
+        )
+        rest = re.search(
+            r"(?:我|俺|咱|人家).{0,10}(?:要|先|去|准备|现在|马上)(?:休息(?:一下|会儿?|一会儿?)?|歇一下|躺一下|缓一会儿?)",
+            cleaned,
+        )
+        if quoted_or_report and not (hard_quiet or tomorrow or sleep):
+            return 0.0
         if hard_quiet or tomorrow or sleep:
             return self._next_user_rest_morning_ts(now=check_now)
         if nap:
-            return check_now + 2.5 * 3600
+            return check_now + 90 * 60
         if rest:
-            return check_now + 3.5 * 3600
+            return check_now + 2 * 3600
         return 0.0
 
     def _apply_user_rest_silence_from_message(

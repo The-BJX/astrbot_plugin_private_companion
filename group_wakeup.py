@@ -695,13 +695,21 @@ class GroupWakeupMixin:
             return {}
         if re.search(r"(哈哈|草|笑死|绷不住|乐|乐死|不是吧|不会吧).{0,8}[?？]?$", cleaned):
             return {}
+        if re.search(r"(急急如律令|急急国王|急急急急|急死谁了)", cleaned):
+            return {}
+        failure_context_pattern = r"(安装|配置|运行|启动|登录|请求|发送|上传|下载|连接|编译|构建|部署|调用|识别|读取|解析|保存|加载|同步|执行|支付|打开|导入|导出|更新|提交|注册|验证|接口|插件|程序|脚本|命令|模型|图片|语音|视频|文件|消息|任务).{0,8}失败|(?:一直|总是|老是|反复|还是|又).{0,6}失败|失败.{0,8}(怎么办|咋办|怎么弄|怎么解决|怎么处理|原因|报错|日志|重试|一直|总是|还是|又)"
+        help_context_pattern = r"(怎么|咋办|怎么办|怎么弄|怎么解决|怎么处理|帮忙|帮我|能不能|有没有人|有人懂|谁会|报错|异常|error|traceback|bug|卡住|跑不起来|急求|急问|在线等)"
+        plain_help_meme = bool(re.search(r"救命", cleaned)) and not bool(re.search(help_context_pattern, cleaned, flags=re.I))
+        if plain_help_meme and not (re.search(r"[?？]$", cleaned) and re.search(r"(怎么|咋办|怎么办|能不能|有没有|谁|哪|什么|啥)", cleaned)):
+            return {}
         score = 0
         reason = ""
         help_type = "解释"
-        if re.search(r"(救命|急|急急|在线等|崩了|寄了|炸了|跑不起来|过不去|卡住|报错|异常|失败|error|traceback|bug)", cleaned, flags=re.I):
+        urgent_help = r"(急求|急问|急用|急等|在线等|有点急|很急|比较急|挺急|急着|崩了|寄了|炸了|跑不起来|过不去|卡住|报错|异常|error|traceback|bug)"
+        if re.search(urgent_help, cleaned, flags=re.I) or re.search(failure_context_pattern, cleaned, flags=re.I):
             score += 18
             help_type = "排障"
-        if re.search(r"(报错|异常|失败|error|traceback|bug|日志|堆栈|闪退|崩溃|跑不起来)", cleaned, flags=re.I):
+        if re.search(r"(报错|异常|error|traceback|bug|日志|堆栈|闪退|崩溃|跑不起来)", cleaned, flags=re.I) or re.search(failure_context_pattern, cleaned, flags=re.I):
             help_type = "排障"
         elif re.search(r"(怎么弄|怎么做|怎么搞|如何|教程|步骤|配置|安装|使用)", cleaned):
             help_type = "操作"
@@ -711,7 +719,8 @@ class GroupWakeupMixin:
             help_type = "解释"
         strong_patterns = (
             (r"(有没有|有无|有没有人|有人|谁|哪位|大佬).{0,12}(懂|知道|会|看得懂|能解释|能帮|帮忙)", 76, "open_help"),
-            (r"(求问|请教|救命|咋办|怎么办|怎么弄|怎么解决|怎么处理|怎么搞)", 80, "help_request"),
+            (r"(求问|请教|咋办|怎么办|怎么弄|怎么解决|怎么处理|怎么搞)", 80, "help_request"),
+            (r"救命.{0,12}(怎么|咋办|怎么办|怎么弄|怎么解决|怎么处理|帮忙|帮我|报错|异常|卡住|跑不起来)", 80, "help_request"),
             (r"(为什么|为啥|咋回事|怎么回事|什么情况|啥情况|啥意思|什么意思)", 68, "explain_question"),
             (r"(这是什么|这个是什么|这个咋|这个怎么|这个为啥|这个能不能|这能不能)", 64, "identify_question"),
         )
@@ -795,7 +804,12 @@ class GroupWakeupMixin:
             return {"word": "冷群", "reason": "cold_group_opening", "score": 86, "idle_seconds": round(now - last_seen, 1)}
         if re.search(r"(早|早上好|上午好|中午好|下午好|晚上好|晚好|嗨|hello|hi|哈喽|冒个泡|有人不|人呢)", cleaned, flags=re.I):
             return {"word": "冷群", "reason": "cold_group_greeting", "score": 72, "idle_seconds": round(now - last_seen, 1)}
-        if re.search(r"(救命|急|求问|请教|有没有人|有人懂|谁会|帮忙|咋办|怎么办|怎么弄|报错|失败|崩了|卡住)", cleaned, flags=re.I):
+        if re.search(r"(急急如律令|急急国王|急急急急|急死谁了)", cleaned):
+            return {}
+        failure_context_pattern = r"(安装|配置|运行|启动|登录|请求|发送|上传|下载|连接|编译|构建|部署|调用|识别|读取|解析|保存|加载|同步|执行|支付|打开|导入|导出|更新|提交|注册|验证|接口|插件|程序|脚本|命令|模型|图片|语音|视频|文件|消息|任务).{0,8}失败|(?:一直|总是|老是|反复|还是|又).{0,6}失败|失败.{0,8}(怎么办|咋办|怎么弄|怎么解决|怎么处理|原因|报错|日志|重试|一直|总是|还是|又)"
+        if re.search(r"救命", cleaned) and not (re.search(r"(怎么|咋办|怎么办|怎么弄|怎么解决|怎么处理|帮忙|帮我|报错|异常|卡住|跑不起来|急求|急问|在线等)", cleaned, flags=re.I) or re.search(failure_context_pattern, cleaned, flags=re.I)):
+            return {}
+        if re.search(r"(救命.{0,12}(怎么|咋办|怎么办|怎么弄|怎么解决|怎么处理|帮忙|帮我|报错|异常|卡住|跑不起来)|急求|急问|急用|急等|在线等|有点急|很急|比较急|挺急|急着|求问|请教|有没有人|有人懂|谁会|帮忙|咋办|怎么办|怎么弄|报错|崩了|卡住)", cleaned, flags=re.I) or re.search(failure_context_pattern, cleaned, flags=re.I):
             return {"word": "冷群", "reason": "cold_group_help", "score": 78, "idle_seconds": round(now - last_seen, 1)}
         if re.search(r"[?？]$", cleaned):
             return {}

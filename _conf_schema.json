@@ -1121,6 +1121,15 @@
       "enable_mai_style_integration": true
     }
   },
+  "enable_food_menu_recommendation": {
+    "description": "启用吃什么候选",
+    "type": "bool",
+    "hint": "把常吃菜、店和外卖整理成候选。用户纠结吃什么、点什么或夜宵时，只取少量贴合项作为回复参考。",
+    "default": true,
+    "condition": {
+      "enable_mai_style_integration": true
+    }
+  },
   "user_habit_min_count": {
     "description": "习惯成型次数",
     "type": "int",

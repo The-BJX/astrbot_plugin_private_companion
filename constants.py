@@ -230,6 +230,7 @@ _DEFAULT_USER_TEMPLATE = {
     "sent_today": 0,
     "ignored_streak": 0,
     "last_user_message": "",
+    "last_user_message_at": 0,
     "last_companion_message": "",
     "last_proactive_reason": "",
     "last_proactive_action": "",

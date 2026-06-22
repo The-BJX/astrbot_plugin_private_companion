@@ -85,6 +85,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/worldbook/observations/clear", self.clear_worldbook_pending_observations, ["POST"], "Private Companion Page clear worldbook pending observations"),
             ("/worldbook/group/update", self.update_worldbook_group, ["POST"], "Private Companion Page update worldbook group"),
             ("/skill/update", self.update_skill_growth, ["POST"], "Private Companion Page update skill growth"),
+            ("/food_menu/update", self.update_food_menu, ["POST"], "Private Companion Page update food menu"),
+            ("/food_menu/bulk_update", self.bulk_update_food_menu, ["POST"], "Private Companion Page bulk update food menu"),
             ("/external_ability/update", self.update_external_ability, ["POST"], "Private Companion Page update external proactive ability"),
             ("/preset/apply", self.apply_preset, ["POST"], "Private Companion Page apply preset"),
             ("/providers/available", self.list_available_providers, ["GET"], "Private Companion Page available providers"),
@@ -157,6 +159,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "creative": self._creative_summary(data),
                     "bookshelf": await self._bookshelf_summary(data, unlocked=False),
                     "skill_growth": self._skill_growth_summary(data),
+                    "food_menu": self._food_menu_summary(data),
                     "external_abilities": self._external_ability_summary(data),
                     "life_observation": self._life_observation_summary(data),
                     "daily_state": self._daily_state_summary(data.get("daily_state")),
@@ -2658,6 +2661,335 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             logger.error(f"[PrivateCompanionPage] 更新技能失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    @staticmethod
+    def _food_menu_parse_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "启用", "开启", "是", "常吃"}
+
+    def _food_menu_parse_terms(self, value: Any, *, limit: int = 12, item_limit: int = 24) -> list[str]:
+        if isinstance(value, list):
+            raw_items = value
+        else:
+            raw_items = re.split(r"[,，、\n/|#]+", str(value or ""))
+        items: list[str] = []
+        for raw in raw_items:
+            item = self._single_line(raw, item_limit)
+            if item and item not in items:
+                items.append(item)
+        return items[:limit]
+
+    def _food_menu_normalize_times(self, value: Any) -> list[str]:
+        mapping = {
+            "早餐": "breakfast",
+            "早饭": "breakfast",
+            "早上": "breakfast",
+            "breakfast": "breakfast",
+            "午餐": "lunch",
+            "午饭": "lunch",
+            "中午": "lunch",
+            "lunch": "lunch",
+            "晚餐": "dinner",
+            "晚饭": "dinner",
+            "晚上": "dinner",
+            "dinner": "dinner",
+            "夜宵": "late_night",
+            "宵夜": "late_night",
+            "深夜": "late_night",
+            "late_night": "late_night",
+            "latenight": "late_night",
+            "加餐": "snack",
+            "零食": "snack",
+            "下午茶": "snack",
+            "snack": "snack",
+        }
+        normalized: list[str] = []
+        for raw in self._food_menu_parse_terms(value, limit=5, item_limit=16):
+            key = mapping.get(str(raw).strip().lower()) or mapping.get(str(raw).strip())
+            if key and key not in normalized:
+                normalized.append(key)
+        return normalized
+
+    def _food_menu_infer_fields(self, name: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        text = " ".join(
+            str(payload.get(key) or "")
+            for key in ("type", "category", "tags", "times", "note")
+        )
+        text = f"{name} {text}"
+        item_type = self._single_line(payload.get("type"), 20)
+        if not item_type:
+            if any(token in text for token in ("奶茶", "咖啡", "甜品", "蛋糕", "水果", "零食", "饮料", "酸奶")):
+                item_type = "drink_snack"
+            elif any(token in text for token in ("外卖", "美团", "饿了么", "配送", "到家")):
+                item_type = "takeout"
+            elif any(token in text for token in ("店", "馆", "楼下", "附近", "食堂", "餐厅", "小吃街")):
+                item_type = "restaurant"
+            elif any(token in text for token in ("泡面", "速食", "面包", "麦片", "饼干", "应急")):
+                item_type = "emergency"
+            else:
+                item_type = "dish"
+        allowed_types = {"dish", "restaurant", "takeout", "drink_snack", "emergency"}
+        if item_type not in allowed_types:
+            item_type = "dish"
+
+        category = self._single_line(payload.get("category"), 24)
+        if not category:
+            category_rules = [
+                ("面食", ("面", "粉", "馄饨", "饺子", "抄手", "米线", "米粉", "螺蛳粉")),
+                ("米饭", ("饭", "盖浇", "便当", "煲仔", "黄焖鸡", "咖喱")),
+                ("快餐", ("汉堡", "炸鸡", "披萨", "麦当劳", "肯德基", "华莱士", "塔斯汀")),
+                ("甜口", ("奶茶", "甜品", "蛋糕", "水果", "酸奶")),
+                ("热锅", ("火锅", "麻辣烫", "冒菜", "砂锅", "关东煮")),
+                ("应急", ("泡面", "速食", "面包", "麦片", "饼干")),
+            ]
+            category = next((label for label, tokens in category_rules if any(token in text for token in tokens)), "")
+
+        tags = self._food_menu_parse_terms(payload.get("tags"), limit=10, item_limit=16)
+        inferred_tags: list[str] = []
+        tag_rules = [
+            ("热乎", ("面", "粉", "粥", "汤", "馄饨", "米线", "火锅", "麻辣烫", "砂锅", "关东煮")),
+            ("快", ("泡面", "速食", "便当", "外卖", "汉堡", "炸鸡", "麦当劳", "肯德基", "华莱士", "塔斯汀")),
+            ("清淡", ("粥", "汤", "沙拉", "蒸", "清淡")),
+            ("辣", ("辣", "麻辣", "川", "火锅", "冒菜", "麻辣烫", "螺蛳粉")),
+            ("甜", ("奶茶", "甜品", "蛋糕", "水果", "酸奶")),
+            ("顶饱", ("饭", "面", "粉", "汉堡", "便当", "盖浇", "黄焖鸡")),
+            ("便宜", ("食堂", "快餐", "兰州", "沙县", "华莱士")),
+        ]
+        for tag, tokens in tag_rules:
+            if any(token in text for token in tokens) and tag not in tags and tag not in inferred_tags:
+                inferred_tags.append(tag)
+        tags = (tags + inferred_tags)[:10]
+
+        times = self._food_menu_normalize_times(payload.get("times"))
+        if not times:
+            if any(token in text for token in ("早餐", "早饭", "早上", "包子", "豆浆", "油条", "麦片", "面包")):
+                times.append("breakfast")
+            if any(token in text for token in ("奶茶", "咖啡", "甜品", "水果", "零食", "酸奶")):
+                times.append("snack")
+            if any(token in text for token in ("夜宵", "宵夜", "烧烤", "炸鸡", "泡面", "螺蛳粉")):
+                times.append("late_night")
+        return {"type": item_type, "category": category, "tags": tags, "times": times}
+
+    def _food_menu_payload_from_line(self, line: str) -> dict[str, Any]:
+        text = self._single_line(line, 220)
+        parts = [self._single_line(part, 80) for part in re.split(r"[|｜\t]+", text) if self._single_line(part, 80)]
+        name = self._single_line(parts[0] if parts else text, 40)
+        payload: dict[str, Any] = {"name": name}
+        if len(parts) >= 2:
+            payload["category"] = parts[1]
+        if len(parts) >= 3:
+            payload["tags"] = parts[2]
+        if len(parts) >= 4:
+            payload["times"] = parts[3]
+        return payload
+
+    async def update_food_menu(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        item_id = self._single_line(payload.get("id"), 48)
+        name = self._single_line(payload.get("name"), 40)
+
+        try:
+            async with self.plugin._data_lock:
+                state = self.plugin.data.setdefault("food_menu", {})
+                if not isinstance(state, dict):
+                    state = {}
+                    self.plugin.data["food_menu"] = state
+                items = state.setdefault("items", [])
+                if not isinstance(items, list):
+                    items = []
+                    state["items"] = items
+
+                if payload.get("delete"):
+                    before = len(items)
+                    state["items"] = [item for item in items if not (isinstance(item, dict) and self._single_line(item.get("id"), 48) == item_id)]
+                    state["updated_ts"] = time.time()
+                    self.plugin._save_data_sync()
+                    return self._ok({
+                        "changed": len(state["items"]) != before,
+                        "message": "已移出候选",
+                        "food_menu": self._food_menu_summary(self.plugin.data),
+                    })
+
+                if not name:
+                    return self._error("缺少名称")
+                if not item_id:
+                    for existing in items:
+                        if not isinstance(existing, dict):
+                            continue
+                        existing_name = self._single_line(existing.get("name"), 40)
+                        aliases = self._food_menu_parse_terms(existing.get("aliases"), limit=12, item_limit=24)
+                        if name == existing_name or name in aliases:
+                            item_id = self._single_line(existing.get("id"), 48)
+                            break
+                if not item_id:
+                    item_id = f"food_{hashlib.sha1((name + str(time.time())).encode('utf-8')).hexdigest()[:12]}"
+
+                existing_index = -1
+                existing_item: dict[str, Any] = {}
+                for index, item in enumerate(items):
+                    if isinstance(item, dict) and self._single_line(item.get("id"), 48) == item_id:
+                        existing_index = index
+                        existing_item = dict(item)
+                        break
+
+                inferred = self._food_menu_infer_fields(name, payload)
+                if "type" in payload:
+                    item_type = self._single_line(payload.get("type"), 20) or inferred.get("type") or "dish"
+                else:
+                    item_type = self._single_line(existing_item.get("type"), 20) or inferred.get("type") or "dish"
+                allowed_types = {"dish", "restaurant", "takeout", "drink_snack", "emergency"}
+                if item_type not in allowed_types:
+                    item_type = "dish"
+                if "category" in payload:
+                    category = self._single_line(payload.get("category"), 24)
+                    if not category and existing_index < 0:
+                        category = self._single_line(inferred.get("category"), 24)
+                else:
+                    category = self._single_line(existing_item.get("category"), 24) or self._single_line(inferred.get("category"), 24)
+                if "tags" in payload:
+                    tags = self._food_menu_parse_terms(payload.get("tags"), limit=10, item_limit=16)
+                else:
+                    tags = self._food_menu_parse_terms(existing_item.get("tags"), limit=10, item_limit=16)
+                if not tags and existing_index < 0:
+                    tags = list(inferred.get("tags") or [])
+                if "times" in payload:
+                    times = self._food_menu_normalize_times(payload.get("times"))
+                else:
+                    times = self._food_menu_normalize_times(existing_item.get("times"))
+                if not times and existing_index < 0:
+                    times = list(inferred.get("times") or [])
+                item = dict(existing_item)
+                item.update(
+                    {
+                        "id": item_id,
+                        "name": name,
+                        "type": item_type,
+                        "category": category,
+                        "tags": tags[:10],
+                        "times": times[:5],
+                        "avoid": self._food_menu_parse_terms(payload.get("avoid"), limit=8, item_limit=24),
+                        "aliases": [value for value in self._food_menu_parse_terms(payload.get("aliases"), limit=10, item_limit=24) if value != name],
+                        "note": self._single_line(payload.get("note"), 100),
+                        "favorite": self._food_menu_parse_bool(payload.get("favorite"), bool(existing_item.get("favorite"))),
+                        "hidden": self._food_menu_parse_bool(payload.get("hidden"), bool(existing_item.get("hidden"))),
+                        "use_count": self._int(payload.get("use_count")) if "use_count" in payload else self._int(existing_item.get("use_count")),
+                        "created_ts": self._float(existing_item.get("created_ts")) or time.time(),
+                        "updated_ts": time.time(),
+                        "last_used_at": self._float(existing_item.get("last_used_at")),
+                        "last_recommended_at": self._float(existing_item.get("last_recommended_at")),
+                    }
+                )
+                if existing_index >= 0:
+                    items[existing_index] = item
+                else:
+                    items.append(item)
+                state["updated_ts"] = time.time()
+                self.plugin._save_data_sync()
+                return self._ok({"message": "已保存候选", "food_menu": self._food_menu_summary(self.plugin.data)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新吃什么候选失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def bulk_update_food_menu(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        raw_text = str(payload.get("text") or payload.get("items") or "").strip()
+        favorite = self._food_menu_parse_bool(payload.get("favorite"), False)
+        hidden = self._food_menu_parse_bool(payload.get("hidden"), False)
+        if not raw_text:
+            return self._error("先粘贴几样候选")
+        lines = [
+            self._single_line(part, 220)
+            for part in re.split(r"[\r\n;；]+", raw_text)
+            if self._single_line(part, 220)
+        ]
+        if not lines:
+            return self._error("没有读到候选")
+        added = 0
+        updated = 0
+        skipped = 0
+        try:
+            async with self.plugin._data_lock:
+                state = self.plugin.data.setdefault("food_menu", {})
+                if not isinstance(state, dict):
+                    state = {}
+                    self.plugin.data["food_menu"] = state
+                items = state.setdefault("items", [])
+                if not isinstance(items, list):
+                    items = []
+                    state["items"] = items
+                for line in lines[:80]:
+                    item_payload = self._food_menu_payload_from_line(line)
+                    name = self._single_line(item_payload.get("name"), 40)
+                    if not name:
+                        skipped += 1
+                        continue
+                    existing_index = -1
+                    existing_item: dict[str, Any] = {}
+                    for index, item in enumerate(items):
+                        if not isinstance(item, dict):
+                            continue
+                        existing_name = self._single_line(item.get("name"), 40)
+                        aliases = self._food_menu_parse_terms(item.get("aliases"), limit=12, item_limit=24)
+                        if name == existing_name or name in aliases:
+                            existing_index = index
+                            existing_item = dict(item)
+                            break
+                    inferred = self._food_menu_infer_fields(name, item_payload)
+                    item_id = self._single_line(existing_item.get("id"), 48)
+                    if not item_id:
+                        item_id = f"food_{hashlib.sha1((name + str(time.time())).encode('utf-8')).hexdigest()[:12]}"
+                    now = time.time()
+                    existing_tags = self._food_menu_parse_terms(existing_item.get("tags"), limit=10, item_limit=16)
+                    inferred_tags = [tag for tag in (inferred.get("tags") or []) if tag not in existing_tags]
+                    existing_times = self._food_menu_normalize_times(existing_item.get("times"))
+                    inferred_times = [time_key for time_key in (inferred.get("times") or []) if time_key not in existing_times]
+                    item = dict(existing_item)
+                    item.update(
+                        {
+                            "id": item_id,
+                            "name": name,
+                            "type": self._single_line(existing_item.get("type"), 20) or inferred.get("type") or "dish",
+                            "category": self._single_line(item_payload.get("category"), 24)
+                            or self._single_line(existing_item.get("category"), 24)
+                            or self._single_line(inferred.get("category"), 24),
+                            "tags": (existing_tags + inferred_tags)[:10],
+                            "times": (existing_times + inferred_times)[:5],
+                            "note": self._single_line(existing_item.get("note"), 100),
+                            "favorite": bool(existing_item.get("favorite")) or favorite,
+                            "hidden": bool(existing_item.get("hidden")) or hidden,
+                            "use_count": self._int(existing_item.get("use_count")),
+                            "created_ts": self._float(existing_item.get("created_ts")) or now,
+                            "updated_ts": now,
+                            "last_used_at": self._float(existing_item.get("last_used_at")),
+                            "last_recommended_at": self._float(existing_item.get("last_recommended_at")),
+                        }
+                    )
+                    if existing_index >= 0:
+                        items[existing_index] = item
+                        updated += 1
+                    else:
+                        items.append(item)
+                        added += 1
+                state["updated_ts"] = time.time()
+                self.plugin._save_data_sync()
+                return self._ok(
+                    {
+                        "message": f"已加入 {added} 个，更新 {updated} 个" + (f"，跳过 {skipped} 个" if skipped else ""),
+                        "added": added,
+                        "updated": updated,
+                        "skipped": skipped,
+                        "food_menu": self._food_menu_summary(self.plugin.data),
+                    }
+                )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 批量更新吃什么候选失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
     async def update_external_ability(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         normalizer = getattr(self.plugin, "_normalize_external_ability_name", None)
@@ -3237,6 +3569,64 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "items": items[:120],
         }
 
+    def _food_menu_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        state = data.get("food_menu") if isinstance(data.get("food_menu"), dict) else {}
+        raw_items = state.get("items") if isinstance(state.get("items"), list) else []
+        type_label = getattr(self.plugin, "_food_menu_type_label", None)
+        time_label = getattr(self.plugin, "_food_menu_time_label", None)
+
+        def _list(value: Any, *, limit: int = 12, item_limit: int = 24) -> list[str]:
+            raw = value if isinstance(value, list) else re.split(r"[,，、\n/|]+", str(value or ""))
+            items: list[str] = []
+            for part in raw:
+                item = self._single_line(part, item_limit)
+                if item and item not in items:
+                    items.append(item)
+            return items[:limit]
+
+        items: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            name = self._single_line(raw.get("name"), 40)
+            if not name:
+                continue
+            item_type = self._single_line(raw.get("type"), 20) or "dish"
+            counts[item_type] = counts.get(item_type, 0) + 1
+            times = _list(raw.get("times"), limit=5, item_limit=16)
+            items.append(
+                {
+                    "id": self._single_line(raw.get("id"), 48),
+                    "name": name,
+                    "type": item_type,
+                    "type_label": type_label(item_type) if callable(type_label) else item_type,
+                    "category": self._single_line(raw.get("category"), 24),
+                    "tags": _list(raw.get("tags"), limit=10, item_limit=16),
+                    "times": times,
+                    "time_labels": [time_label(value) if callable(time_label) else value for value in times],
+                    "avoid": _list(raw.get("avoid"), limit=8, item_limit=24),
+                    "aliases": _list(raw.get("aliases"), limit=10, item_limit=24),
+                    "note": self._single_line(raw.get("note"), 100),
+                    "favorite": bool(raw.get("favorite")),
+                    "hidden": bool(raw.get("hidden")),
+                    "use_count": self._int(raw.get("use_count")),
+                    "last_used": self.plugin._format_timestamp_elapsed(raw.get("last_used_at", 0)),
+                    "last_recommended": self.plugin._format_timestamp_elapsed(raw.get("last_recommended_at", 0)),
+                    "updated": self.plugin._format_timestamp_elapsed(raw.get("updated_ts", 0)),
+                }
+            )
+        items.sort(key=lambda item: (bool(item.get("hidden")), not bool(item.get("favorite")), item.get("type_label", ""), item.get("name", "")))
+        return {
+            "items": items[:160],
+            "total": len(items),
+            "visible_count": sum(1 for item in items if not item.get("hidden")),
+            "favorite_count": sum(1 for item in items if item.get("favorite")),
+            "hidden_count": sum(1 for item in items if item.get("hidden")),
+            "counts": counts,
+            "updated": self.plugin._format_timestamp_elapsed(state.get("updated_ts", 0)),
+        }
+
     def _external_ability_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         runtime_getter = getattr(self.plugin, "external_proactive_abilities", None)
         if callable(runtime_getter):
@@ -3297,6 +3687,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_dialogue_episode_memory",
             "enable_open_loop_tracking",
             "enable_user_habit_learning",
+            "enable_food_menu_recommendation",
             "enable_humanized_states",
             "enable_segmented_proactive_reply",
             "enable_proactive_quote_trigger_message",
@@ -3443,6 +3834,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_forward_message_adaptation",
             "enable_group_companion",
             "enable_skill_growth_passive_injection",
+            "enable_food_menu_recommendation",
             "enable_private_reading_preference_influence",
             "enable_worldbook_member_recognition",
             "enable_atrelay_tools",
@@ -3468,11 +3860,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "DREAM_DIARY_PROVIDER_ID",
             "CREATIVE_PROVIDER_ID",
             "VOICE_PROMPT_PROVIDER_ID",
+            "tts_conversion_provider_id",
             "PHOTO_PROMPT_PROVIDER_ID",
             "NARRATION_PROVIDER_ID",
             "HISTORY_SUMMARY_PROVIDER_ID",
             "RESPONSE_REVIEW_PROVIDER_ID",
             "TROUBLESHOOTING_PROVIDER_ID",
+            "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+            "REST_WAKEUP_PROVIDER_ID",
             "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
             "EMOTION_JUDGEMENT_PROVIDER_ID",
             "COMPANION_MEMORY_PROVIDER_ID",
@@ -3494,6 +3889,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             values["PRIVATE_READING_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "jm_cosmos_vision_provider_id", "") or "")
         if not values.get("DREAM_DIARY_PROVIDER_ID"):
             values["DREAM_DIARY_PROVIDER_ID"] = str(getattr(self.plugin, "dream_diary_provider_id", "") or "")
+        if not values.get("SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"):
+            values["SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"] = str(getattr(self.plugin, "smart_message_debounce_provider_id", "") or "")
+        if not values.get("REST_WAKEUP_PROVIDER_ID"):
+            values["REST_WAKEUP_PROVIDER_ID"] = str(getattr(self.plugin, "rest_wakeup_provider_id", "") or "")
+        if not values.get("tts_conversion_provider_id"):
+            values["tts_conversion_provider_id"] = str(getattr(self.plugin, "tts_conversion_provider_id", "") or "")
         return values
 
     def _available_provider_items(self) -> list[dict[str, Any]]:
@@ -4355,6 +4756,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "NEWS_PROVIDER_ID": "news_provider_id",
             "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": "smart_message_debounce_provider_id",
+            "REST_WAKEUP_PROVIDER_ID": "rest_wakeup_provider_id",
         }
         if key in attr_map:
             setattr(self.plugin, attr_map[key], str(value or "").strip())
@@ -4573,6 +4975,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_dialogue_episode_memory",
             "enable_open_loop_tracking",
             "enable_user_habit_learning",
+            "enable_food_menu_recommendation",
             "enable_humanized_states",
             "enable_segmented_proactive_reply",
             "enable_proactive_quote_trigger_message",
@@ -4664,11 +5067,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "DREAM_DIARY_PROVIDER_ID",
             "CREATIVE_PROVIDER_ID",
             "VOICE_PROMPT_PROVIDER_ID",
+            "tts_conversion_provider_id",
             "PHOTO_PROMPT_PROVIDER_ID",
             "NARRATION_PROVIDER_ID",
             "HISTORY_SUMMARY_PROVIDER_ID",
             "RESPONSE_REVIEW_PROVIDER_ID",
             "TROUBLESHOOTING_PROVIDER_ID",
+            "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+            "REST_WAKEUP_PROVIDER_ID",
             "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
             "COMPANION_MEMORY_PROVIDER_ID",
             "DIALOGUE_EPISODE_PROVIDER_ID",

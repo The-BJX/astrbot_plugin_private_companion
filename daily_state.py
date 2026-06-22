@@ -389,8 +389,16 @@ class DailyStateMixin:
             if not isinstance(enhanced, dict):
                 enhanced = {}
                 self.data["detail_enhanced_segments"] = enhanced
+            sanitized_existing = False
+            if self._sanitize_detail_enhanced_segments_inplace(enhanced):
+                sanitized_existing = True
+            story_plan_existing = self.data.get("daily_story_plan", {})
+            if isinstance(story_plan_existing, dict) and self._sanitize_story_plan_social_facts_inplace(story_plan_existing):
+                sanitized_existing = True
             segments = self._collect_due_detail_segments(plan, enhanced, force=force)
             if not segments:
+                if sanitized_existing:
+                    self._save_data_sync()
                 return None
             for segment in segments:
                 enhanced[segment["key"]] = {"status": "generating", "started_at": self._environment_now().strftime("%H:%M")}
@@ -411,6 +419,7 @@ class DailyStateMixin:
                     }
                     self.data["daily_story_plan"] = story_plan
                 self._merge_detail_enhancement(story_plan, detail)
+                self._sanitize_story_plan_social_facts_inplace(story_plan)
                 enhanced = self.data.setdefault("detail_enhanced_segments", {})
                 enhanced[segment["key"]] = {
                     "status": "done",
@@ -423,6 +432,7 @@ class DailyStateMixin:
                     "interaction_updates": [],
                     "coverage_repair_done": bool(segment.get("_coverage_repair")),
                 }
+                self._sanitize_detail_enhanced_segments_inplace(enhanced)
                 self._refresh_daily_state_location_from_plan(plan=plan, detail=detail)
                 self._reschedule_users_for_new_detail_events(segment)
                 self._save_data_sync()
@@ -2847,6 +2857,261 @@ class DailyStateMixin:
             )
             changed = True
         return changed
+
+    @staticmethod
+    def _food_menu_type_label(value: Any) -> str:
+        key = str(value or "").strip().lower()
+        return {
+            "dish": "菜品",
+            "restaurant": "菜馆",
+            "takeout": "外卖",
+            "drink_snack": "饮品/零食",
+            "snack": "饮品/零食",
+            "emergency": "应急",
+        }.get(key, "候选")
+
+    @staticmethod
+    def _food_menu_time_label(value: Any) -> str:
+        key = str(value or "").strip().lower()
+        return {
+            "breakfast": "早餐",
+            "lunch": "午餐",
+            "dinner": "晚餐",
+            "late_night": "夜宵",
+            "snack": "加餐",
+        }.get(key, _single_line(value, 12))
+
+    @staticmethod
+    def _food_menu_list(value: Any, *, limit: int = 12, item_limit: int = 20) -> list[str]:
+        raw_items = value if isinstance(value, list) else re.split(r"[,，、\n/|]+", str(value or ""))
+        items: list[str] = []
+        for raw in raw_items:
+            item = _single_line(raw, item_limit)
+            if item and item not in items:
+                items.append(item)
+        return items[:limit]
+
+    def _current_food_time_key(self) -> str:
+        hour = self._environment_now().hour
+        if 5 <= hour < 10:
+            return "breakfast"
+        if 10 <= hour < 15:
+            return "lunch"
+        if 17 <= hour < 21:
+            return "dinner"
+        if hour >= 21 or hour < 3:
+            return "late_night"
+        return "snack"
+
+    def _food_menu_query_profile(self, text: str) -> dict[str, Any]:
+        query = _single_line(text, 220)
+        if not query:
+            return {"is_query": False}
+        feature_discussion_markers = (
+            "功能", "候选", "开关", "配置", "页面", "注入", "触发", "保存", "管理",
+            "不好用", "好用", "误判", "优化", "逻辑", "模块", "面板",
+        )
+        natural_food_need = bool(
+            re.search(r"(今天|现在|这顿|中午|晚上|早上|早饭|早餐|午饭|午餐|晚饭|晚餐|夜宵|宵夜|外卖|点餐|饿|嘴馋|想吃|吃点|吃些|点什么|点啥|吃什么|吃啥)", query)
+            and not re.search(r"(功能|开关|配置|页面|注入|触发|保存|管理|模块|面板)", query)
+        )
+        if any(marker in query for marker in feature_discussion_markers) and not natural_food_need:
+            return {"is_query": False}
+        feedback = self._detect_food_feedback(query)
+        if feedback.get("already_ate") and not re.search(r"(什么|啥|推荐|点什么|点啥|再吃|还吃)", query):
+            return {"is_query": False}
+        food_question = bool(
+            re.search(r"(吃|点|买|喝|叫).{0,8}(什么|啥|哪[个家]|哪种|推荐|好|合适)", query)
+            or re.search(r"(什么|啥).{0,4}(好吃|能吃|可吃|适合吃)", query)
+            or re.search(r"(不知道|纠结|想不到|随便).{0,8}(吃|点|买|喝)", query)
+            or re.search(r"(推荐|来|整|安排).{0,6}(外卖|夜宵|午饭|晚饭|早餐|吃的|喝的)", query)
+            or re.search(r"(饿了|好饿|有点饿|嘴馋|馋了)", query)
+            or any(token in query for token in ("吃什么", "吃啥", "点什么", "点啥", "外卖吃", "夜宵吃", "午饭吃", "晚饭吃", "早餐吃"))
+            or (len(query) <= 16 and any(token in query for token in ("外卖", "夜宵", "午饭", "晚饭", "早餐")))
+        )
+        if not food_question:
+            return {"is_query": False}
+        preferred_type = ""
+        if any(token in query for token in ("外卖", "点餐", "点什么", "点啥", "叫个", "叫点")):
+            preferred_type = "takeout"
+        elif any(token in query for token in ("出去吃", "店", "馆", "附近", "堂食")):
+            preferred_type = "restaurant"
+        elif any(token in query for token in ("喝", "奶茶", "咖啡", "饮料", "零食", "甜品")):
+            preferred_type = "drink_snack"
+        desired_tags: list[str] = []
+        tag_map = {
+            "清淡": ("清淡", "不油", "少油", "胃不舒服"),
+            "热乎": ("热", "暖", "汤", "热乎", "暖和"),
+            "快": ("快", "省事", "随便", "懒得", "不想纠结"),
+            "辣": ("辣", "重口", "麻辣"),
+            "甜": ("甜", "甜品", "奶茶"),
+            "顶饱": ("饱", "顶饱", "管饱"),
+            "便宜": ("便宜", "省钱", "实惠"),
+        }
+        for tag, markers in tag_map.items():
+            if any(marker in query for marker in markers) and tag not in desired_tags:
+                desired_tags.append(tag)
+        return {
+            "is_query": True,
+            "text": query,
+            "preferred_type": preferred_type,
+            "time_key": self._current_food_time_key(),
+            "meal": feedback.get("meal") or "",
+            "desired_tags": desired_tags,
+        }
+
+    def _food_menu_items(self) -> list[dict[str, Any]]:
+        state = self.data.get("food_menu") if isinstance(self.data.get("food_menu"), dict) else {}
+        items = state.get("items") if isinstance(state.get("items"), list) else []
+        normalized: list[dict[str, Any]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            name = _single_line(raw.get("name"), 40)
+            if not name:
+                continue
+            item = dict(raw)
+            item["name"] = name
+            item["type"] = _single_line(item.get("type"), 20) or "dish"
+            item["category"] = _single_line(item.get("category"), 24)
+            item["tags"] = self._food_menu_list(item.get("tags"), limit=10, item_limit=16)
+            item["times"] = self._food_menu_list(item.get("times"), limit=5, item_limit=16)
+            item["avoid"] = self._food_menu_list(item.get("avoid"), limit=8, item_limit=24)
+            item["aliases"] = self._food_menu_list(item.get("aliases"), limit=10, item_limit=24)
+            item["note"] = _single_line(item.get("note"), 80)
+            item["favorite"] = bool(item.get("favorite"))
+            item["hidden"] = bool(item.get("hidden"))
+            normalized.append(item)
+        return normalized
+
+    def _score_food_menu_item(self, item: dict[str, Any], profile: dict[str, Any]) -> float:
+        query = str(profile.get("text") or "")
+        if item.get("hidden"):
+            return -999.0
+        for token in item.get("avoid", []):
+            if token and token in query:
+                return -999.0
+        score = 1.0
+        if item.get("favorite"):
+            score += 1.2
+        preferred_type = str(profile.get("preferred_type") or "")
+        if preferred_type and str(item.get("type") or "") == preferred_type:
+            score += 2.4
+        times = item.get("times") if isinstance(item.get("times"), list) else []
+        if times:
+            score += 1.5 if profile.get("time_key") in times else -0.8
+        desired_tags = profile.get("desired_tags") if isinstance(profile.get("desired_tags"), list) else []
+        tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+        score += sum(
+            0.9
+            for desired in desired_tags
+            if any(desired == tag or desired in tag or tag in desired for tag in tags)
+        )
+        category = str(item.get("category") or "")
+        searchable = [item.get("name"), category, item.get("note"), *item.get("aliases", []), *tags]
+        if any(part and str(part) in query for part in searchable):
+            score += 2.8
+        last = _safe_float(item.get("last_recommended_at"), 0, 0)
+        if last > 0:
+            age_hours = max(0.0, (_now_ts() - last) / 3600)
+            if age_hours < 8:
+                score -= 1.4
+            elif age_hours < 36:
+                score -= 0.5
+        score += min(0.8, _safe_int(item.get("use_count"), 0, 0) * 0.04)
+        return score
+
+    def _mark_food_menu_items_recommended(self, candidates: list[dict[str, Any]]) -> None:
+        ids = {
+            _single_line(item.get("id"), 48)
+            for item in candidates
+            if isinstance(item, dict) and _single_line(item.get("id"), 48)
+        }
+        if not ids:
+            return
+        state = self.data.get("food_menu") if isinstance(self.data.get("food_menu"), dict) else {}
+        items = state.get("items") if isinstance(state.get("items"), list) else []
+        if not items:
+            return
+        now = _now_ts()
+        changed = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if _single_line(item.get("id"), 48) in ids:
+                item["last_recommended_at"] = now
+                item["updated_ts"] = now
+                changed = True
+        if changed:
+            state["updated_ts"] = now
+            self.data["food_menu"] = state
+            self._save_data_sync()
+
+    def _food_menu_candidates_for_prompt(self, text: str, *, limit: int = 3) -> list[dict[str, Any]]:
+        profile = self._food_menu_query_profile(text)
+        if not profile.get("is_query"):
+            return []
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for item in self._food_menu_items():
+            score = self._score_food_menu_item(item, profile)
+            if score > -100:
+                scored.append((score, item))
+        scored.sort(key=lambda pair: (pair[0], bool(pair[1].get("favorite")), _safe_int(pair[1].get("use_count"), 0, 0)), reverse=True)
+        return [item for _, item in scored[: max(1, min(5, limit))]]
+
+    def _format_food_menu_for_reply(self, text: str, *, limit: int = 3) -> str:
+        profile = self._food_menu_query_profile(text)
+        if not profile.get("is_query"):
+            return ""
+        candidates = self._food_menu_candidates_for_prompt(text, limit=limit)
+        if not candidates:
+            return ""
+        self._mark_food_menu_items_recommended(candidates)
+        lines: list[str] = []
+        for item in candidates:
+            parts = [item.get("name")]
+            label = self._food_menu_type_label(item.get("type"))
+            category = _single_line(item.get("category"), 18)
+            if category:
+                label = f"{label}/{category}"
+            meta = [label]
+            times = [self._food_menu_time_label(value) for value in item.get("times", []) if self._food_menu_time_label(value)]
+            if times:
+                meta.append("适合" + "、".join(times[:3]))
+            tags = item.get("tags", [])[:4]
+            if tags:
+                meta.append("偏" + "、".join(tags))
+            note = _single_line(item.get("note"), 54)
+            detail = "，".join(meta)
+            line = f"{parts[0]}（{detail}）"
+            if note:
+                line += f"：{note}"
+            lines.append(line)
+        meal = _single_line(profile.get("meal"), 12) or self._food_menu_time_label(profile.get("time_key")) or "这顿"
+        return "【吃饭候选】\n" + f"这轮用户在问{meal}吃什么。可参考：" + "；".join(lines) + "。"
+
+    def _mark_food_menu_item_used_from_text(self, text: str) -> list[str]:
+        query = _single_line(text, 220)
+        if not query:
+            return []
+        state = self.data.get("food_menu") if isinstance(self.data.get("food_menu"), dict) else {}
+        items = state.get("items") if isinstance(state.get("items"), list) else []
+        if not items:
+            return []
+        now = _now_ts()
+        matched: list[str] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("hidden"):
+                continue
+            terms = [item.get("name"), *self._food_menu_list(item.get("aliases"), limit=10, item_limit=24)]
+            if any(term and str(term) in query for term in terms):
+                item["use_count"] = _safe_int(item.get("use_count"), 0, 0) + 1
+                item["last_used_at"] = now
+                matched.append(_single_line(item.get("name"), 40))
+        if matched:
+            state["updated_ts"] = now
+            self.data["food_menu"] = state
+        return matched[:5]
 
     def _pick_diary_fragment(self) -> str:
         diaries = self.data.get("bot_diaries", [])
@@ -6587,6 +6852,13 @@ class DailyStateMixin:
             "约了",
             "约定",
             "约着",
+            "约去",
+            "约夜宵",
+            "约饭",
+            "约见",
+            "约她",
+            "约他",
+            "约人",
             "下周",
             "下次一起",
             "改天一起",
@@ -6596,6 +6868,12 @@ class DailyStateMixin:
             "过几天一起",
         )
         if any(token in clause for token in future_commitment):
+            return True
+        if re.search(r"(约|叫|喊|拉|找|邀)[^，。；;,.]{0,16}(一起|夜宵|吃|喝|看|玩|逛|见面|出门)", clause):
+            return True
+        if re.search(r"(和|跟)[^，。；;,.]{1,16}一起(去|吃|喝|看|玩|逛|见|出门|夜宵)", clause):
+            return True
+        if re.search(r"(消息|私信|电话|语音)[^，。；;,.]{0,16}(约|叫|喊|拉|邀)[^，。；;,.]{0,16}(一起|去|吃|喝|看|玩|逛|夜宵)", clause):
             return True
         concrete_relation = (
             "熟人",
@@ -6670,6 +6948,77 @@ class DailyStateMixin:
                     changed = True
         if changed:
             plan["sanitized_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M:%S")
+        return changed
+
+    def _sanitize_story_plan_social_facts_inplace(self, story_plan: dict[str, Any]) -> bool:
+        if not isinstance(story_plan, dict):
+            return False
+        changed = False
+        summary = _single_line(story_plan.get("summary"), 180)
+        if summary:
+            cleaned = self._sanitize_daily_plan_social_fact_text(summary, field="story_plan.summary")
+            if cleaned != summary:
+                story_plan["summary"] = cleaned
+                changed = True
+        for item in story_plan.get("today_events") or []:
+            if not isinstance(item, dict):
+                continue
+            original = _single_line(item.get("event"), 180)
+            if not original:
+                continue
+            cleaned = self._sanitize_daily_plan_social_fact_text(original, field="story_plan.today_events.event")
+            if cleaned != original:
+                item["event"] = cleaned
+                changed = True
+        for item in story_plan.get("proactive_events") or []:
+            if not isinstance(item, dict):
+                continue
+            for field in ("topic", "why", "motive", "scene", "impulse"):
+                original = _single_line(item.get(field), 180)
+                if not original:
+                    continue
+                cleaned = self._sanitize_daily_plan_social_fact_text(original, field=f"story_plan.proactive_events.{field}")
+                if cleaned != original:
+                    item[field] = cleaned
+                    changed = True
+        if changed:
+            story_plan["sanitized_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M:%S")
+        return changed
+
+    def _sanitize_detail_enhanced_segments_inplace(self, enhanced: dict[str, Any]) -> bool:
+        if not isinstance(enhanced, dict):
+            return False
+        changed = False
+        for key, snapshot in enhanced.items():
+            if not isinstance(snapshot, dict):
+                continue
+            summary = _single_line(snapshot.get("summary"), 180)
+            if summary:
+                cleaned = self._sanitize_daily_plan_social_fact_text(summary, field=f"detail_enhanced_segments.{key}.summary")
+                if cleaned != summary:
+                    snapshot["summary"] = cleaned
+                    changed = True
+            for item in snapshot.get("today_events") or []:
+                if not isinstance(item, dict):
+                    continue
+                original = _single_line(item.get("event"), 180)
+                if not original:
+                    continue
+                cleaned = self._sanitize_daily_plan_social_fact_text(original, field=f"detail_enhanced_segments.{key}.today_events.event")
+                if cleaned != original:
+                    item["event"] = cleaned
+                    changed = True
+            for item in snapshot.get("proactive_events") or []:
+                if not isinstance(item, dict):
+                    continue
+                for field in ("topic", "why", "motive", "scene", "impulse"):
+                    original = _single_line(item.get(field), 180)
+                    if not original:
+                        continue
+                    cleaned = self._sanitize_daily_plan_social_fact_text(original, field=f"detail_enhanced_segments.{key}.proactive_events.{field}")
+                    if cleaned != original:
+                        item[field] = cleaned
+                        changed = True
         return changed
 
     @staticmethod
@@ -6973,6 +7322,8 @@ class DailyStateMixin:
         snapshot = enhanced.get(key) if key else None
         if not isinstance(snapshot, dict):
             return "当前时间段还没有落地的细化内容。可以先执行一次“陪伴 重置细化”。"
+        snapshot = deepcopy(snapshot)
+        self._sanitize_detail_enhanced_segments_inplace({"current": snapshot})
 
         item = segment.get("item") if isinstance(segment, dict) else {}
         start_text = self._minutes_to_hhmm(_safe_int(segment.get("start"), 0))
@@ -7150,6 +7501,8 @@ class DailyStateMixin:
         snapshot = enhanced.get(key) if key else None
         if not isinstance(snapshot, dict):
             return "当前时间段还没有落地的细化内容。"
+        snapshot = deepcopy(snapshot)
+        self._sanitize_detail_enhanced_segments_inplace({"current": snapshot})
 
         item = segment.get("item") if isinstance(segment, dict) else {}
         start_text = self._minutes_to_hhmm(_safe_int(segment.get("start"), 0))
@@ -7393,6 +7746,26 @@ class DailyStateMixin:
                         self._save_data_sync()
                     self._debug_tick_skip(user_id, "主动发送仍在进行中")
                     continue
+                current_reason = str(current_for_mark.get("planned_proactive_reason") or "")
+                if (
+                    not is_troubleshooting_for_send
+                    and not due_timer_id
+                    and self._is_greeting_reason(current_reason)
+                ):
+                    recent_user_at = max(
+                        _safe_float(current_for_mark.get("last_user_message_at"), 0),
+                        _safe_float(current_for_mark.get("last_seen"), 0),
+                    )
+                    idle_limit = self._effective_user_greeting_idle_minutes(current_for_mark) * 60
+                    if recent_user_at > 0 and _now_ts() - recent_user_at < idle_limit:
+                        if self._inbound_satisfies_greeting(current_reason, now=recent_user_at):
+                            self._mark_greeting_satisfied_by_inbound(current_for_mark, current_reason)
+                            self._clear_pending_proactive_plan(current_for_mark)
+                        else:
+                            self._reschedule_greeting_within_window(current_for_mark, current_reason, now=_now_ts())
+                        self._save_data_sync()
+                        self._debug_tick_skip(user_id, "用户刚自然来聊,已取消或延后问候主动")
+                        continue
                 current_for_mark["proactive_sending"] = True
                 current_for_mark["proactive_sending_started_at"] = _now_ts()
                 audit_id = self._append_proactive_audit(

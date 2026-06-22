@@ -220,6 +220,22 @@ class TtsEnhancementMixin:
     def _tts_provider_allows_emotion_tags(self, kind: str) -> bool:
         return kind in {"fishaudio", "gsv"}
 
+    def _tts_emotion_tag_examples(self, provider_kind: str = "generic") -> tuple[str, str]:
+        if not self._tts_provider_allows_emotion_tags(provider_kind):
+            return "", ""
+        voice_lang = getattr(self, "tts_voice_language", "ja")
+        if voice_lang == "zh":
+            return "[开心]", "[难过]"
+        if voice_lang == "en":
+            return "[happy]", "[sad]"
+        return "[嬉しい]", "[悲しい]"
+
+    def _tts_emotion_tag_rule(self, provider_kind: str = "generic", *, subject: str = "语音块内") -> str:
+        positive, negative = self._tts_emotion_tag_examples(provider_kind)
+        if not positive or not negative:
+            return ""
+        return f"可以在{subject}插入方括号情绪标签，如 {positive}、{negative}。"
+
     def _tts_language_label(self) -> str:
         return {"ja": "日语", "zh": "中文", "en": "英语"}.get(getattr(self, "tts_voice_language", "ja"), "日语")
 
@@ -699,13 +715,45 @@ class TtsEnhancementMixin:
         )
         return any(marker in cleaned for marker in chinese_markers) or cjk_count >= 4
 
+    def _tts_visible_text_is_safe_nonlinguistic(self, text: str) -> bool:
+        """Allow numeric/formula/code-like visible text after a voice block.
+
+        The Chinese-meaning guard exists to prevent Japanese/foreign TTS text from
+        leaking into chat. Some useful answers, however, are mostly numbers or
+        formulas, for example prime numbers, modulo values, URLs, or command
+        snippets. Those should remain visible even without two Chinese characters.
+        """
+        cleaned = self._strip_any_tts_markup(str(text or ""))
+        cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned, flags=re.IGNORECASE).strip()
+        if not cleaned:
+            return False
+        if re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", cleaned):
+            return False
+        digit_count = len(re.findall(r"\d", cleaned))
+        if digit_count < 1:
+            return False
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", cleaned)
+        allowed_cjk = set("和及以及或与到至第个号位长度模数约等于大小常见")
+        if any(char not in allowed_cjk for char in cjk_chars):
+            return False
+        latin_words = re.findall(r"[A-Za-z]+", cleaned)
+        allowed_words = {"e", "x", "y", "n", "mod", "url", "http", "https", "id", "api", "ip"}
+        if any(word.lower() not in allowed_words for word in latin_words):
+            return False
+        residue = re.sub(r"[\dA-Za-z\s,，.。:：;；、+\-*/\\%^=≈<>≤≥()（）\[\]【】{}#_&|~`'\"!！?？@￥$]+", "", cleaned)
+        residue = "".join(char for char in residue if char not in allowed_cjk)
+        return not residue
+
+    def _tts_visible_text_is_allowed_after_voice(self, text: str) -> bool:
+        return self._tts_visible_text_has_chinese(text) or self._tts_visible_text_is_safe_nonlinguistic(text)
+
     def _tts_chinese_visible_fallback_from_mixed(self, text: str) -> str:
         """Extract visible Chinese explanation from a mixed spoken-language fallback."""
         cleaned = self._strip_any_tts_markup(str(text or ""))
         cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned).strip()
         if not cleaned:
             return ""
-        if self._tts_visible_text_has_chinese(cleaned):
+        if self._tts_visible_text_is_allowed_after_voice(cleaned):
             return _single_line(cleaned, 800)
         parts: list[str] = []
         candidates = re.findall(r"[\u4e00-\u9fff][^\u3040-\u30ff\u31f0-\u31ff\r\n]*", cleaned)
@@ -715,7 +763,7 @@ class TtsEnhancementMixin:
             part = part.strip()
             if not part or re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", part):
                 continue
-            if self._tts_visible_text_has_chinese(part):
+            if self._tts_visible_text_is_allowed_after_voice(part):
                 parts.append(part)
         return _single_line("\n".join(parts), 800)
 
@@ -776,7 +824,7 @@ TTS 朗读文本：
             pieces.append(normalized[pos:match.end()])
             next_start = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
             visible_after_this_block = normalized[match.end():next_start]
-            if not self._tts_visible_text_has_chinese(visible_after_this_block):
+            if not self._tts_visible_text_is_allowed_after_voice(visible_after_this_block):
                 spoken = self._normalize_tts_spoken_text(match.group(1), provider_kind=provider_kind)
                 visible_translation = await self._translate_tts_spoken_to_chinese(spoken, event, provider_kind=provider_kind)
                 if visible_translation:
@@ -835,18 +883,15 @@ TTS 朗读文本：
                 usage_rule = "不要刻意使用语音；只有在一句话更适合被听见、情绪更贴近或用户明显期待语音时才写 <pc_tts>。"
         else:
             usage_rule = "本轮主模型可以正常回复，不需要主动写 <pc_tts> 或 <tts>；后处理会生成语音格式。"
-        emotion_rule = (
-            "3.可以在语音块内插入方括号情绪标签，如 [happy]、[sad]。"
-            if supports_emotion
-            else ""
-        )
+        positive_emotion, negative_emotion = self._tts_emotion_tag_examples(provider_kind)
+        emotion_rule = f"3.{self._tts_emotion_tag_rule(provider_kind)}" if supports_emotion else ""
         language_rule = ""
         if voice_lang == "zh":
-            language_rule = "当前语音正文目标语种是中文，<pc_tts> 内也用自然中文；语音块后不强制再写重复翻译。"
+            language_rule = "<pc_tts> 内也用自然中文；语音块后不强制再写重复翻译。"
         elif voice_lang == "en":
-            language_rule = "当前语音正文目标语种是英语，<pc_tts> 内必须是自然英语；每个语音块后补上对应中文含义。"
+            language_rule = "<pc_tts> 内必须是自然英语；每个语音块后补上对应中文含义。"
         else:
-            language_rule = "当前语音正文目标语种是日语，<pc_tts> 内必须是自然日语，除极短语气词外要包含假名；每个语音块后补上对应中文含义。"
+            language_rule = "<pc_tts> 内必须是自然日语，除极短语气词外要包含假名；每个语音块后补上对应中文含义。"
         examples = ""
         if mode == "fast_tag":
             if voice_lang == "zh":
@@ -854,21 +899,21 @@ TTS 朗读文本：
                     "示例：\n"
                     "例1：嗯，我在听。你慢慢说。\n"
                     "例2：<pc_tts>嗯，我在听。</pc_tts>你慢慢说。\n"
-                    f"例3：先别急，<pc_tts>{'[happy]' if supports_emotion else ''}我陪你想一下。</pc_tts>这件事可以一点点拆开。"
+                    f"例3：先别急，<pc_tts>{positive_emotion if supports_emotion else ''}我陪你想一下。</pc_tts>这件事可以一点点拆开。"
                 )
             elif voice_lang == "en":
                 examples = (
                     "示例：\n"
                     "例1：我在听。你慢慢说。\n"
                     "例2：<pc_tts>I am listening.</pc_tts>我在听。你慢慢说。\n"
-                    f"例3：先别急，<pc_tts>{'[sad]' if supports_emotion else ''}Let me stay with you for a moment.</pc_tts>我先在你旁边待一会儿。我们一点点想。"
+                    f"例3：先别急，<pc_tts>{negative_emotion if supports_emotion else ''}Let me stay with you for a moment.</pc_tts>我先在你旁边待一会儿。我们一点点想。"
                 )
             else:
                 examples = (
                     "示例：\n"
                     "例1：我有在好好听哦。你慢慢说。\n"
                     "例2：<pc_tts>ちゃんと聞いてるよ。</pc_tts>我有在好好听哦。你慢慢说。\n"
-                    f"例3：先别急，<pc_tts>{'[sad]' if supports_emotion else ''}少しだけ、そばにいるね。</pc_tts>我先在你旁边待一会儿。我们一点点想。"
+                    f"例3：先别急，<pc_tts>{negative_emotion if supports_emotion else ''}少しだけ、そばにいるね。</pc_tts>我先在你旁边待一会儿。我们一点点想。"
                 )
         extra = _single_line(getattr(self, "tts_extra_prompt", ""), 800)
         if not extra:
@@ -892,7 +937,6 @@ TTS 朗读文本：
                 language_rule,
                 usage_rule,
                 examples,
-                "如果写错成 <tts>、<ttts>、<tttts> 等标签，系统会尝试规范化，但你应优先输出标准 <pc_tts>...</pc_tts>。",
                 f"补充规则：{extra}" if extra else "",
             ]
             if item
@@ -1196,7 +1240,7 @@ TTS 朗读文本：
         if not text:
             return []
         original_text = text
-        if getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_has_chinese(text):
+        if getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_is_allowed_after_voice(text):
             chinese_text = self._tts_chinese_visible_fallback_from_mixed(text)
             if chinese_text:
                 logger.warning(
@@ -1476,11 +1520,9 @@ TTS 朗读文本：
             return await self._postprocess_text_to_tts_markup(source, event, provider_kind=provider_kind)
         extra = _single_line(getattr(self, "main_user_mention_voice_prompt", ""), 500) if self._event_mentions_main_user_with_keyword(event) else ""
         persona_context = await self._format_tts_persona_voice_context(event)
-        emotion_rule = (
-            "可在 <pc_tts> 内保留少量方括号情绪标签，如 [happy]、[sad]。"
-            if self._tts_provider_allows_emotion_tags(provider_kind)
-            else "不要加入方括号情绪标签。"
-        )
+        emotion_rule = self._tts_emotion_tag_rule(provider_kind, subject="<pc_tts> 内")
+        if not emotion_rule:
+            emotion_rule = "不要加入方括号情绪标签。"
         if voice_lang == "zh":
             output_rule = "必须包含一个 <pc_tts>...</pc_tts> 语音块"
             display_rule = "语音和显示文本同为中文时，不需要额外翻译，标签外仍可保留自然中文聊天文本。"
@@ -1546,11 +1588,9 @@ Provider 规则：{emotion_rule}
         else:
             language_rule = "voice_text 必须是自然日语，不要夹中文说明；除极短语气词外必须包含假名。"
             visible_rule = "visible_text 必须保留完整中文含义，让用户能看懂这段语音对应什么。"
-        emotion_rule = (
-            "voice_text 可以少量使用 [happy]、[sad] 这类方括号情绪标签。"
-            if self._tts_provider_allows_emotion_tags(provider_kind)
-            else "voice_text 不要使用方括号情绪标签。"
-        )
+        emotion_rule = self._tts_emotion_tag_rule(provider_kind, subject="voice_text 中")
+        if not emotion_rule:
+            emotion_rule = "voice_text 不要使用方括号情绪标签。"
         probability_allowed = getattr(event, "_private_companion_tts_postprocess_probability_allowed", None)
         if isinstance(probability_allowed, bool):
             probability_hint = "命中，正常判断是否适合语音" if probability_allowed else "未命中，除非你判断用户本轮确实在要求语音，否则应保持纯文本"
@@ -1609,7 +1649,7 @@ Provider 规则：{emotion_rule}
                     reason or "no_voice",
                 )
                 return ""
-            if getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_has_chinese(visible):
+            if getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_is_allowed_after_voice(visible):
                 visible = source
             logger.info(
                 "[PrivateCompanion] TTS 后处理判定使用语音: session=%s reason=%s voice=%s",
@@ -1983,10 +2023,10 @@ Provider 规则：{emotion_rule}
                 if getattr(self, "tts_voice_language", "ja") != "zh":
                     next_start = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
                     visible_after_this_block = normalized[match.end():next_start]
-                    if not self._tts_visible_text_has_chinese(visible_after_this_block):
+                    if not self._tts_visible_text_is_allowed_after_voice(visible_after_this_block):
                         visible_translation = (
                             _single_line(fallback_plain, 300)
-                            if fallback_plain and self._tts_visible_text_has_chinese(fallback_plain)
+                            if fallback_plain and self._tts_visible_text_is_allowed_after_voice(fallback_plain)
                             else await self._translate_tts_spoken_to_chinese(source_spoken, event, provider_kind=provider_kind)
                         )
                         if visible_translation:
@@ -2011,7 +2051,7 @@ Provider 规则：{emotion_rule}
                 elif getattr(self, "tts_voice_language", "ja") != "zh":
                     next_start = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
                     visible_after_this_block = normalized[match.end():next_start]
-                    if self._tts_visible_text_has_chinese(visible_after_this_block):
+                    if self._tts_visible_text_is_allowed_after_voice(visible_after_this_block):
                         logger.warning(
                             "[PrivateCompanion] TTS语音组件生成失败,已隐藏朗读文本并保留后置中文: %s",
                             _single_line(spoken, 120),
@@ -2037,7 +2077,7 @@ Provider 规则：{emotion_rule}
                     output.append(Plain(spoken))
             pos = match.end()
         after = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized[pos:], flags=re.IGNORECASE).strip()
-        if after and getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_has_chinese(after):
+        if after and getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_is_allowed_after_voice(after):
             chinese_after = self._tts_chinese_visible_fallback_from_mixed(after)
             if chinese_after:
                 logger.warning(

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260621-proactive-only-lock" />
+  <link rel="stylesheet" href="./app.css?v=20260622-strategy-overview" />
 </head>
 <body>
   <main class="shell">
@@ -30,7 +30,7 @@
         <button class="tab" data-tab="bookshelf">书柜</button>
         <button class="tab" data-tab="tokens">Token</button>
         <button class="tab" data-tab="troubleshooting">排障</button>
-        <button class="tab" data-tab="modules">模块配置</button>
+        <button class="tab" data-tab="modules">模块</button>
         <button class="tab" data-tab="config">配置</button>
         <button class="tab" data-tab="models">模型</button>
       </nav>
@@ -45,6 +45,18 @@
         <div id="dashboardPulse" class="dashboard-pulse"></div>
         <div id="dashboardShortcuts" class="dashboard-shortcuts"></div>
         <div class="dashboard-grid">
+          <article>
+            <h2>私聊策略</h2>
+            <div id="privateConfig"></div>
+          </article>
+          <article>
+            <h2>群聊策略</h2>
+            <div id="groupConfig"></div>
+          </article>
+          <article class="wide">
+            <h2>长线主动</h2>
+            <div id="longTermConfig"></div>
+          </article>
           <article class="wide">
             <h2>配置健康检查</h2>
             <div id="healthPanel" class="health-list"></div>
@@ -685,22 +697,100 @@ QQ空间 = 公开札记
 
       <section class="panel" id="panel-modules">
         <div class="section-head">
-          <h2>模块化配置</h2>
-          <span class="muted">常用配置</span>
+          <h2>模块工作台</h2>
+          <span class="muted">常用管理 · 模块状态 · 便捷工具</span>
         </div>
+        <div id="moduleWorkbench" class="module-workbench"></div>
         <div id="moduleSummary" class="module-summary"></div>
-        <nav class="module-nav" aria-label="模块配置分组">
-          <a href="#module-presets">预设</a>
-          <a href="#module-quick">快速启动</a>
-          <a href="#module-environment">环境感知</a>
-          <a href="#module-private">私聊主动</a>
-          <a href="#module-group">群聊观察</a>
-          <a href="#module-worldbook">关系网</a>
-          <a href="#module-memory">记忆学习</a>
-          <a href="#module-longterm">长线联动</a>
-          <a href="#module-external-abilities">外部能力</a>
+        <nav class="module-nav" aria-label="模块工作台分组">
+          <a href="#moduleWorkbench">工作台</a>
+          <a href="#module-tool-presets">预设</a>
+          <a href="#module-tool-segmented">分段实验室</a>
+          <a href="#module-tool-news">新闻源</a>
+          <a href="#module-tool-media">媒体缓存</a>
+          <a href="#module-tool-external">外部能力</a>
         </nav>
-        <div class="module-grid">
+        <section class="module-tuning-note">
+          <div>
+            <b>常用模块集中在这里。</b>
+            <span>日常查看、整理和快速操作都可以从这里开始；需要细调参数时再进入配置或模型页。</span>
+          </div>
+          <button type="button" data-jump-tab="config">打开配置页</button>
+        </section>
+        <div class="module-tool-grid">
+          <article class="module-tool-card wide" id="module-tool-presets">
+            <header>
+              <div>
+                <span>Presets</span>
+                <h3>配置预设</h3>
+                <p>按想要的陪伴节奏选择一整套取向，适合初始化、低打扰、日常陪伴或群聊观察。</p>
+              </div>
+              <button type="button" data-jump-tab="config">查看功能开关</button>
+            </header>
+            <div id="presetCards" class="preset-grid"></div>
+          </article>
+          <article class="module-tool-card" id="module-tool-segmented">
+            <header>
+              <div>
+                <span>Lab</span>
+                <h3>分段效果实验室</h3>
+                <p>用当前分段规则预览主动消息会被拆成几段，适合先试效果再微调。</p>
+              </div>
+              <button type="button" data-jump-tab="config">调整分段配置</button>
+            </header>
+            <section class="segmented-preview-panel" data-segmented-preview-panel>
+              <header>
+                <div>
+                  <h4>分段预览</h4>
+                </div>
+                <div class="segmented-preview-actions">
+                  <button type="button" data-segmented-example="simple">简单示例</button>
+                  <button type="button" data-segmented-example="complex">复杂示例</button>
+                </div>
+              </header>
+              <textarea data-segmented-preview-input rows="4"></textarea>
+              <div data-segmented-preview-output class="segmented-preview-output"></div>
+            </section>
+          </article>
+          <article class="module-tool-card wide" id="module-tool-news">
+            <header>
+              <div>
+                <span>Sources</span>
+                <h3>新闻源管理</h3>
+                <p>管理 RSS、B 站 UP 或单条视频来源，方便调整 Bot 平时会读到的信息入口。</p>
+              </div>
+              <button type="button" data-save-news-sources>保存新闻源</button>
+            </header>
+            <textarea name="news_sources" id="newsSourcesRaw" hidden></textarea>
+            <div class="news-source-manager" id="newsSourceManager"></div>
+          </article>
+          <article class="module-tool-card" id="module-tool-media">
+            <header>
+              <div>
+                <span>Media</span>
+                <h3>媒体缓存与转述</h3>
+                <p>图片/表情包缓存、识图摘要和重复图命中更适合在模块页管理。</p>
+              </div>
+              <button type="button" data-jump-tab="image-cache">管理图片缓存</button>
+            </header>
+            <div class="module-tool-metrics">
+              <span>重复图缓存会显著减少视觉模型调用</span>
+              <span>误识别可在缓存页直接修正或删除</span>
+            </div>
+          </article>
+          <article class="module-tool-card wide" id="module-tool-external">
+            <header>
+              <div>
+                <span>Extensions</span>
+                <h3>外部主动能力</h3>
+                <p>第三方插件注册的主动能力在这里管理；它们不是普通配置项，而是可加入候选池的能力卡。</p>
+              </div>
+              <button type="button" data-jump-tab="models">查看相关模型</button>
+            </header>
+            <div id="externalAbilityList" class="external-ability-grid"></div>
+          </article>
+        </div>
+        <div class="module-grid legacy-module-config-grid" hidden aria-hidden="true">
           <article class="wide module-card" id="module-presets">
             <div class="module-card-head">
               <div>
@@ -708,7 +798,7 @@ QQ空间 = 公开札记
               </div>
               <span class="module-badge">预设</span>
             </div>
-            <div id="presetCards" class="preset-grid"></div>
+            <div id="legacyPresetCards" class="preset-grid"></div>
           </article>
           <article class="module-card" id="module-quick">
             <div class="module-card-head">
@@ -818,8 +908,8 @@ QQ空间 = 公开札记
                       <button type="button" data-segmented-example="complex">复杂示例</button>
                     </div>
                   </header>
-                  <textarea id="segmentedPreviewInput" rows="4"></textarea>
-                  <div id="segmentedPreviewOutput" class="segmented-preview-output"></div>
+                  <textarea id="legacySegmentedPreviewInput" rows="4"></textarea>
+                  <div id="legacySegmentedPreviewOutput" class="segmented-preview-output"></div>
                 </section>
               </div>
               <button type="submit">保存私聊主动</button>
@@ -948,8 +1038,8 @@ QQ空间 = 公开札记
                 <label>单源读取条数 <input name="news_max_items_per_source" type="number" min="1" max="30" /></label>
                 <label>热点来源 <input name="news_hot_sources" type="text" maxlength="120" /></label>
                 <label>热点候选数量 <input name="news_hot_max_items" type="number" min="1" max="50" /></label>
-                <textarea name="news_sources" id="newsSourcesRaw" hidden></textarea>
-                <div class="wide-field news-source-manager" id="newsSourceManager"></div>
+                <textarea name="news_sources" id="legacyNewsSourcesRaw" hidden></textarea>
+                <div class="wide-field news-source-manager" id="legacyNewsSourceManager"></div>
               </div>
               <div class="module-subgroup" id="privateReadingModuleGroup">
                 <h3>夹层阅读素材</h3>
@@ -982,7 +1072,7 @@ QQ空间 = 公开札记
               </div>
               <span class="module-badge">扩展</span>
             </div>
-            <div id="externalAbilityList" class="external-ability-grid"></div>
+            <div id="legacyExternalAbilityList" class="external-ability-grid"></div>
           </article>
         </div>
       </section>
@@ -995,7 +1085,7 @@ QQ空间 = 公开札记
               <span class="muted">编辑重复图片视觉摘要，删除后下次遇到同图会重新识别</span>
             </div>
             <div class="actions compact">
-              <button type="button" data-jump-tab="modules">返回模块配置</button>
+              <button type="button" data-jump-tab="modules">返回模块工作台</button>
               <button id="refreshImageCacheBtn" type="button">刷新缓存</button>
             </div>
           </div>
@@ -1015,18 +1105,6 @@ QQ空间 = 公开札记
 
       <section class="panel" id="panel-config">
         <div class="config-grid">
-          <article class="config-card">
-            <h2>私聊策略</h2>
-            <dl id="privateConfig"></dl>
-          </article>
-          <article class="config-card">
-            <h2>群聊策略</h2>
-            <dl id="groupConfig"></dl>
-          </article>
-          <article class="config-card wide">
-            <h2>长线主动</h2>
-            <dl id="longTermConfig"></dl>
-          </article>
           <article class="config-card wide">
             <h2>群聊名单覆盖</h2>
             <div id="listCoverage" class="coverage-grid"></div>
@@ -1088,11 +1166,13 @@ QQ空间 = 公开札记
         <div id="providerSummary" class="provider-summary"></div>
         <div id="providerFlow" class="provider-flow"></div>
         <div class="provider-toolbar">
-          <input id="providerFilter" type="search" placeholder="筛选模型名称 / 配置键 / 用途" />
+          <input id="providerFilter" type="search" placeholder="筛选模型名称 / 配置键 / 用途 / 低延迟 / 效果" />
           <div class="provider-mode-switch" aria-label="模型配置筛选">
             <button type="button" data-provider-mode="all" class="active">全部</button>
             <button type="button" data-provider-mode="configured">已配置</button>
             <button type="button" data-provider-mode="inherited">自动回退</button>
+            <button type="button" data-provider-mode="speed">低延迟优先</button>
+            <button type="button" data-provider-mode="quality">效果优先</button>
             <button type="button" data-provider-mode="vision">视觉/外部</button>
           </div>
           <div class="provider-toolbar-actions">
@@ -1105,6 +1185,6 @@ QQ空间 = 公开札记
     </section>
   </main>
 
-  <script src="./app.js?v=20260621-proactive-only-lock"></script>
+  <script src="./app.js?v=20260622-provider-guide-v2"></script>
 </body>
 </html>

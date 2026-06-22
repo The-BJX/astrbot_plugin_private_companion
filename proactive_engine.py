@@ -2694,11 +2694,19 @@ class ProactiveEngineMixin:
                 if _single_line(raw_user.get("last_user_message"), 24):
                     has_recent_user_message = True
                     break
-        reasons = ["activity_share", "activity_share", "diary_share", "check_in"]
+        has_contextual_source = bool(
+            (isinstance(can_do, list) and can_do)
+            or (isinstance(diaries, list) and diaries)
+            or important_dates
+            or self.include_schedule_in_messages
+        )
+        reasons = ["activity_share", "activity_share", "diary_share"]
+        if not has_contextual_source:
+            reasons.append("check_in")
         if self._has_active_insomnia_state():
             reasons.extend(["insomnia_night"] * 2)
         if isinstance(state, dict) and state.get("conditions"):
-            reasons.extend(["quiet_care", "check_in"])
+            reasons.extend(["quiet_care"])
         if isinstance(can_do, list) and can_do:
             reasons.extend(["activity_share"] * 3)
         if isinstance(diaries, list) and diaries:
@@ -2712,7 +2720,7 @@ class ProactiveEngineMixin:
         if any(token in state_note for token in ("疲惫", "收声", "安静", "慢一点")) or state_mood in {"安静", "疲惫"}:
             reasons.extend(["quiet_care"])
         if has_recent_user_message:
-            reasons.extend(["quiet_care", "check_in"])
+            reasons.extend(["quiet_care"])
         return random.choice(reasons)
 
     def _is_greeting_reason(self, reason: str) -> bool:
@@ -3592,6 +3600,37 @@ class ProactiveEngineMixin:
         cleaned = re.sub(r"\s+", " ", cleaned).strip(",。 ")
         return cleaned
 
+    def _is_vague_seek_user_motive(self, reason: str, action: str, motive: str, topic: str = "") -> bool:
+        if str(action or "message") != "message":
+            return False
+        if str(reason or "") not in {
+            "check_in",
+            "quiet_care",
+            "state_share",
+            "morning_greeting",
+            "noon_greeting",
+            "evening_greeting",
+        }:
+            return False
+        text = f"{_single_line(motive, 140)} {_single_line(topic, 80)}"
+        if not text.strip():
+            return True
+        concrete_tokens = (
+            "前面提过", "刚刚想到“", "天气", "雨", "阳光", "晚霞", "日记", "群", "照片",
+            "新闻", "日期", "生日", "纪念", "考试", "作业", "吃饭", "睡", "生病", "压力",
+            "低压关心", "收敛情绪",
+        )
+        if any(token in text for token in concrete_tokens):
+            return False
+        vague_tokens = (
+            "想跟你说一句", "想确认你还在", "确认用户在不在", "确认一下用户状态",
+            "想看你在不在", "来看看你", "想来看看你", "来找你", "想找你",
+            "只是想", "就是想", "没什么事", "没什么动机", "普通问候",
+            "想到你了", "先想到你", "晃到了你", "拐到了你", "碰一下你",
+            "轻轻问你一句", "先冒出来的是你", "就想顺手跟你说句话",
+        )
+        return any(token in text for token in vague_tokens)
+
     def _should_use_name_only_opener(
         self,
         user: dict[str, Any],
@@ -3627,6 +3666,8 @@ class ProactiveEngineMixin:
             chance += 0.02
         if any(token in motive for token in ("来找你", "确认一下用户状态", "想和用户说一句", "放心不下", "想看你在不在")):
             chance += 0.05
+        if self._is_vague_seek_user_motive(reason, action, motive):
+            chance *= 0.45
         return random.random() < min(0.32, chance)
 
     def _build_name_only_opener(self, name: str) -> str:
