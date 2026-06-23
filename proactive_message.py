@@ -1810,6 +1810,11 @@ class ProactiveMessageMixin:
             kept.append(line)
         cleaned = "\n".join(kept).strip().strip('"').strip("'")
         cleaned = cleaned.replace("（图片已送达）", "").replace("(图片已送达)", "")
+        tts_cleaner = getattr(self, "_clean_tool_plain_text_tts_markup", None)
+        if callable(tts_cleaner):
+            cleaned = tts_cleaner(cleaned)
+        else:
+            cleaned = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         return cleaned[:260]
 

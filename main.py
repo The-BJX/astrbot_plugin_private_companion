@@ -408,7 +408,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.5.0",
+    "4.5.1",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -704,6 +704,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             self.rest_reply_mode = "probability"
         self.rest_reply_probability = self._cfg_int(c, "rest_reply_probability", 18, 0, 100) / 100.0
         self.rest_reply_llm_threshold = self._cfg_int(c, "rest_reply_llm_threshold", 65, 0, 100)
+        self.enable_rest_backlog_reply = self._cfg_bool(c, "enable_rest_backlog_reply", True)
+        self.rest_backlog_max_messages = self._cfg_int(c, "rest_backlog_max_messages", 4, 1, 12)
         self.rest_wakeup_provider_id = self._cfg_str(c, "REST_WAKEUP_PROVIDER_ID", "")
         self.enable_enhanced_dreams = self._cfg_bool(c, "enable_enhanced_dreams", False)
         self.dream_diary_provider_id = self._cfg_str(
@@ -1235,6 +1237,214 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.page_api = None
         self._register_page_api_if_available()
 
+    def _clean_tool_plain_text_tts_markup(self, raw_text: Any) -> str:
+        text = str(raw_text or "")
+        if not text:
+            return ""
+        if not re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
+            return text
+        try:
+            normalizer = getattr(self, "_normalize_tts_tags", None)
+            normalized = normalizer(text) if callable(normalizer) else text
+            visible_getter = getattr(self, "_tts_visible_fallback_text", None)
+            visible = visible_getter(normalized, "") if callable(visible_getter) else ""
+        except Exception:
+            normalized = text
+            visible = ""
+        if not visible:
+            visible = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", normalized, flags=re.IGNORECASE).strip()
+        visible = re.sub(r"\n{3,}", "\n\n", str(visible or "").strip())
+        if visible and visible != text:
+            logger.info(
+                "[PrivateCompanion] 已清理工具直发文本中的 TTS 标签: before=%s after=%s",
+                _single_line(text, 120),
+                _single_line(visible, 120),
+            )
+        return visible
+
+    def _clean_send_message_to_user_tool_messages(self, messages: Any) -> Any:
+        if not isinstance(messages, list):
+            return messages
+        changed = False
+        cleaned_messages: list[Any] = []
+        for item in messages:
+            if not isinstance(item, dict):
+                cleaned_messages.append(item)
+                continue
+            copied = dict(item)
+            if str(copied.get("type") or "").strip().lower() == "plain":
+                cleaned_text = self._clean_tool_plain_text_tts_markup(copied.get("text"))
+                if cleaned_text != copied.get("text"):
+                    changed = True
+                    copied["text"] = cleaned_text
+            cleaned_messages.append(copied)
+        return cleaned_messages if changed else messages
+
+    async def _send_message_to_user_tool_with_tts_processing(
+        self,
+        tool_self: Any,
+        context: Any,
+        kwargs: dict[str, Any],
+    ) -> Any:
+        messages = kwargs.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return None
+        if not any(
+            isinstance(item, dict)
+            and str(item.get("type") or "").strip().lower() == "plain"
+            and re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", str(item.get("text") or ""), flags=re.IGNORECASE)
+            for item in messages
+        ):
+            return None
+        try:
+            event = context.context.event
+            current_session = str(getattr(event, "unified_msg_origin", "") or "")
+        except Exception:
+            event = None
+            current_session = ""
+        session = str(kwargs.get("session") or current_session or "")
+        if not current_session or session != current_session:
+            return None
+        try:
+            import astrbot.core.message.components as Comp
+            from astrbot.core.message.message_event_result import MessageChain as CoreMessageChain
+            from astrbot.core.platform.message_session import MessageSession
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] send_message_to_user TTS 接管不可用: %s", _single_line(exc, 120))
+            return None
+
+        components: list[Any] = []
+        for idx, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                return f"error: messages[{idx}] should be an object."
+            msg_type = str(msg.get("type") or "").strip().lower()
+            if not msg_type:
+                return f"error: messages[{idx}].type is required."
+            try:
+                if msg_type == "plain":
+                    text = str(msg.get("text") or "").strip()
+                    if not text:
+                        return f"error: messages[{idx}].text is required for plain component."
+                    if re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
+                        fallback_plain = self._clean_tool_plain_text_tts_markup(text)
+                        processor = getattr(self, "_process_tts_tags", None)
+                        tts_components = (
+                            await processor(text, event, fallback_plain=fallback_plain)
+                            if callable(processor) and bool(getattr(self, "enable_tts_enhancement", False))
+                            else []
+                        )
+                        if tts_components:
+                            components.extend(tts_components)
+                        elif fallback_plain:
+                            components.append(Comp.Plain(text=fallback_plain))
+                    else:
+                        components.append(Comp.Plain(text=text))
+                elif msg_type == "image":
+                    path = msg.get("path")
+                    url = msg.get("url")
+                    if path:
+                        local_path, _ = await tool_self._resolve_path_from_sandbox(context, path, component_type="image")
+                        components.append(Comp.Image.fromFileSystem(path=local_path))
+                    elif url:
+                        components.append(Comp.Image.fromURL(url=url))
+                    else:
+                        return f"error: messages[{idx}] must include path or url for image component."
+                elif msg_type == "record":
+                    path = msg.get("path")
+                    url = msg.get("url")
+                    if path:
+                        local_path, _ = await tool_self._resolve_path_from_sandbox(context, path, component_type="record")
+                        components.append(Comp.Record.fromFileSystem(path=local_path))
+                    elif url:
+                        components.append(Comp.Record.fromURL(url=url))
+                    else:
+                        return f"error: messages[{idx}] must include path or url for record component."
+                elif msg_type == "video":
+                    path = msg.get("path")
+                    url = msg.get("url")
+                    if path:
+                        local_path, _ = await tool_self._resolve_path_from_sandbox(context, path, component_type="video")
+                        components.append(Comp.Video.fromFileSystem(path=local_path))
+                    elif url:
+                        components.append(Comp.Video.fromURL(url=url))
+                    else:
+                        return f"error: messages[{idx}] must include path or url for video component."
+                elif msg_type == "file":
+                    path = msg.get("path")
+                    url = msg.get("url")
+                    name = (
+                        msg.get("text")
+                        or (os.path.basename(str(path)) if path else "")
+                        or (os.path.basename(str(url)) if url else "")
+                        or "file"
+                    )
+                    if path:
+                        local_path, _ = await tool_self._resolve_path_from_sandbox(context, path, component_type="file")
+                        components.append(Comp.File(name=name, file=local_path))
+                    elif url:
+                        components.append(Comp.File(name=name, url=url))
+                    else:
+                        return f"error: messages[{idx}] must include path or url for file component."
+                elif msg_type == "mention_user":
+                    mention_user_id = msg.get("mention_user_id")
+                    if not mention_user_id:
+                        return f"error: messages[{idx}].mention_user_id is required for mention_user component."
+                    components.append(Comp.At(qq=mention_user_id))
+                else:
+                    return f"error: unsupported message type '{msg_type}' at index {idx}."
+            except FileNotFoundError as exc:
+                return f"error: {exc}"
+            except PermissionError as exc:
+                return f"error: {exc}"
+            except Exception as exc:
+                return f"error: failed to build messages[{idx}] component: {exc}"
+        if not components:
+            return "error: messages became empty after TTS processing."
+        try:
+            target_session = MessageSession.from_str(session)
+        except Exception:
+            return f"error: invalid session: {session}"
+        await context.context.context.send_message(target_session, CoreMessageChain(chain=components))
+        logger.info(
+            "[PrivateCompanion] send_message_to_user 工具文本已接管 TTS 处理: session=%s components=%s",
+            _single_line(session, 120),
+            len(components),
+        )
+        return f"Message sent to session {target_session}"
+
+    def _install_send_message_to_user_tool_sanitizer(self) -> None:
+        try:
+            from astrbot.core.tools.message_tools import SendMessageToUserTool
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] send_message_to_user 工具清理包装未安装: %s", _single_line(exc, 120))
+            return
+        original_call = getattr(SendMessageToUserTool, "_private_companion_tts_sanitizer_original_call", None)
+        if original_call is None:
+            original_call = SendMessageToUserTool.call
+
+        async def _private_companion_sanitized_call(tool_self, context, **kwargs):
+            plugin = _private_companion_plugin
+            if plugin is not None and bool(getattr(plugin, "enabled", False)) and isinstance(kwargs.get("messages"), list):
+                try:
+                    kwargs = dict(kwargs)
+                    processed = await plugin._send_message_to_user_tool_with_tts_processing(tool_self, context, kwargs)
+                    if processed is not None:
+                        return processed
+                    kwargs["messages"] = plugin._clean_send_message_to_user_tool_messages(kwargs.get("messages"))
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] send_message_to_user 文本清理失败: %s", _single_line(exc, 120))
+                    try:
+                        kwargs = dict(kwargs)
+                        kwargs["messages"] = plugin._clean_send_message_to_user_tool_messages(kwargs.get("messages"))
+                    except Exception:
+                        pass
+            return await original_call(tool_self, context, **kwargs)
+
+        setattr(SendMessageToUserTool, "_private_companion_tts_sanitizer_original_call", original_call)
+        SendMessageToUserTool.call = _private_companion_sanitized_call
+        setattr(SendMessageToUserTool, "_private_companion_tts_sanitizer_installed", True)
+        logger.info("[PrivateCompanion] send_message_to_user 工具 TTS 标签处理已安装/刷新")
+
     def _sqlite_wal_candidate_paths(self) -> list[Path]:
         data_root = Path(get_astrbot_data_path())
         candidates = [
@@ -1382,6 +1592,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not self.enabled:
             logger.info("[PrivateCompanion] 插件总开关已关闭,不启动主动消息循环")
             return
+        self._install_send_message_to_user_tool_sanitizer()
         await self._apply_sqlite_wal_optimizations()
         self._schedule_default_persona_prompt_refresh()
         async with self._data_lock:
@@ -2965,7 +3176,120 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         hit = random.random() <= probability
         return hit, f"probability:{probability:.2f}"
 
+    def _rest_backlog_user_for_event(self, event: AstrMessageEvent) -> tuple[str, dict[str, Any] | None]:
+        try:
+            if not bool(getattr(event, "is_private_chat", lambda: False)()):
+                return "", None
+        except Exception:
+            return "", None
+        try:
+            user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+        except Exception:
+            return "", None
+        users = self.data.get("users", {})
+        user = users.get(user_id) if isinstance(users, dict) else None
+        if not isinstance(user, dict):
+            return user_id, None
+        if not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)):
+            return user_id, None
+        return user_id, user
+
+    def _record_rest_reply_backlog(self, event: AstrMessageEvent, reason: str) -> None:
+        if not bool(getattr(self, "enable_rest_backlog_reply", True)):
+            return
+        user_id, user = self._rest_backlog_user_for_event(event)
+        if not isinstance(user, dict):
+            return
+        text = _single_line(getattr(event, "message_str", ""), 240)
+        if not text:
+            text = "发来了一条非文本消息"
+        backlog = user.get("rest_reply_backlog")
+        if not isinstance(backlog, list):
+            backlog = []
+        now = time.time()
+        backlog.append(
+            {
+                "ts": now,
+                "text": text,
+                "reason": _single_line(reason, 80),
+            }
+        )
+        max_items = max(1, _safe_int(getattr(self, "rest_backlog_max_messages", 4), 4, 1))
+        user["rest_reply_backlog"] = backlog[-max_items:]
+        user["rest_reply_backlog_updated_at"] = now
+        self._schedule_data_save()
+        logger.info(
+            "[PrivateCompanion] 已记录休息中未回复私聊: user=%s count=%s reason=%s text=%s",
+            user_id,
+            len(user["rest_reply_backlog"]),
+            _single_line(reason, 80),
+            _single_line(text, 80),
+        )
+
+    def _take_rest_reply_backlog_prompt(self, user: dict[str, Any]) -> str:
+        if not bool(getattr(self, "enable_rest_backlog_reply", True)):
+            return ""
+        backlog = user.get("rest_reply_backlog")
+        if not isinstance(backlog, list) or not backlog:
+            return ""
+        max_items = max(1, _safe_int(getattr(self, "rest_backlog_max_messages", 4), 4, 1))
+        items = [item for item in backlog[-max_items:] if isinstance(item, dict)]
+        if not items:
+            user["rest_reply_backlog"] = []
+            user["rest_reply_backlog_updated_at"] = 0
+            self._schedule_data_save()
+            return ""
+        lines: list[str] = []
+        for idx, item in enumerate(items, 1):
+            ts = _safe_float(item.get("ts"), 0)
+            if ts > 0:
+                try:
+                    when = self._environment_fromtimestamp(ts).strftime("%H:%M")
+                except Exception:
+                    when = datetime.fromtimestamp(ts).strftime("%H:%M")
+            else:
+                when = "刚才"
+            text = _single_line(item.get("text"), 180) or "发来了一条消息"
+            lines.append(f"{idx}. {when}｜{text}")
+        user["rest_reply_backlog"] = []
+        user["rest_reply_backlog_updated_at"] = 0
+        self._schedule_data_save()
+        if not lines:
+            return ""
+        return "休息时有几条私聊没来得及回，醒来后补看到：\n" + "\n".join(lines)
+
+    async def _append_rest_reply_backlog_to_request(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        user: dict[str, Any],
+    ) -> str:
+        backlog_prompt = self._take_rest_reply_backlog_prompt(user)
+        if not backlog_prompt:
+            return ""
+        marker = "<!-- private_companion_rest_backlog_v1 -->"
+        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            req,
+            marker,
+            backlog_prompt,
+            priority=25,
+            source="daily_state",
+        ) else "system_prompt"
+        if placement == "system_prompt":
+            req.system_prompt = f"{req.system_prompt or ''}\n\n{marker}\n{backlog_prompt}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="醒后补看私聊",
+            key="rest.backlog",
+            text=backlog_prompt,
+            source="daily_state",
+            mode="private",
+            metadata={"注入位置": placement},
+        )
+        return backlog_prompt
+
     def _stop_reply_for_rest_gate(self, event: AstrMessageEvent, reason: str) -> None:
+        self._record_rest_reply_backlog(event, reason)
         logger.info(
             "[PrivateCompanion] 睡眠/休息回复闸门拦截本轮被动回复: session=%s reason=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
@@ -3223,6 +3547,14 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         else:
             await self._append_non_target_private_identity_guard_to_request(event, req)
         if not self._feature_enabled_or_temp_unlocked("inject_passive_states"):
+            if is_private_chat:
+                try:
+                    backlog_user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+                except Exception:
+                    backlog_user_id = ""
+                backlog_user = self.data.get("users", {}).get(backlog_user_id) if backlog_user_id else None
+                if isinstance(backlog_user, dict):
+                    await self._append_rest_reply_backlog_to_request(event, req, backlog_user)
             await self._append_conditional_tool_instructions_to_request(event, req)
             await self._append_environment_perception_to_request(event, req)
             return
@@ -3389,6 +3721,14 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 environment_fragment,
                 priority=20,
                 source="environment",
+            )
+        rest_backlog_prompt = self._take_rest_reply_backlog_prompt(current_user)
+        if rest_backlog_prompt:
+            prompt_surface.add(
+                "rest.backlog",
+                rest_backlog_prompt,
+                priority=25,
+                source="daily_state",
             )
         buffered_image_context = self._take_buffered_private_image_context_for_event(event)
         buffered_images = (

@@ -4052,6 +4052,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "rest_reply_mode",
             "rest_reply_probability",
             "rest_reply_llm_threshold",
+            "enable_rest_backlog_reply",
+            "rest_backlog_max_messages",
             "REST_WAKEUP_PROVIDER_ID",
             "check_interval_seconds",
             "idle_minutes",
@@ -5160,6 +5162,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "rest_reply_mode",
             "rest_reply_probability",
             "rest_reply_llm_threshold",
+            "enable_rest_backlog_reply",
+            "rest_backlog_max_messages",
             "REST_WAKEUP_PROVIDER_ID",
             "check_interval_seconds",
             "idle_minutes",
@@ -5669,6 +5673,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0, min(120, int(value)))
             except (TypeError, ValueError):
                 return 0
+        if key == "rest_backlog_max_messages":
+            try:
+                return max(1, min(12, int(value)))
+            except (TypeError, ValueError):
+                return 4
         if key in {
             "check_interval_seconds",
             "daily_token_limit",

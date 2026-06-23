@@ -1,6 +1,6 @@
 {
   "_section_00_quick": {
-    "description": "=== 00 快速开始 / 必填 ===",
+    "description": "=== 00 先把基础信息填好 ===",
     "type": "text",
     "invisible": true
   },
@@ -187,7 +187,7 @@
     "default": "23:00-08:30"
   },
   "_section_01_model": {
-    "description": "=== 01 模型分工（可选，不填会自动回退） ===",
+    "description": "=== 01 模型分工，不填会自动回退 ===",
     "type": "text",
     "invisible": true
   },
@@ -349,7 +349,7 @@
     "_special": "select_provider"
   },
   "_section_02_private": {
-    "description": "=== 02 私聊主动陪伴 ===",
+    "description": "=== 02 私聊触达与主动消息 ===",
     "type": "text",
     "invisible": true
   },
@@ -374,6 +374,11 @@
       "step": 0.5
     },
     "default": 3
+  },
+  "_section_02_recall": {
+    "description": "=== 02.1 撤回消息与最近消息查询 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_recall_enhancement": {
     "description": "启用撤回增强",
@@ -453,6 +458,11 @@
     "hint": "关闭时英文大小写不区分；开启时按原样匹配。",
     "default": false,
     "condition": "enable_forbidden_word_recall"
+  },
+  "_section_02_debounce": {
+    "description": "=== 02.2 消息收口与补话等待 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_message_debounce": {
     "description": "启用消息收口防抖",
@@ -659,6 +669,11 @@
     "default": 300,
     "condition": "enable_private_image_vision_cache"
   },
+  "_section_02_followup": {
+    "description": "=== 02.3 群聊后的私聊承接 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_group_conversation_followup": {
     "description": "启用群聊连续对话保持",
     "type": "bool",
@@ -775,6 +790,11 @@
     "hint": "开启后只限制命令管理入口；不会阻止 target_user_ids 自动预热。",
     "default": true
   },
+  "_section_02_generation": {
+    "description": "=== 02.4 主动消息生成与发送 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_llm_proactive_message": {
     "description": "主动消息发送前调用 LLM 生成文本",
     "type": "bool",
@@ -800,6 +820,11 @@
       "step": 1
     },
     "default": 12
+  },
+  "_section_02_timer": {
+    "description": "=== 02.5 聊天里形成的临时约定 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_llm_timer_scheduling": {
     "description": "对话临时预约",
@@ -870,6 +895,11 @@
       "step": 5
     },
     "default": 180
+  },
+  "_section_02_daily_creative": {
+    "description": "=== 02.6 日常问候与创作分享 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_daily_greetings": {
     "description": "启用早午晚锚点问候",
@@ -979,6 +1009,11 @@
       "enable_creative_writing": true
     }
   },
+  "_section_02_skill": {
+    "description": "=== 02.7 技能成长 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_skill_growth_simulation": {
     "description": "启用技能成长模拟",
     "type": "bool",
@@ -1042,7 +1077,7 @@
     }
   },
   "_section_03_mai": {
-    "description": "=== 03 私聊互动 / 记忆 / 回复质感 ===",
+    "description": "=== 03 私聊理解与长期画像 ===",
     "type": "text",
     "invisible": true
   },
@@ -1051,6 +1086,11 @@
     "type": "bool",
     "hint": "开启后，被动私聊回复会在 AstrBot 默认人格之上注入互动边界、偏好/表达习惯和简短接话策略。本层不写身份事实，不替换 AstrBot 人格。",
     "default": true
+  },
+  "_section_03_memory": {
+    "description": "=== 03.1 长期偏好、表达习惯与吃什么 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_companion_memory": {
     "description": "启用用户陪伴记忆",
@@ -1157,6 +1197,11 @@
     "condition": {
       "enable_user_habit_learning": true
     }
+  },
+  "_section_03_emotion": {
+    "description": "=== 03.2 意图情绪、关系距离与主动润色 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_intent_emotion_analysis": {
     "description": "启用本地意图/情绪快判",
@@ -1430,6 +1475,11 @@
       "enable_mai_style_integration": true
     }
   },
+  "_section_03_external_memory": {
+    "description": "=== 03.3 外部记忆协同 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_livingmemory_integration": {
     "description": "启用 LivingMemory 协同",
     "type": "bool",
@@ -1444,6 +1494,11 @@
     "condition": {
       "enable_livingmemory_integration": true
     }
+  },
+  "_section_03_external_reading": {
+    "description": "=== 03.4 B站低频观看 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_bilibili_integration": {
     "description": "启用 B 站 Bot 协同",
@@ -1501,6 +1556,11 @@
     "condition": {
       "enable_bilibili_integration": true
     }
+  },
+  "_section_03_news": {
+    "description": "=== 03.5 新闻与每日热点 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_news_integration": {
     "description": "启用新闻阅读",
@@ -1671,6 +1731,11 @@
       "enable_news_integration": true
     }
   },
+  "_section_03_web": {
+    "description": "=== 03.6 网页探索 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_web_exploration": {
     "description": "启用主动搜索",
     "type": "bool",
@@ -1779,6 +1844,11 @@
       "enable_web_exploration": true
     }
   },
+  "_section_03_qzone": {
+    "description": "=== 03.7 QQ 空间发布 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_qzone_integration": {
     "description": "启用 QQ 空间动态层",
     "type": "bool",
@@ -1853,6 +1923,11 @@
     "condition": {
       "enable_qzone_generated_image_publish": true
     }
+  },
+  "_section_03_private_reading": {
+    "description": "=== 03.8 书柜夹层阅读偏好 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_private_reading_integration": {
     "description": "启用夹层阅读素材",
@@ -1990,7 +2065,7 @@
     }
   },
   "_section_04_group": {
-    "description": "=== 04 群聊陪伴 / 观察 / 插话 ===",
+    "description": "=== 04 群聊观察、唤醒与关系网 ===",
     "type": "text",
     "invisible": true
   },
@@ -2052,6 +2127,11 @@
     "condition": {
       "enable_group_companion": true
     }
+  },
+  "_section_04_forward": {
+    "description": "=== 04.1 合并消息与引用卡片阅读 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_forward_message_adaptation": {
     "description": "启用合并消息自然阅读",
@@ -2150,6 +2230,11 @@
       "forward_message_image_vision": true
     }
   },
+  "_section_04_scene": {
+    "description": "=== 04.2 群聊场景理解 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_group_scene_awareness": {
     "description": "启用群聊场景感知",
     "type": "bool",
@@ -2181,6 +2266,11 @@
     "condition": {
       "enable_group_companion": true
     }
+  },
+  "_section_04_wakeup": {
+    "description": "=== 04.3 群聊唤醒与答疑触发 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_group_wakeup_enhancement": {
     "description": "启用群聊唤醒强化",
@@ -2407,6 +2497,11 @@
       "enable_group_wakeup_enhancement": true
     }
   },
+  "_section_04_high_intensity": {
+    "description": "=== 04.4 高强度群聊收口 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_group_high_intensity_mode": {
     "description": "群聊高强度收口模式",
     "type": "bool",
@@ -2503,6 +2598,11 @@
       "enable_group_high_intensity_mode": true
     }
   },
+  "_section_04_slang": {
+    "description": "=== 04.5 群聊黑话、成员观察与话题 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_group_slang_learning": {
     "description": "启用群内黑话/梗学习",
     "type": "bool",
@@ -2578,6 +2678,11 @@
     "condition": {
       "enable_group_slang_web_search": true
     }
+  },
+  "_section_04_relationship": {
+    "description": "=== 04.6 群成员身份与关系网 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_group_relationship_graph": {
     "description": "启用群友互动图",
@@ -2664,6 +2769,11 @@
     "condition": {
       "enable_worldbook_member_recognition": true
     }
+  },
+  "_section_04_relay": {
+    "description": "=== 04.7 转述工具与跨用户记忆互通 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_atrelay_tools": {
     "description": "启用跨群转述与 @ 群友工具",
@@ -2855,6 +2965,11 @@
       "enable_group_companion": true
     }
   },
+  "_section_04_interject": {
+    "description": "=== 04.8 群聊插话与复读 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_group_interjection": {
     "description": "允许群聊主动插话",
     "type": "bool",
@@ -2994,7 +3109,7 @@
     }
   },
   "_section_05_life": {
-    "description": "=== 05 生活状态 / 日程 / 日记 / 梦境 ===",
+    "description": "=== 05 日程、状态与梦境日记 ===",
     "type": "text",
     "invisible": true
   },
@@ -3067,6 +3182,11 @@
       "enable_daily_plan": true
     }
   },
+  "_section_05_detail": {
+    "description": "=== 05.1 日程细化与当前片段 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_detail_enhancement": {
     "description": "启用日程细节强化模式",
     "type": "bool",
@@ -3127,16 +3247,21 @@
     },
     "default": 7
   },
+  "_section_05_state": {
+    "description": "=== 05.2 拟人身体状态与休息回复 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_humanized_states": {
     "description": "启用拟人化身体/梦境状态",
     "type": "bool",
-    "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
+    "hint": "生成精力、睡眠、梦境、健康、饥饿、生理期模拟等身体余波，并影响日程、主动消息和被动回复的语气节奏。",
     "default": true
   },
   "inject_passive_states": {
     "description": "被动回复前注入拟人状态",
     "type": "bool",
-    "hint": "开启后，每次普通 LLM 回复前都会注入“当前扮演状态”，只影响语气、长短和节奏，不要求模型逐项汇报状态。",
+    "hint": "开启后，普通 LLM 回复前会带上少量身体/情绪余波，只影响语气、长短和节奏，不要求模型逐项汇报状态。",
     "default": true,
     "condition": {
       "enable_humanized_states": true
@@ -3180,7 +3305,7 @@
   "enable_cycle_state": {
     "description": "启用生理期模拟",
     "type": "bool",
-    "hint": "开启后，只有当人格适合人类身体设定时，拟人身体状态才可能加入“生理期前/处于生理期/生理期后”等状态。它只影响当前扮演状态的语气、精力和节奏，不是医学记录或真实日期追踪；事件带冷却，不会每天连续重抽。",
+    "hint": "开启后，只有当人格适合人类身体设定时，拟人身体状态才可能加入“生理期前/处于生理期/生理期后”等余波。它只影响语气、精力和节奏，不是医学记录或真实日期追踪；事件带冷却，不会每天连续重抽。",
     "default": true,
     "condition": {
       "enable_humanized_states": true
@@ -3248,6 +3373,29 @@
       "enable_rest_reply_simulation": true
     }
   },
+  "enable_rest_backlog_reply": {
+    "description": "醒后补看私聊",
+    "type": "bool",
+    "hint": "开启后，休息闸门静默拦截的目标私聊会暂存为简短摘要；下一次醒来或被叫醒回复时，会自然带上这些漏看的消息作为上下文。只记录私聊，不记录群聊。",
+    "default": true,
+    "condition": {
+      "enable_rest_reply_simulation": true
+    }
+  },
+  "rest_backlog_max_messages": {
+    "description": "醒后最多补看条数",
+    "type": "int",
+    "hint": "休息期间最多暂存多少条未回复私聊。超过后只保留最近几条，避免醒后一次性塞太多旧消息。",
+    "slider": {
+      "min": 1,
+      "max": 12,
+      "step": 1
+    },
+    "default": 4,
+    "condition": {
+      "enable_rest_backlog_reply": true
+    }
+  },
   "REST_WAKEUP_PROVIDER_ID": {
     "description": "休息醒来判断模型ID",
     "type": "string",
@@ -3256,6 +3404,11 @@
     "condition": {
       "enable_rest_reply_simulation": true
     }
+  },
+  "_section_05_dream": {
+    "description": "=== 05.3 梦境余韵 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_enhanced_dreams": {
     "description": "启用强化梦境生成",
@@ -3312,7 +3465,12 @@
     }
   },
   "_section_06_actions": {
-    "description": "=== 06 媒体与外部动作 ===",
+    "description": "=== 06 媒体动作、语音与在线状态 ===",
+    "type": "text",
+    "invisible": true
+  },
+  "_section_06_photo": {
+    "description": "=== 06.1 生图、自拍与图片动作 ===",
     "type": "text",
     "invisible": true
   },
@@ -3499,6 +3657,11 @@
       "enable_photo_text_action": true
     }
   },
+  "_section_06_screen": {
+    "description": "=== 06.2 屏幕一瞥与未回应跟进 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_screen_glance_action": {
     "description": "允许主动看一眼屏幕",
     "type": "bool",
@@ -3570,6 +3733,11 @@
       "enable_unanswered_screen_peek_followup": true
     }
   },
+  "_section_06_poke": {
+    "description": "=== 06.3 戳一戳动作 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_poke_action": {
     "description": "允许主动戳一戳",
     "type": "bool",
@@ -3590,6 +3758,11 @@
       "enable_poke_action": true
     }
   },
+  "_section_06_voice": {
+    "description": "=== 06.4 主动语音入口 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_voice_action": {
     "description": "允许主动发语音",
     "type": "bool",
@@ -3599,7 +3772,7 @@
   "enable_tts_enhancement": {
     "description": "TTS强化",
     "type": "bool",
-    "hint": "支持中文聊天文本搭配外语语音块：标签外保留中文显示，<tts> 内按配置语种朗读；外语语音块后若缺少中文含义，会在发送前自动补中文释义。统一处理生成路径、标签规范化、语种控制、发送前朗读文本清洗和主用户触发。需要当前会话已配置可用的 TTS provider。",
+    "hint": "支持中文聊天文本搭配外语语音块：标签外保留中文显示，<pc_tts> 内按配置语种朗读；外语语音块后若缺少中文含义，会在发送前自动补中文释义。统一处理生成路径、语种控制、发送前朗读文本清洗和主用户触发。需要当前会话已配置可用的 TTS provider。",
     "default": false
   },
   "tts_generation_mode": {
@@ -3619,7 +3792,7 @@
     "default": "ja",
     "options": ["ja", "zh", "en"],
     "labels": ["日语", "中文", "英语"],
-    "hint": "控制 <tts> 标签内真正送入 TTS 的语种。可让标签外保留中文显示文本，标签内使用日语或英语朗读；日语模式会尽量避免把明显非日语文本直接送进 TTS，并会给缺少说明的外语语音块补中文释义。",
+    "hint": "控制 <pc_tts> 标签内真正送入 TTS 的语种。可让标签外保留中文显示文本，标签内使用日语或英语朗读；日语模式会尽量避免把明显非日语文本直接送进 TTS，并会给缺少说明的外语语音块补中文释义。",
     "condition": {
       "enable_tts_enhancement": true
     }
@@ -3728,6 +3901,11 @@
       "enable_tts_enhancement": true
     }
   },
+  "_section_06_voice_playback": {
+    "description": "=== 06.5 本机播放与直播字幕 ===",
+    "type": "text",
+    "invisible": true
+  },
   "enable_tts_local_playback": {
     "description": "TTS生成后本机播放",
     "type": "bool",
@@ -3784,6 +3962,11 @@
     "condition": {
       "enable_tts_local_playback": true
     }
+  },
+  "_section_06_auto_voice": {
+    "description": "=== 06.6 自动语音与旧版兼容 ===",
+    "type": "text",
+    "invisible": true
   },
   "auto_voice_enabled": {
     "description": "自动语音转换",
@@ -3887,6 +4070,11 @@
     "condition": {
       "enable_voice_action": true
     }
+  },
+  "_section_06_presence": {
+    "description": "=== 06.7 QQ 在线状态同步 ===",
+    "type": "text",
+    "invisible": true
   },
   "enable_qq_presence_sync": {
     "description": "允许细化模型同步 QQ 全局状态",

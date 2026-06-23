@@ -940,6 +940,8 @@ const configLabels = {
   rest_reply_mode: "休息回复判定模式",
   rest_reply_probability: "休息中概率回复(%)",
   rest_reply_llm_threshold: "模型醒来阈值",
+  enable_rest_backlog_reply: "醒后补看私聊",
+  rest_backlog_max_messages: "醒后最多补看条数",
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断模型",
   enable_cycle_state: "生理期模拟",
   worldview_adaptation_mode: "世界观适配模式",
@@ -1114,6 +1116,8 @@ const configDescriptions = {
   rest_reply_mode: "仅概率醒来只按概率放行；模型判断会让模型按消息重要性、是否明确叫醒、情绪/安全需要等打分。",
   rest_reply_probability: "仅概率醒来模式使用。越低越不容易在睡眠/休息中被普通消息叫醒。",
   rest_reply_llm_threshold: "模型判断模式使用。模型输出 0-100 分，达到该阈值才醒来回复；建议 60-75。",
+  enable_rest_backlog_reply: "休息闸门静默拦截的目标私聊会暂存成简短摘要；下一次醒来或被叫醒回复时，Bot 会像刚补看消息一样自然接上。只记录私聊，不记录群聊。",
+  rest_backlog_max_messages: "休息期间最多保留多少条未回复私聊。超过后只留最近几条，避免醒来后被旧消息淹没。",
   REST_WAKEUP_PROVIDER_ID: "可选。用于休息醒来判断的轻量模型；留空时优先使用回复审校模型，再回退主模型。",
   enable_cycle_state: "开启后，只有人格适合人类身体设定时，才可能在“当前扮演状态”里出现生理期相关状态；它只影响语气、精力和回复节奏，不是医学记录或真实日期追踪。非适用人格会自动判定不适用。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
@@ -1402,8 +1406,8 @@ const featureSettingGroups = {
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: [],
   enable_proactive_only_mode: [],
-  enable_humanized_states: ["humanized_state_intensity", "inject_passive_states", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
-  enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID"],
+  enable_humanized_states: ["humanized_state_intensity", "inject_passive_states", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
+  enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity"],
   enable_cycle_state: ["humanized_state_intensity"],
@@ -1845,6 +1849,7 @@ const featureSettingTypes = {
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
+  rest_backlog_max_messages: { type: "number", min: 1, max: 12, step: 1 },
   REST_WAKEUP_PROVIDER_ID: { type: "provider" },
   tts_voice_language: { type: "select", options: [["ja", "日语"], ["zh", "中文"], ["en", "英语"]] },
   tts_conversion_provider_id: { type: "provider" },
@@ -8975,10 +8980,14 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return Object.prototype.hasOwnProperty.call(settings, name) ? settings[name] : fallback;
   };
   if (featureKey === "enable_humanized_states") {
-    const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID"]);
+    const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
     if (restChildren.has(settingKey)) {
       const restEnabled = boolSetting("enable_rest_reply_simulation");
-      return restEnabled;
+      if (!restEnabled) return false;
+      if (settingKey === "rest_reply_probability") return String(valueSetting("rest_reply_mode", "probability")) === "probability";
+      if (["rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID"].includes(settingKey)) return String(valueSetting("rest_reply_mode", "probability")) === "llm";
+      if (settingKey === "rest_backlog_max_messages") return boolSetting("enable_rest_backlog_reply");
+      return true;
     }
     return true;
   }
