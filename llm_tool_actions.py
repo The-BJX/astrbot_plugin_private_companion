@@ -6,8 +6,10 @@ import re
 import uuid
 from typing import Any
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.event import MessageChain
+from astrbot.core.platform.message_session import MessageSession
 try:
     from astrbot.api.message_components import At, Plain
 except ImportError:
@@ -29,6 +31,17 @@ class LlmToolActionsMixin:
 - 优先传 scope=private/group、user_hint 或 group_hint；不确定时传原始称呼给 hint。
 - “最近和他私聊说了什么”传 scope=private,user_hint=对象；“他在群里说了什么”传 scope=group,user_hint=对象，有具体群再加 group_hint。
 - 回答时概括最近互动和重点即可，不要大段复述原文。
+""".strip()
+
+    def _relation_lookup_instruction(self) -> str:
+        if not (self.enabled and getattr(self, "enable_worldbook_member_recognition", False)):
+            return ""
+        return """
+【关系网查询】
+用户明确要求“查一下关系网/帮我查某个 QQ 或昵称”时，可以用 `pc_query_relation_person` 查询关系网。
+- 只用于确认是否认识和读取稳定称呼、别名、简短身份备注；不要发送消息。
+- 参数用 keyword 传 QQ 号、昵称、别名或用户原话里最像名字的部分。
+- 查不到就自然说明没在关系网里确认过，不要编造。
 """.strip()
 
     def _qzone_tool_instruction(self) -> str:
@@ -449,11 +462,23 @@ class LlmToolActionsMixin:
             return json.dumps({"status": "disabled", "message": "跨群转述工具未启用"}, ensure_ascii=False)
         group_name = kwargs.get("group_name") or kwargs.get("name") or kwargs.get("keyword") or kwargs.get("group_id") or ""
         keyword = _single_line(group_name, 80)
+        cached = self._atrelay_cached_group_matches(keyword)
+        if cached:
+            return json.dumps(
+                {
+                    "status": "success",
+                    "count": len(cached),
+                    "groups": cached[:20],
+                    "source": "local_cache",
+                    "message": "已从插件群缓存/关系网群档案匹配，未依赖平台群列表。",
+                },
+                ensure_ascii=False,
+            )
         bot = getattr(event, "bot", None)
         api = getattr(bot, "api", None)
         call_action = getattr(api, "call_action", None)
         if not callable(call_action):
-            return json.dumps({"status": "error", "message": "当前平台不支持获取群列表"}, ensure_ascii=False)
+            return json.dumps({"status": "error", "message": "当前平台不支持获取群列表，本地群缓存/关系网群档案也未命中"}, ensure_ascii=False)
         try:
             groups = await call_action("get_group_list")
             matches = []
@@ -465,6 +490,118 @@ class LlmToolActionsMixin:
             return json.dumps({"status": "success", "count": len(matches), "groups": matches[:20]}, ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"status": "error", "message": f"获取群列表失败: {_single_line(exc, 120)}"}, ensure_ascii=False)
+
+    def _relation_lookup_authorized(self, event: AstrMessageEvent) -> bool:
+        try:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
+        if not is_private:
+            return False
+        try:
+            requester_id = self._canonical_private_user_id(str(event.get_sender_id()))
+        except Exception:
+            requester_id = ""
+        requester_profile = None
+        try:
+            requester_profile = self._get_user(requester_id) if requester_id else None
+        except Exception:
+            users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+            requester_profile = users.get(requester_id) if isinstance(users, dict) else None
+        if requester_id and self._is_target_private_user(requester_id, requester_profile if isinstance(requester_profile, dict) else None):
+            return True
+        try:
+            if isinstance(requester_profile, dict) and self._private_user_role(requester_profile, requester_id) == "owner":
+                return True
+        except Exception:
+            pass
+        try:
+            allowed = bool(self._can_manage_private_companion(event))
+            if not allowed:
+                role = ""
+                try:
+                    role = self._private_user_role(requester_profile, requester_id) if isinstance(requester_profile, dict) else ""
+                except Exception:
+                    role = ""
+                logger.info(
+                    "[PrivateCompanion] 关系网查询权限未通过: private=%s sender=%s role=%s target=%s umo=%s",
+                    is_private,
+                    requester_id or "-",
+                    role or "-",
+                    bool(requester_id and self._is_target_private_user(requester_id, requester_profile if isinstance(requester_profile, dict) else None)),
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120),
+                )
+            return allowed
+        except Exception:
+            return False
+
+    def _relation_lookup_clean_keyword(self, value: Any) -> str:
+        text = _single_line(value, 120)
+        if not text:
+            return ""
+        match = re.search(r"\d{5,12}", text)
+        if match:
+            return match.group(0)
+        text = re.sub(r"(这个|那个|此人|这人|那人|用户|群友|qq号|QQ号|QQ|qq)", "", text, flags=re.I)
+        text = re.sub(r"(你认识吗|认识吗|认得吗|知道吗|是谁呀|是谁啊|是谁|什么人|哪位|吗|呀|啊|呢)", "", text)
+        return _single_line(text.strip(" ：:，,。？?"), 60)
+
+    async def _pc_query_relation_person_impl(self, event: AstrMessageEvent, **kwargs) -> str:
+        if not getattr(self, "enable_worldbook_member_recognition", False):
+            return json.dumps({"status": "disabled", "message": "关系网未启用"}, ensure_ascii=False)
+        if not self._relation_lookup_authorized(event):
+            return json.dumps({"status": "forbidden", "message": "关系网查询只允许主人/管理员在私聊中使用"}, ensure_ascii=False)
+        keyword = self._relation_lookup_clean_keyword(
+            kwargs.get("keyword")
+            or kwargs.get("name")
+            or kwargs.get("user")
+            or kwargs.get("user_id")
+            or kwargs.get("nickname")
+            or kwargs.get("query")
+            or ""
+        )
+        if not keyword:
+            return json.dumps({"status": "error", "message": "缺少要查询的 QQ 号、昵称或别名"}, ensure_ascii=False)
+
+        matches: list[dict[str, Any]] = []
+        if keyword.isdigit():
+            matches.extend(self._resolve_worldbook_member_by_name(keyword))
+            if not matches:
+                users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+                user = users.get(keyword) if isinstance(users, dict) else None
+                if isinstance(user, dict):
+                    label = _single_line(
+                        user.get("stable_name") or user.get("nickname") or user.get("display_name") or user.get("last_display_name"),
+                        60,
+                    )
+                    matches.append({"user_id": keyword, "name": label or keyword, "source": "private_user"})
+        else:
+            matches.extend(self._resolve_worldbook_member_by_name(keyword))
+            existing_ids = {str(item.get("user_id") or "") for item in matches}
+            for target in self._interaction_query_private_targets(keyword):
+                uid = _single_line(target.get("user_id"), 40)
+                if uid and uid not in existing_ids and target.get("source") != "qq":
+                    matches.append({
+                        "user_id": uid,
+                        "name": _single_line(target.get("label"), 60) or uid,
+                        "source": target.get("source") or "private_user",
+                    })
+                    existing_ids.add(uid)
+
+        if not matches:
+            logger.info("[PrivateCompanion] 关系网查询未命中: keyword=%s", keyword)
+            return json.dumps({"status": "not_found", "keyword": keyword, "message": "关系网里没有确认匹配对象"}, ensure_ascii=False)
+        status = "success" if len(matches) == 1 else "ambiguous"
+        logger.info("[PrivateCompanion] 关系网查询命中: keyword=%s count=%s", keyword, len(matches))
+        return json.dumps(
+            {
+                "status": status,
+                "keyword": keyword,
+                "count": len(matches),
+                "matches": matches[:8],
+            },
+            ensure_ascii=False,
+        )
 
     async def _pc_get_user_id_by_name_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
@@ -508,6 +645,119 @@ class LlmToolActionsMixin:
             return json.dumps({"status": "success", "group_id": target_group, "count": len(formatted), "members": formatted[:80]}, ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"status": "error", "message": f"查询群成员失败: {_single_line(exc, 120)}"}, ensure_ascii=False)
+
+    def _atrelay_platform_prefix_candidates(self, event: AstrMessageEvent) -> list[str]:
+        prefixes: list[str] = []
+
+        def add(value: Any) -> None:
+            text = _single_line(value, 80)
+            if not text:
+                return
+            prefix = text.split(":", 1)[0] if ":" in text else text
+            if prefix and prefix not in prefixes:
+                prefixes.append(prefix)
+
+        add(getattr(event, "unified_msg_origin", ""))
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+        user = users.get(sender_id) if sender_id and isinstance(users, dict) else None
+        if isinstance(user, dict):
+            add(user.get("umo"))
+        add(getattr(self, "target_platform", ""))
+        manager = getattr(getattr(self, "context", None), "platform_manager", None)
+        if manager is not None:
+            try:
+                platforms = list(manager.get_insts())
+            except Exception:
+                platforms = list(getattr(manager, "platform_insts", []) or [])
+            for platform in platforms:
+                try:
+                    meta = platform.meta()
+                except Exception:
+                    continue
+                add(getattr(meta, "id", ""))
+                add(getattr(meta, "name", ""))
+        return prefixes
+
+    def _atrelay_target_umo_candidates(self, event: AstrMessageEvent, message_type: str, target_id: str) -> list[str]:
+        target = _single_line(target_id, 40)
+        if not target:
+            return []
+        message_type = "GroupMessage" if message_type == "group" else "FriendMessage"
+        candidates: list[str] = []
+
+        def add_umo(value: Any) -> None:
+            umo = _single_line(value, 160)
+            if not umo or f":{message_type}:{target}" not in umo:
+                return
+            if umo not in candidates:
+                candidates.append(umo)
+
+        if message_type == "GroupMessage":
+            groups = self.data.get("groups") if isinstance(self.data.get("groups"), dict) else {}
+            group = groups.get(target) if isinstance(groups, dict) else None
+            if isinstance(group, dict):
+                add_umo(group.get("umo"))
+        else:
+            users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+            user = users.get(target) if isinstance(users, dict) else None
+            if isinstance(user, dict):
+                add_umo(user.get("umo"))
+        for prefix in self._atrelay_platform_prefix_candidates(event):
+            add_umo(f"{prefix}:{message_type}:{target}")
+        return candidates
+
+    async def _send_atrelay_chain_to_target(
+        self,
+        event: AstrMessageEvent,
+        *,
+        message_type: str,
+        target_id: str,
+        chain: list[Any],
+    ) -> tuple[bool, str, str]:
+        errors: list[str] = []
+        candidates = self._atrelay_target_umo_candidates(event, message_type, target_id)
+        if not candidates:
+            return False, "没有可用目标会话", ""
+        for umo in candidates:
+            session = self._parse_message_session(umo)
+            platform = self._get_platform_for_session(session) if session else None
+            if session and platform:
+                try:
+                    session_obj = MessageSession(
+                        platform_name=str(getattr(session, "platform_id", "") or ""),
+                        message_type=self._message_type_for_session(session),
+                        session_id=str(getattr(session, "session_id", "") or ""),
+                    )
+                    await platform.send_by_session(session_obj, MessageChain(chain))
+                    logger.info("[PrivateCompanion] 转述已通过精确平台发送: umo=%s", _single_line(umo, 160))
+                    return True, "", umo
+                except Exception as exc:
+                    errors.append(f"{umo}: 精确发送失败 {self._format_send_exception(exc)}")
+                try:
+                    result = await self.context.send_message(umo, MessageChain(chain))
+                    if result is not False:
+                        logger.info("[PrivateCompanion] 转述已通过 AstrBot 核心发送: umo=%s", _single_line(umo, 160))
+                        return True, "", umo
+                    errors.append(f"{umo}: 核心发送返回 False")
+                except Exception as exc:
+                    errors.append(f"{umo}: 核心发送失败 {self._format_send_exception(exc)}")
+            elif session:
+                errors.append(f"{umo}: 未找到匹配平台，跳过 AstrBot 核心发送")
+            else:
+                errors.append(f"{umo}: UMO 无法解析，跳过 AstrBot 核心发送")
+            try:
+                direct_ok, direct_error = await self._send_chain_components_via_onebot_direct(umo, session, chain)
+            except Exception as exc:
+                direct_ok, direct_error = False, self._format_send_exception(exc)
+            if direct_ok:
+                return True, "", umo
+            if direct_error:
+                errors.append(f"{umo}: OneBot 兜底失败 {direct_error}")
+        return False, "；".join(errors[-5:]) or "所有发送链路都失败", candidates[0]
 
     async def _pc_relay_message_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
@@ -568,11 +818,46 @@ class LlmToolActionsMixin:
         if destination == "auto":
             return json.dumps({"status": "need_target", "message": "需要说明发到哪个群或私聊给谁"}, ensure_ascii=False)
 
+        boundary = self._atrelay_boundary_guard(text)
+        if boundary:
+            return json.dumps({"status": "error", "message": boundary}, ensure_ascii=False)
+        guard = self._atrelay_confirmation_guard(
+            text,
+            relay_mode=self._normalize_atrelay_relay_mode(relay_mode),
+            sensitive_confirmed=self._atrelay_bool_flag(sensitive_confirmed) or self._atrelay_event_confirms_sensitive_send(event),
+        )
+        if guard:
+            return json.dumps({"status": "need_confirm", "message": guard}, ensure_ascii=False)
+
         if destination == "group":
-            group_result = await self._resolve_atrelay_target_group(event, group_hint)
+            group_result = {}
+            current_group_id = self._extract_group_id_from_event(event)
+            if not _single_line(group_hint, 80) and recipient:
+                group_result = await self._resolve_atrelay_active_group_for_recipient(
+                    event,
+                    recipient,
+                    exclude_current_group=bool(current_group_id),
+                )
+            if not _single_line(group_hint, 80) and current_group_id and not group_result:
+                return json.dumps(
+                    {
+                        "status": "need_group",
+                        "message": "需要补充要发到哪个群；群聊里不会默认发回当前群。",
+                    },
+                    ensure_ascii=False,
+                )
+            if not group_result:
+                group_result = await self._resolve_atrelay_target_group(event, group_hint)
             if group_result.get("status") != "success":
                 return json.dumps(group_result, ensure_ascii=False)
             group_id = _single_line(group_result.get("group_id"), 40)
+            send_text = await self._rewrite_atrelay_message_with_llm(
+                event,
+                destination="group",
+                recipient_hint=recipient,
+                text=text,
+                relay_mode=relay_mode,
+            )
             if delay_until_seen:
                 if not recipient:
                     return json.dumps({"status": "need_recipient", "message": "延迟转述需要目标群友"}, ensure_ascii=False)
@@ -580,7 +865,7 @@ class LlmToolActionsMixin:
                     event,
                     group_id=group_id,
                     at_user=recipient,
-                    message=text,
+                    message=send_text,
                     relay_mode=relay_mode,
                     sensitive_confirmed=sensitive_confirmed,
                     expire_hours=expire_hours,
@@ -589,17 +874,31 @@ class LlmToolActionsMixin:
             result = await self._pc_send_to_group_impl(
                 event,
                 group_id=group_id,
-                message=text,
+                message=send_text,
                 at_user=recipient if (recipient and (at_recipient or recipient)) else "",
                 relay_mode=relay_mode,
                 sensitive_confirmed=sensitive_confirmed,
             )
             ok = result.startswith("消息已发送")
+            if ok:
+                setattr(
+                    event,
+                    "private_companion_atrelay_tool_result",
+                    {
+                        "status": "success",
+                        "destination": "group",
+                        "final_reply": "说过啦。",
+                        "sent_text": send_text,
+                        "recipient": recipient,
+                        "group_id": group_id,
+                    },
+                )
             return json.dumps(
                 {
                     "status": "success" if ok else "error",
                     "message": result,
                     "final_reply": "消息已发送。" if ok else "",
+                    "sent_text": send_text if ok else "",
                 },
                 ensure_ascii=False,
             )
@@ -608,19 +907,24 @@ class LlmToolActionsMixin:
         if not target_user:
             return json.dumps({"status": "need_recipient", "message": "需要补充私聊目标 QQ 或称呼"}, ensure_ascii=False)
         if not target_user.isdigit():
-            group_result = await self._resolve_atrelay_target_group(event, group_hint)
+            resolved = await self._resolve_atrelay_target_user(event, "", target_user)
+            if not resolved.get("user_id") and not resolved.get("ambiguous"):
+                group_result = await self._resolve_atrelay_target_group(event, group_hint)
+            else:
+                group_result = {}
             group_id = _single_line(group_result.get("group_id"), 40) if group_result.get("status") == "success" else ""
             if not group_id and self._extract_group_id_from_event(event):
                 group_id = self._extract_group_id_from_event(event)
-            if not group_id:
+            if not resolved.get("user_id") and not resolved.get("ambiguous") and not group_id:
                 return json.dumps(
                     {
                         "status": "need_group_or_qq",
-                        "message": "按昵称私聊需要目标所在群号/群名，或直接提供 QQ。",
+                        "message": "关系网里没有唯一确认这个称呼；请补充目标所在群号/群名，或直接提供 QQ。",
                     },
                     ensure_ascii=False,
                 )
-            resolved = await self._resolve_atrelay_target_user(event, group_id, target_user)
+            if not resolved.get("user_id") and not resolved.get("ambiguous"):
+                resolved = await self._resolve_atrelay_target_user(event, group_id, target_user)
             if resolved.get("ambiguous"):
                 return json.dumps(
                     {
@@ -633,10 +937,17 @@ class LlmToolActionsMixin:
             target_user = _single_line(resolved.get("user_id"), 40)
             if not target_user:
                 return json.dumps({"status": "not_found", "message": "未找到私聊目标"}, ensure_ascii=False)
+        send_text = await self._rewrite_atrelay_message_with_llm(
+            event,
+            destination="private",
+            recipient_hint=target_user,
+            text=text,
+            relay_mode=relay_mode,
+        )
         result = await self._pc_send_to_private_user_impl(
             event,
             user_id=target_user,
-            message=text,
+            message=send_text,
             relay_mode=relay_mode,
             sensitive_confirmed=sensitive_confirmed,
             need_receipt=need_receipt,
@@ -644,11 +955,24 @@ class LlmToolActionsMixin:
             receipt_expire_hours=expire_hours,
         )
         ok = result.startswith("已向")
+        if ok:
+            setattr(
+                event,
+                "private_companion_atrelay_tool_result",
+                {
+                    "status": "success",
+                    "destination": "private",
+                    "final_reply": "说过啦。" if not need_receipt else "说过啦，有回复我再告诉你。",
+                    "sent_text": send_text,
+                    "recipient": target_user,
+                },
+            )
         return json.dumps(
             {
                 "status": "success" if ok else "error",
                 "message": result,
                 "final_reply": "消息已发送，会等对方回复。" if ok and need_receipt else ("消息已发送。" if ok else ""),
+                "sent_text": send_text if ok else "",
             },
             ensure_ascii=False,
         )
@@ -698,19 +1022,33 @@ class LlmToolActionsMixin:
             resting = self._atrelay_target_resting_reason(at_qq)
             if resting:
                 return f"发送失败：{resting}，不会在群里继续 @ 打扰；可以改用延迟转述，等对方出现时再说。"
-        platform = str(getattr(event, "unified_msg_origin", "") or "").split(":")[0] or self.target_platform or "aiocqhttp"
-        target_umo = f"{platform}:GroupMessage:{target_group}"
         chain: list[Any] = []
         if at_qq:
             chain.extend([At(qq=at_qq), Plain(" ")])
         chain.append(Plain(text))
-        try:
-            await self.context.send_message(target_umo, MessageChain(chain))
-            self._note_atrelay_send("group", target_group, text, at_qq or at_user)
-            self._save_data_sync()
-            return f"消息已发送到群 {target_group}" + (f", 已 @ {at_label or at_qq}" if at_qq else "")
-        except Exception as exc:
-            return f"发送失败：{_single_line(exc, 160)}"
+        ok, error, used_umo = await self._send_atrelay_chain_to_target(
+            event,
+            message_type="group",
+            target_id=target_group,
+            chain=chain,
+        )
+        if not ok:
+            logger.warning(
+                "[PrivateCompanion] 跨群转述发送失败: group=%s at=%s error=%s",
+                target_group,
+                at_qq or at_user or "-",
+                _single_line(error, 240),
+            )
+            return f"发送失败：{_single_line(error, 180)}"
+        self._note_atrelay_send("group", target_group, text, at_qq or at_user)
+        self._save_data_sync()
+        logger.info(
+            "[PrivateCompanion] 跨群转述发送完成: group=%s at=%s umo=%s",
+            target_group,
+            at_qq or at_user or "-",
+            _single_line(used_umo, 160),
+        )
+        return f"消息已发送到群 {target_group}" + (f", 已 @ {at_label or at_qq}" if at_qq else "")
 
     async def _pc_send_to_private_user_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
@@ -749,23 +1087,36 @@ class LlmToolActionsMixin:
         )
         if guard:
             return guard
-        platform = str(getattr(event, "unified_msg_origin", "") or "").split(":")[0] or self.target_platform or "aiocqhttp"
-        try:
-            await self.context.send_message(f"{platform}:FriendMessage:{target_user}", MessageChain([Plain(text)]))
-            self._note_atrelay_send("private", target_user, text)
-            if need_receipt:
-                self._note_atrelay_private_receipt_task(
-                    event,
-                    target_user=target_user,
-                    question=text,
-                    sent_text=text,
-                    confirm_before_report=confirm_before_report,
-                    expire_hours=receipt_expire_hours,
-                )
-            self._save_data_sync()
-            return f"已向 {target_user} 发送私聊消息" + ("，会等待对方回复后带回回执" if need_receipt else "")
-        except Exception as exc:
-            return f"私聊发送失败：{_single_line(exc, 160)}"
+        ok, error, used_umo = await self._send_atrelay_chain_to_target(
+            event,
+            message_type="private",
+            target_id=target_user,
+            chain=[Plain(text)],
+        )
+        if not ok:
+            logger.warning(
+                "[PrivateCompanion] 私聊转述发送失败: user=%s error=%s",
+                target_user,
+                _single_line(error, 240),
+            )
+            return f"私聊发送失败：{_single_line(error, 180)}"
+        self._note_atrelay_send("private", target_user, text)
+        if need_receipt:
+            self._note_atrelay_private_receipt_task(
+                event,
+                target_user=target_user,
+                question=text,
+                sent_text=text,
+                confirm_before_report=confirm_before_report,
+                expire_hours=receipt_expire_hours,
+            )
+        self._save_data_sync()
+        logger.info(
+            "[PrivateCompanion] 私聊转述发送完成: user=%s umo=%s",
+            target_user,
+            _single_line(used_umo, 160),
+        )
+        return f"已向 {target_user} 发送私聊消息" + ("，会等待对方回复后带回回执" if need_receipt else "")
 
     async def _pc_send_to_groups_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         group_ids = kwargs.get("group_ids") or kwargs.get("groups") or kwargs.get("group_id") or kwargs.get("targets") or ""

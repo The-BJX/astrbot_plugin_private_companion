@@ -7788,6 +7788,7 @@ class DailyStateMixin:
 
             planned_action_for_send = str(user.get("planned_proactive_action") or "message")
             planned_motive_for_send = _single_line(user.get("planned_proactive_motive"), 140)
+            planned_topic_for_send = _single_line(user.get("planned_proactive_topic"), 80)
             planned_chain_for_send = (
                 list(user.get("planned_event_chain") or [])
                 if isinstance(user.get("planned_event_chain"), list)
@@ -8154,8 +8155,8 @@ class DailyStateMixin:
                 reason_detail = "；".join(
                     item
                     for item in (
-                        f"话题={_single_line(topic, 80)}" if _single_line(topic, 80) else "",
-                        f"动机={_single_line(motive, 100)}" if _single_line(motive, 100) else "",
+                        f"话题={planned_topic_for_send}" if planned_topic_for_send else "",
+                        f"动机={planned_motive_for_send}" if planned_motive_for_send else "",
                     )
                     if item
                 )

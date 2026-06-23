@@ -1011,6 +1011,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.atrelay_require_worldbook_first = self._cfg_bool(c, "atrelay_require_worldbook_first", True)
         self.atrelay_member_cache_minutes = self._cfg_int(c, "atrelay_member_cache_minutes", 60, 1, 1440)
         self.atrelay_sensitive_confirm = self._cfg_bool(c, "atrelay_sensitive_confirm", True)
+        self.enable_atrelay_llm_rewrite = self._cfg_bool(c, "enable_atrelay_llm_rewrite", True)
         self.atrelay_default_relay_style = self._cfg_str(c, "atrelay_default_relay_style", "persona", "persona")
         self.atrelay_multi_target_limit = self._cfg_int(c, "atrelay_multi_target_limit", 5, 1, 20)
         self.worldbook_auto_import = self._cfg_bool(c, "worldbook_auto_import", True)
@@ -2359,6 +2360,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_get_user_id_by_name_impl(event, **kwargs)
 
+    @filter.llm_tool(name="pc_query_relation_person")
+    async def pc_query_relation_person(self, event: AstrMessageEvent, **kwargs) -> str:
+        """查询关系网里是否认识某个 QQ、昵称或别名。
+
+        Args:
+            keyword(string): QQ 号、昵称、别名，或用户原话里最像名字的部分。
+        """
+        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
+        return await self._pc_query_relation_person_impl(event, **kwargs)
+
     @filter.llm_tool(name="pc_get_specified_group_members")
     async def pc_get_specified_group_members(self, event: AstrMessageEvent, **kwargs) -> str:
         """查询指定群成员,并标记是否已在关系网中登记。
@@ -2774,11 +2786,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         atrelay_marker = "<!-- private_companion_atrelay_tools_v1 -->"
         if atrelay_instruction and atrelay_marker not in current_prompt and atrelay_marker not in current_turn_prompt:
-            if any(token in message_text for token in (
-                "发到", "发给", "告诉", "转告", "转达", "带话", "捎话", "通知", "私聊",
-                "帮我", "替我", "你去", "跟他说", "和他说", "跟她说", "和她说", "说一声",
-                "@", "艾特", "群友", "群里", "群聊", "出现", "冒泡", "上线",
-            )):
+            if self._message_looks_like_atrelay_request(message_text):
+                await self._append_atrelay_target_summary_to_request(event, req)
+                current_prompt = req.system_prompt or ""
+                current_turn_prompt = str(getattr(req, "prompt", "") or "")
                 placement = "prompt" if self._append_turn_prompt_fragment_by_position(
                     req,
                     atrelay_marker,
@@ -2798,6 +2809,42 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     mode="conditional",
                     metadata={"注入位置": placement},
                 )
+        relation_instruction = self._relation_lookup_instruction()
+        current_prompt = req.system_prompt or ""
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        relation_marker = "<!-- private_companion_relation_lookup_v1 -->"
+        try:
+            relation_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            relation_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
+        relation_query = any(token in message_text for token in ("查关系网", "关系网查", "查一下关系", "查查关系"))
+        relation_query = relation_query or (
+            any(token in message_text for token in ("查一下", "查查", "帮我查", "查一查"))
+            and (
+                bool(re.search(r"\d{5,12}", message_text))
+                or any(token in message_text for token in ("这个人", "这人", "那个人", "那人", "是谁", "认识"))
+            )
+        )
+        if relation_private and relation_instruction and relation_marker not in current_prompt and relation_marker not in current_turn_prompt and relation_query:
+            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                req,
+                relation_marker,
+                relation_instruction,
+                priority=87,
+                source="tools",
+            ) else "system_prompt"
+            if placement == "system_prompt":
+                current_prompt = f"{current_prompt}\n\n{relation_marker}\n{relation_instruction}".strip()
+                req.system_prompt = current_prompt
+            await self._record_request_prompt_fragment(
+                event,
+                title="关系网查询工具注入",
+                key="tools.relation_lookup",
+                text=relation_instruction,
+                source="tools",
+                mode="conditional",
+                metadata={"注入位置": placement},
+            )
         qzone_instruction = self._qzone_tool_instruction()
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -3097,6 +3144,392 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             text=guard_text,
             source="identity",
             mode="private",
+        )
+
+    def _message_looks_like_atrelay_request(self, text: str) -> bool:
+        text = str(text or "")
+        return any(token in text for token in (
+            "发到", "发给", "告诉", "转告", "转达", "带话", "捎话", "通知", "私聊",
+            "帮我", "替我", "你去", "跟他说", "和他说", "跟她说", "和她说", "说一声",
+            "@", "艾特", "群友", "群里", "群聊", "出现", "冒泡", "上线",
+        ))
+
+    def _format_atrelay_target_summary_for_prompt(self, text: str) -> str:
+        if not (self.enabled and self.enable_atrelay_tools):
+            return ""
+        text = str(text or "")
+        if not self._message_looks_like_atrelay_request(text):
+            return ""
+        lines = ["【本轮转述目标摘要】"]
+        has_signal = False
+        group_expected = any(token in text for token in ("群里", "群聊", "发到", "发群", "群"))
+        member_expected = any(token in text for token in ("找", "告诉", "转告", "转达", "跟", "和", "给", "@", "艾特", "私聊", "说一句", "说一声"))
+
+        group_matches = self._atrelay_cached_group_matches(text)
+        if group_matches:
+            has_signal = True
+            if len(group_matches) == 1:
+                group = group_matches[0]
+                lines.append(
+                    "目标群候选：确定｜"
+                    f"{_single_line(group.get('group_name'), 60) or group.get('group_id')}（群号:{_single_line(group.get('group_id'), 40)}）"
+                    f"｜来源:{_single_line(group.get('source'), 30) or 'local'}"
+                )
+            else:
+                parts = [
+                    f"{_single_line(item.get('group_name'), 40) or item.get('group_id')}（{_single_line(item.get('group_id'), 40)}）"
+                    for item in group_matches[:5]
+                ]
+                lines.append("目标群候选：多个｜" + "；".join(parts))
+        elif group_expected:
+            has_signal = True
+            lines.append("目标群候选：未命中｜用户可能还需要补充群名或群号。")
+
+        member_profiles = self._select_worldbook_member_profiles_for_private_text(text, limit=5)
+        if member_profiles:
+            has_signal = True
+            if len(member_profiles) == 1:
+                profile = member_profiles[0]
+                uid = _single_line(profile.get("user_id"), 40)
+                name = _single_line(profile.get("name"), 40) or uid
+                identity = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), 100)
+                parts = [f"{name}（QQ:{uid or '-'}）"]
+                if identity:
+                    parts.append(f"身份:{identity}")
+                lines.append("目标成员候选：确定｜" + "｜".join(parts))
+            else:
+                parts = [
+                    f"{_single_line(profile.get('name'), 32) or _single_line(profile.get('user_id'), 40)}"
+                    f"（{_single_line(profile.get('user_id'), 40) or '-'}）"
+                    for profile in member_profiles[:5]
+                ]
+                lines.append("目标成员候选：多个｜" + "；".join(parts))
+        elif member_expected:
+            has_signal = True
+            lines.append("目标成员候选：未命中｜没有从关系网里确定收话人。")
+
+        if not has_signal:
+            return ""
+        lines.append("这些只是本轮目标解析线索；真正发送仍以用户明确要求和工具执行结果为准。")
+        return "\n".join(lines)
+
+    def _parse_direct_atrelay_request(self, text: str) -> dict[str, Any]:
+        cleaned = _single_line(text, 260)
+        if not cleaned or not self._message_looks_like_atrelay_request(cleaned):
+            return {}
+        destination = ""
+        if "私聊" in cleaned or "私信" in cleaned:
+            destination = "private"
+        elif any(token in cleaned for token in ("群里", "群聊", "发到群", "发群", "到群里", "去群里")):
+            destination = "group"
+        if not destination:
+            return {}
+
+        profiles = self._select_worldbook_member_profiles_for_private_text(cleaned, limit=3)
+        if len(profiles) != 1:
+            return {}
+        profile = profiles[0]
+        recipient_id = _single_line(profile.get("user_id"), 40)
+        recipient_name = _single_line(profile.get("name"), 40) or recipient_id
+        tokens = sorted(
+            [token for token in self._worldbook_profile_tokens(profile) if token and token in cleaned],
+            key=len,
+            reverse=True,
+        )
+        target_token = tokens[0] if tokens else recipient_name
+        if not target_token or target_token not in cleaned:
+            return {}
+
+        _, after = cleaned.split(target_token, 1)
+        after = re.sub(r"^(?:说一句|说一声|说下|说|告诉|转告|带话|发|：|:|，|,|\s)+", "", after).strip()
+        if not after:
+            # “告诉 A B”这类没有“说一句”的短命令，目标后面的内容就是正文。
+            after = cleaned[cleaned.find(target_token) + len(target_token):].strip()
+        message = _single_line(after, 300).strip(" ：:，,。")
+        if not message:
+            return {}
+
+        group_hint = ""
+        if destination == "group":
+            group_matches = self._atrelay_cached_group_matches(cleaned)
+            if len(group_matches) == 1:
+                group_hint = _single_line(group_matches[0].get("group_id") or group_matches[0].get("group_name"), 80)
+        return {
+            "destination": destination,
+            "recipient_hint": recipient_id or recipient_name or target_token,
+            "group_hint": group_hint,
+            "message": message,
+            "target_token": target_token,
+        }
+
+    def _pending_atrelay_requests(self) -> dict[str, Any]:
+        pending = self.data.setdefault("pending_atrelay_requests", {})
+        if not isinstance(pending, dict):
+            pending = {}
+            self.data["pending_atrelay_requests"] = pending
+        now = _now_ts()
+        expired = [
+            key for key, item in pending.items()
+            if not isinstance(item, dict) or now - _safe_float(item.get("ts"), 0) > 10 * 60
+        ]
+        for key in expired:
+            pending.pop(key, None)
+        return pending
+
+    def _store_pending_atrelay_request(self, user_id: str, payload: dict[str, Any], reason: str = "") -> None:
+        uid = _single_line(user_id, 40)
+        if not uid or not isinstance(payload, dict):
+            return
+        pending = self._pending_atrelay_requests()
+        pending[uid] = {
+            "ts": _now_ts(),
+            "payload": {
+                "destination": _single_line(payload.get("destination"), 20),
+                "recipient_hint": _single_line(payload.get("recipient_hint"), 80),
+                "group_hint": _single_line(payload.get("group_hint"), 80),
+                "message": _single_line(payload.get("message"), 300),
+                "target_token": _single_line(payload.get("target_token"), 80),
+            },
+            "reason": _single_line(reason, 120),
+        }
+        self._save_data_sync()
+        logger.info(
+            "[PrivateCompanion] 转述请求等待补群: user=%s target=%s text=%s reason=%s",
+            uid,
+            _single_line(payload.get("recipient_hint"), 80),
+            _single_line(payload.get("message"), 80),
+            _single_line(reason, 120),
+        )
+
+    async def _format_direct_atrelay_final_reply(
+        self,
+        event: AstrMessageEvent,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+    ) -> str:
+        status = _single_line(result.get("status"), 40)
+        fallback = _single_line(result.get("final_reply") or result.get("message"), 240)
+        if status not in {"success", "scheduled"}:
+            return fallback or "转述没有成功。"
+        recipient = _single_line(payload.get("target_token") or payload.get("recipient_hint"), 60) or "对方"
+        if status == "scheduled":
+            return f"好，等{recipient}冒泡我再说。"
+        if recipient and recipient not in {"对方", "群里"}:
+            templates = [
+                f"跟{recipient}说过啦。",
+                f"已经和{recipient}说啦。",
+                f"嗯，给{recipient}带到啦。",
+            ]
+        else:
+            templates = ["说过啦。", "带到啦。", "发过去啦。"]
+        try:
+            index = abs(hash((_single_line(payload.get("message"), 80), recipient, _single_line(payload.get("destination"), 20)))) % len(templates)
+        except Exception:
+            index = 0
+        return templates[index]
+
+    async def _send_direct_atrelay_result_reply(
+        self,
+        event: AstrMessageEvent,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        reply = await self._format_direct_atrelay_final_reply(event, payload, result)
+        await event.send(event.plain_result(reply))
+
+    async def _maybe_resume_pending_atrelay_request(self, event: AstrMessageEvent, user_id: str, text: str) -> bool:
+        uid = _single_line(user_id, 40)
+        pending = self._pending_atrelay_requests()
+        item = pending.get(uid)
+        if not isinstance(item, dict):
+            return False
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if not payload or _single_line(payload.get("destination"), 20) != "group":
+            pending.pop(uid, None)
+            return False
+        hint = _single_line(text, 100)
+        if not hint:
+            return False
+        group_result = await self._resolve_atrelay_target_group(event, hint)
+        if group_result.get("status") != "success":
+            return False
+        payload = dict(payload)
+        payload["group_hint"] = _single_line(group_result.get("group_id") or hint, 80)
+        result_raw = await self._pc_relay_message_impl(event, **payload)
+        try:
+            result = json.loads(result_raw)
+        except Exception:
+            result = {"status": "error", "message": _single_line(result_raw, 240)}
+        pending.pop(uid, None)
+        self._save_data_sync()
+        logger.info(
+            "[PrivateCompanion] 已用补充群名续发转述: user=%s group=%s status=%s target=%s",
+            uid,
+            _single_line(group_result.get("group_id"), 40),
+            _single_line(result.get("status"), 40),
+            _single_line(payload.get("recipient_hint"), 80),
+        )
+        await self._send_direct_atrelay_result_reply(event, payload, result)
+        event.stop_event()
+        return True
+
+    async def _maybe_handle_direct_atrelay_request(self, event: AstrMessageEvent, text: str) -> bool:
+        payload = self._parse_direct_atrelay_request(text)
+        if not payload:
+            return False
+        result_raw = await self._pc_relay_message_impl(event, **payload)
+        try:
+            result = json.loads(result_raw)
+        except Exception:
+            result = {"status": "error", "message": _single_line(result_raw, 240)}
+        status = _single_line(result.get("status"), 40)
+        if status in {"need_group", "not_found"} and _single_line(payload.get("destination"), 20) == "group":
+            self._store_pending_atrelay_request(str(event.get_sender_id()), payload, _single_line(result.get("message"), 120))
+        logger.info(
+            "[PrivateCompanion] 明确转述请求已本地直通: status=%s destination=%s target=%s text=%s",
+            status or "-",
+            _single_line(payload.get("destination"), 20),
+            _single_line(payload.get("recipient_hint"), 40),
+            _single_line(payload.get("message"), 80),
+        )
+        await self._send_direct_atrelay_result_reply(event, payload, result)
+        event.stop_event()
+        return True
+
+    def _text_looks_like_relation_lookup_question(self, text: str) -> bool:
+        cleaned = _single_line(text, 180)
+        if not cleaned:
+            return False
+        compact = re.sub(r"\s+", "", cleaned)
+        has_query_word = any(
+            token in compact
+            for token in (
+                "认识吗",
+                "认得吗",
+                "知道吗",
+                "是谁",
+                "哪位",
+                "什么人",
+                "这个人",
+                "这人",
+                "那个人",
+                "那人",
+                "qq号",
+                "QQ号",
+                "QQ",
+                "qq",
+            )
+        )
+        if re.search(r"\d{5,12}", compact):
+            return has_query_word
+        if has_query_word:
+            try:
+                return bool(self._select_worldbook_member_profiles_for_private_text(compact, limit=1))
+            except Exception:
+                return True
+        return False
+
+    async def _private_reply_only_relation_lookup_text(self, event: AstrMessageEvent) -> str:
+        try:
+            message_id, raw_message = await self._reply_raw_message_for_event(event)
+        except Exception as exc:
+            logger.info("[PrivateCompanion] 私聊引用关系网问题预读取失败: %s", _single_line(exc, 120))
+            return ""
+        if raw_message is None:
+            return ""
+        try:
+            info = self._extract_reply_rich_card_info(raw_message)
+        except Exception as exc:
+            logger.info("[PrivateCompanion] 私聊引用关系网问题解析失败: message_id=%s error=%s", message_id or "-", _single_line(exc, 120))
+            return ""
+        texts = [_single_line(item, 120) for item in info.get("texts", []) if _single_line(item, 120)]
+        if not texts:
+            return ""
+        quoted_text = _single_line("；".join(texts[:3]), 180)
+        if not self._text_looks_like_relation_lookup_question(quoted_text):
+            return ""
+        logger.info(
+            "[PrivateCompanion] 私聊纯引用关系网问题已补触发文本: message_id=%s text=%s",
+            message_id or "-",
+            _single_line(quoted_text, 120),
+        )
+        return quoted_text
+
+    async def _append_atrelay_target_summary_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> bool:
+        text = str(
+            getattr(event, "private_companion_group_text", "")
+            or getattr(event, "message_str", "")
+            or ""
+        )
+        summary = self._format_atrelay_target_summary_for_prompt(text)
+        if not summary:
+            return False
+        marker = "<!-- private_companion_atrelay_target_summary_v1 -->"
+        current_prompt = req.system_prompt or ""
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        if marker in current_prompt or marker in current_turn_prompt:
+            return True
+        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            req,
+            marker,
+            summary,
+            priority=86,
+            source="tools",
+        ) else "system_prompt"
+        if placement == "system_prompt":
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{summary}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="本轮转述目标摘要",
+            key="tools.atrelay.targets",
+            text=summary,
+            source="tools",
+            mode="conditional",
+            metadata={"注入位置": placement},
+        )
+        return True
+
+    async def _append_worldbook_mentions_to_request(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *,
+        mode: str = "conditional",
+    ) -> None:
+        if not bool(getattr(self, "enable_worldbook_member_recognition", False)):
+            return
+        text = str(
+            getattr(event, "private_companion_group_text", "")
+            or getattr(event, "message_str", "")
+            or ""
+        )
+        if self._format_atrelay_target_summary_for_prompt(text):
+            return
+        mention_text = self._format_worldbook_private_mentions_for_prompt(text, limit=4)
+        if not mention_text:
+            return
+        marker = "<!-- private_companion_worldbook_mentions_v1 -->"
+        current_prompt = req.system_prompt or ""
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        if marker in current_prompt or marker in current_turn_prompt:
+            return
+        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            req,
+            marker,
+            mention_text,
+            priority=58,
+            source="worldbook",
+        ) else "system_prompt"
+        if placement == "system_prompt":
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{mention_text}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="本轮关系网提及注入",
+            key="worldbook.mentions",
+            text=mention_text,
+            source="worldbook",
+            mode=mode,
+            metadata={"注入位置": placement},
         )
 
     def _request_context_text_size(self, value: Any, *, depth: int = 0) -> int:
@@ -3667,6 +4100,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 backlog_user = self.data.get("users", {}).get(backlog_user_id) if backlog_user_id else None
                 if isinstance(backlog_user, dict):
                     await self._append_rest_reply_backlog_to_request(event, req, backlog_user)
+            await self._append_worldbook_mentions_to_request(event, req, mode="light")
             await self._append_conditional_tool_instructions_to_request(event, req)
             await self._append_environment_perception_to_request(event, req)
             return
@@ -3839,6 +4273,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         identity_anchor = self._format_private_identity_anchor_for_prompt(user_id, current_user, event)
         if identity_anchor:
             prompt_surface.add("identity.anchor", identity_anchor, priority=10, source="identity")
+        if not self._format_atrelay_target_summary_for_prompt(inbound_text):
+            mentioned_worldbook = self._format_worldbook_private_mentions_for_prompt(inbound_text, limit=4)
+            if mentioned_worldbook:
+                prompt_surface.add("worldbook.mentions", mentioned_worldbook, priority=55, source="worldbook")
         environment_fragment = await self._format_passive_environment_fragment(event, lightweight=lightweight_passive)
         if environment_fragment:
             prompt_surface.add(
@@ -4893,6 +5331,17 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     _single_line(forward_id, 40) or "inline",
                     bool(forward_payload),
                 )
+        if not text and not forward_only_prompt:
+            quoted_relation_text = await self._private_reply_only_relation_lookup_text(event)
+            if quoted_relation_text:
+                text = quoted_relation_text
+                try:
+                    event.message_str = quoted_relation_text
+                    message_obj = getattr(event, "message_obj", None)
+                    if message_obj is not None:
+                        setattr(message_obj, "message_str", quoted_relation_text)
+                except Exception:
+                    pass
         if not text and not forward_only_prompt and not self._private_event_has_image(event):
             component_types: list[str] = []
             try:
@@ -4919,6 +5368,22 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         raw_users = self.data.get("users", {})
         fast_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
         fast_target_user = isinstance(fast_user, dict) and self._is_target_private_user(user_id, fast_user) and bool(fast_user.get("enabled", True))
+        if (
+            fast_target_user
+            and text
+            and not forward_only_prompt
+            and not reference_media_with_text
+            and await self._maybe_resume_pending_atrelay_request(event, user_id, text)
+        ):
+            return
+        if (
+            fast_target_user
+            and text
+            and not forward_only_prompt
+            and not reference_media_with_text
+            and await self._maybe_handle_direct_atrelay_request(event, text)
+        ):
+            return
         if (
             fast_target_user
             and text
@@ -5328,6 +5793,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 event.stop_event()
                 return
             group = self._get_group(group_id)
+            group["umo"] = _single_line(getattr(event, "unified_msg_origin", ""), 160)
             _, resting_mention_notice = self._group_resting_mention_notice(
                 event,
                 group,

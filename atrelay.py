@@ -321,6 +321,79 @@ class AtRelayMixin:
         hit = hits[0]
         return {"user_id": hit.get("user_id", ""), "name": hit.get("relation_name") or hit.get("group_card") or hit.get("nickname") or hit.get("user_id"), "source": "group_member_list"}
 
+    def _atrelay_active_group_candidates_for_user(self, user_id: str, *, exclude_group_id: str = "") -> list[dict[str, Any]]:
+        uid = _single_line(user_id, 40)
+        if not uid:
+            return []
+        excluded = _single_line(exclude_group_id, 40)
+        groups = self.data.get("groups") if isinstance(self.data.get("groups"), dict) else {}
+        group_profiles = self.data.get("worldbook_group_profiles") if isinstance(self.data.get("worldbook_group_profiles"), dict) else {}
+        candidates: list[dict[str, Any]] = []
+        for group_id, group in groups.items():
+            if not isinstance(group, dict):
+                continue
+            gid = _single_line(group.get("group_id") or group_id, 40)
+            if not gid:
+                continue
+            if excluded and gid == excluded:
+                continue
+            members = group.get("members") if isinstance(group.get("members"), dict) else {}
+            member = members.get(uid) if isinstance(members, dict) else None
+            if not isinstance(member, dict):
+                continue
+            last_seen = _safe_float(member.get("last_seen"), 0)
+            count = _safe_int(member.get("count"), 0, 0)
+            if last_seen <= 0 and count <= 0:
+                continue
+            profile = group_profiles.get(gid) if isinstance(group_profiles, dict) else None
+            label = (
+                _single_line(group.get("name") or group.get("group_name") or group.get("display_name"), 80)
+                or (_single_line(profile.get("name"), 80) if isinstance(profile, dict) else "")
+                or gid
+            )
+            candidates.append(
+                {
+                    "group_id": gid,
+                    "group_name": label,
+                    "source": "recipient_active_group",
+                    "last_seen": last_seen,
+                    "count": count,
+                    "score": last_seen + min(count, 5000) / 1000,
+                }
+            )
+        candidates.sort(key=lambda item: (_safe_float(item.get("score"), 0), _safe_float(item.get("last_seen"), 0)), reverse=True)
+        return candidates
+
+    async def _resolve_atrelay_active_group_for_recipient(
+        self,
+        event: AstrMessageEvent,
+        recipient_hint: str,
+        *,
+        exclude_current_group: bool = False,
+    ) -> dict[str, Any]:
+        recipient = _single_line(recipient_hint, 80)
+        if not recipient:
+            return {}
+        resolved = await self._resolve_atrelay_target_user(event, "", recipient)
+        if resolved.get("ambiguous"):
+            return {"status": "ambiguous", "message": "收话人匹配到多个对象，请补充 QQ", "matches": resolved.get("matches", [])[:8]}
+        user_id = _single_line(resolved.get("user_id"), 40)
+        if not user_id:
+            return {}
+        excluded = self._extract_group_id_from_event(event) if exclude_current_group else ""
+        candidates = self._atrelay_active_group_candidates_for_user(user_id, exclude_group_id=excluded)
+        if not candidates:
+            return {}
+        chosen = candidates[0]
+        logger.info(
+            "[PrivateCompanion] 跨群转述按收话人活跃群自动选群: recipient=%s user=%s group=%s candidates=%s",
+            recipient,
+            user_id,
+            chosen.get("group_id"),
+            len(candidates),
+        )
+        return {"status": "success", **chosen, "recipient_user_id": user_id, "recipient_name": _single_line(resolved.get("name"), 60)}
+
     def _atrelay_tool_instruction(self) -> str:
         if not (self.enabled and self.enable_atrelay_tools):
             return ""
@@ -328,14 +401,16 @@ class AtRelayMixin:
 【跨会话转述与 @ 群友工具】
 当用户明确要求你“发到某个群”“告诉某个群友”“替我/帮我跟某人说一声”“帮我 @ 某人”“私聊某人”时,优先调用 `pc_relay_message`,不要在普通回复里预览要发送的完整内容。
 - 统一入口：常见转述只用 `pc_relay_message`。你只需要整理 destination/group_hint/recipient_hint/message/relay_mode。
+- 本轮主要目标是转述时,第一次 assistant 动作应直接调用工具,不要先输出普通文字；调用工具前不要发“我找找/我试试/找到了/正在查群号”之类的过程回复。
+- 工具返回后只按结果简短回执,不要补关系评价、猜测对方反应或复述已发送内容。
 - destination 规则：发群填 `group`,私聊填 `private`,不确定填 `auto`。私聊转群、群聊转私聊、群聊转群聊都走同一个工具。
 - 群聊转私聊：只发送用户明确要求转述的内容,不要附带群聊上下文、内部记忆或“群里大家说了什么”。
 - 发到群并点名某人：destination=`group`,group_hint=群号/群名,recipient_hint=目标昵称或 QQ,message=要说的话；工具会自动 @ 并解析关系网/群名片。
-- 私聊某人：destination=`private`,recipient_hint=QQ 或称呼；如果称呼不是 QQ,尽量提供 group_hint 以便从群成员里解析。
+- 私聊某人：destination=`private`,recipient_hint=QQ 或关系网称呼；如果关系网无法唯一确认，再提供 group_hint 让工具从群成员里解析。
 - 私聊询问并需要回报：用户说“帮我去私聊问问 A……”“问完告诉我”“他回了告诉我”时,调用 `pc_relay_message`，destination=`private`，并设置 `need_receipt=true`。对方下一次私聊回复后,工具会自动把回复带回当前发起会话。
 - 回执二次确认：如果用户明确要求“问问能不能转回来/得到对方同意再告诉我”,或内容较私密,设置 `confirm_before_report=true`；Bot 会先问收话人是否允许把回复转回。
-- 默认使用“语气转译”：不要把用户原话机械复制给对方,而是保留事实意图,按你的人格、你和说话人/收话人的关系改写成自然转述。例如“你帮我跟 A 说一下别忘了交作业”可以转成“A,刚才他说让你记得交作业,我顺手提醒一下。”
-- 构造 message 时不要随意给当前发起人套外号；如果需要说明“谁让我带话”,只能使用当前发言者的固定名称、群名片或 QQ 精确身份锚点对应的名称。不要从黑话、猜测外号或相似昵称推断发起人是谁。
+- message 只写用户明确要带给对方的那句话；可以轻微顺口,但不要补来源、关系评价、玩笑解释或后续闲聊。
+- 构造 message 时不要随意给当前发起人套外号；如果用户明确要求说明“谁让我带话”,只能使用关系网登记名、私聊稳定称呼或 QQ 精确身份锚点对应的名称。不要使用临时 QQ 昵称/群名片替代稳定身份。
 - 用户说“告诉 A：B / 跟 A 说 B”时,优先只把 B 转述给 A；除非用户要求说明来源,否则不要额外添加“某某让我转告你”。
 - 只有用户明确要求“原话/照原话/一字不改/截图式转发”时才用原话模式,调用工具时把 `relay_mode` 填 `original`；其他情况填 `persona` 或留空。
 - 对敏感、私密、带强情绪、告白/指责/吵架/金钱/密码/身体健康/秘密类内容,发送前先问用户要“原样带过去”还是“委婉一点”。工具也会二次拦截；得到用户确认后再调用,并把 `sensitive_confirmed` 设为 true。
@@ -361,6 +436,194 @@ class AtRelayMixin:
         if configured in {"original", "soft", "persona"}:
             return configured
         return "persona"
+
+    def _clean_atrelay_llm_text(self, value: Any) -> str:
+        text = _single_line(value, 500)
+        text = re.sub(r"^```(?:text)?|```$", "", text).strip()
+        text = text.strip("\"'“”‘’` ")
+        text = re.sub(r"^(?:转述内容|发送内容|正文|回复)[:：]\s*", "", text).strip()
+        return _single_line(text, 500)
+
+    def _atrelay_message_should_skip_llm_rewrite(self, text: str, relay_mode: str) -> bool:
+        if self._normalize_atrelay_relay_mode(relay_mode) == "original":
+            return True
+        cleaned = _single_line(text, 80)
+        if not cleaned:
+            return True
+        if len(cleaned) <= 8 and not re.search(r"[，,。！？!?；;：:\s]", cleaned):
+            return True
+        if re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9ぁ-んァ-ンー]{1,12}[~～!！。]?", cleaned):
+            short_tokens = (
+                "贴贴", "摸摸", "抱抱", "晚安", "早安", "午安", "辛苦了", "加油",
+                "笨蛋", "在吗", "收到", "谢谢", "对不起", "喜欢你",
+            )
+            if any(token in cleaned for token in short_tokens):
+                return True
+        return False
+
+    def _atrelay_rewrite_looks_polluted(
+        self,
+        rewritten: str,
+        *,
+        original: str,
+        source_name: str,
+        recipient_name: str,
+    ) -> bool:
+        text = _single_line(rewritten, 500)
+        if not text:
+            return True
+        if len(text) > max(80, len(original) * 3):
+            return True
+        source = _single_line(source_name, 40)
+        if source and source in text and source not in original:
+            return True
+        noisy_tokens = (
+            "让我", "叫我", "托我", "带话", "转告", "他说", "她说", "TA说",
+            "刚才", "估计", "应该挺", "你们关系", "关系真好", "算账",
+            "结果是", "哈哈", "嘿嘿", "我顺手", "我帮", "我来",
+        )
+        if any(token in text for token in noisy_tokens if token not in original):
+            return True
+        recipient = _single_line(recipient_name, 40)
+        if recipient and text.startswith(recipient) and not original.startswith(recipient):
+            return True
+        return False
+
+    def _atrelay_identity_label(self, user_id: str, fallback: str = "") -> str:
+        uid = _single_line(user_id, 40)
+        name = ""
+        if uid:
+            try:
+                profile = self._worldbook_profile_by_user_id(uid)
+            except Exception:
+                profile = None
+            if isinstance(profile, dict):
+                name = _single_line(profile.get("name"), 40)
+            users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+            user = users.get(uid) if isinstance(users, dict) else None
+            if isinstance(user, dict):
+                name = name or _single_line(user.get("stable_name") or user.get("nickname"), 40)
+            if not name:
+                if isinstance(user, dict):
+                    name = _single_line(user.get("display_name") or user.get("last_display_name"), 40)
+        name = name or _single_line(fallback, 40) or uid or "对方"
+        return f"{name}（ID:{uid}）" if uid else name
+
+    def _atrelay_source_identity_label(self, event: AstrMessageEvent) -> str:
+        try:
+            raw_id = str(event.get_sender_id())
+        except Exception:
+            raw_id = ""
+        try:
+            user_id = self._canonical_private_user_id(raw_id)
+        except Exception:
+            user_id = raw_id
+        fallback = ""
+        try:
+            fallback = self._sender_display_name(event)
+        except Exception:
+            fallback = ""
+        return self._atrelay_identity_label(user_id, fallback)
+
+    async def _rewrite_atrelay_message_with_llm(
+        self,
+        event: AstrMessageEvent,
+        *,
+        destination: str,
+        recipient_hint: str,
+        text: str,
+        relay_mode: str,
+    ) -> str:
+        original = _single_line(text, 800)
+        if not original:
+            return original
+        if not bool(getattr(self, "enable_atrelay_llm_rewrite", True)):
+            return original
+        mode = self._normalize_atrelay_relay_mode(relay_mode)
+        if self._atrelay_message_should_skip_llm_rewrite(original, mode):
+            return original
+        recipient = _single_line(recipient_hint, 80) or "对方"
+        source_label = self._atrelay_source_identity_label(event)
+        recipient_label = self._atrelay_identity_label(recipient, recipient)
+        prompt = (
+            "把下面这句稍微顺成 Bot 准备发给收话人的一句话。\n"
+            "只输出要发送的正文，不要解释，不要加引号，不要说已经发送。\n"
+            "只保留用户要转述给收话人的内容；不要加入未给出的事实、私聊上下文、群聊上下文、系统信息或关系网备注。\n"
+            "不要添加称呼、来源、关系评价、玩笑解释、后续评论或“我帮忙带话”的说明。\n"
+            "发起人和收话人是两个不同角色；不要把发起人的名字写进正文,不要把收话人的名字当成正在和 Bot 说话的人。\n"
+            "如果原句已经很短或很自然,直接原样输出。\n"
+            f"发送场景：{'群聊点名' if destination == 'group' else '私聊'}\n"
+            f"发起人：{source_label}\n"
+            f"收话人：{recipient_label}\n"
+            f"风格：{'稍微委婉' if mode == 'soft' else '自然转述'}\n"
+            f"原句：{original}\n"
+            "正文："
+        )
+        try:
+            rewritten = await self._llm_call(
+                prompt,
+                max_tokens=120,
+                provider_id=self._task_provider(getattr(self, "mai_style_provider_id", ""), getattr(self, "llm_provider_id", "")),
+                task="atrelay_rewrite",
+            )
+        except Exception as exc:
+            logger.info("[PrivateCompanion] 转述正文 LLM 转译失败: %s", _single_line(exc, 120))
+            return original
+        cleaned = self._clean_atrelay_llm_text(rewritten)
+        if not cleaned:
+            return original
+        recipient_name = _single_line(recipient_label.split("（", 1)[0], 40)
+        source_name = _single_line(source_label.split("（", 1)[0], 40)
+        for name in (source_name, recipient_name):
+            if name and not original.startswith(name):
+                cleaned = re.sub(rf"^{re.escape(name)}[，,：:\s]+", "", cleaned).strip()
+        if self._atrelay_rewrite_looks_polluted(
+            cleaned,
+            original=original,
+            source_name=source_name,
+            recipient_name=recipient_name,
+        ):
+            logger.info(
+                "[PrivateCompanion] 转述正文 LLM 转译疑似扩写污染,使用原文: before=%s after=%s",
+                _single_line(original, 80),
+                _single_line(cleaned, 120),
+            )
+            return original
+        logger.info("[PrivateCompanion] 转述正文已 LLM 转译: before=%s after=%s", _single_line(original, 80), _single_line(cleaned, 120))
+        return cleaned
+
+    @filter.on_llm_response()
+    async def compact_atrelay_tool_final_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """转述工具已执行后，只保留一句自然短回执，避免模型补关系评价或复述正文。"""
+        if not self.enabled or resp is None:
+            return
+        result = getattr(event, "private_companion_atrelay_tool_result", None)
+        if not isinstance(result, dict) or _single_line(result.get("status"), 24) not in {"success", "scheduled"}:
+            return
+        final_reply = _single_line(result.get("final_reply"), 80) or "说过啦。"
+        text = str(getattr(resp, "completion_text", "") or "").strip()
+        sent_text = _single_line(result.get("sent_text"), 120)
+        if not text:
+            resp.completion_text = final_reply
+            return
+        compact = _single_line(_strip_internal_message_blocks(text), 240)
+        noisy_tokens = (
+            "估计", "应该挺", "你们关系", "关系真好", "算账", "结果是", "哈哈",
+            "我写", "我改", "语气", "氛围", "刚才", "顺手", "已经发送到",
+            "消息已发送到群", "已向", "工具", "参数",
+        )
+        should_compact = (
+            len(compact) > 28
+            or any(token in compact for token in noisy_tokens)
+            or bool(sent_text and sent_text in compact and compact != sent_text and len(compact) > len(sent_text) + 6)
+        )
+        if should_compact:
+            logger.info(
+                "[PrivateCompanion] 转述工具回执已收敛: before=%s after=%s",
+                _single_line(compact, 160),
+                final_reply,
+            )
+            resp.completion_text = final_reply
 
     def _atrelay_sensitive_reason(self, text: str) -> str:
         cleaned = _single_line(text, 800)
@@ -478,6 +741,55 @@ class AtRelayMixin:
         compact = re.sub(r"\s+", "", _single_line(text, 240))
         return f"{kind}:{target}:{at_user}:{compact[:160]}"
 
+    def _atrelay_cached_group_matches(self, hint: Any = "") -> list[dict[str, str]]:
+        query = _single_line(hint, 80)
+        query_variants = [query] if query else [""]
+        if query:
+            relaxed = re.sub(r"(什么的|那个|这个|群聊|群里|群|里面|里|吧|吗|呀|啊|呢)$", "", query).strip()
+            if relaxed and relaxed not in query_variants:
+                query_variants.append(relaxed)
+        matches: dict[str, dict[str, str]] = {}
+
+        def add(group_id: Any, name: Any = "", source: str = "") -> None:
+            gid = _single_line(group_id, 40)
+            if not gid:
+                return
+            label = _single_line(name, 100) or gid
+            existing = matches.setdefault(gid, {"group_id": gid, "group_name": label, "source": source})
+            if label and (not existing.get("group_name") or existing.get("group_name") == gid):
+                existing["group_name"] = label
+            if source and not existing.get("source"):
+                existing["source"] = source
+
+        groups = self.data.get("groups") if isinstance(self.data.get("groups"), dict) else {}
+        for group_id, group in groups.items():
+            if not isinstance(group, dict):
+                continue
+            gid = _single_line(group.get("group_id") or group_id, 40)
+            tokens = [
+                gid,
+                group.get("name"),
+                group.get("group_name"),
+                group.get("display_name"),
+                group.get("nickname"),
+            ]
+            clean_tokens = [_single_line(token, 100) for token in tokens if _single_line(token, 100)]
+            if not query or any(q and (q == token or q in token or token in q) for q in query_variants for token in clean_tokens):
+                label = next((token for token in clean_tokens if token and token != gid), gid)
+                add(gid, label, "plugin_group")
+
+        profiles = self.data.get("worldbook_group_profiles") if isinstance(self.data.get("worldbook_group_profiles"), dict) else {}
+        for group_id, profile in profiles.items():
+            if not isinstance(profile, dict):
+                continue
+            gid = _single_line(profile.get("group_id") or group_id, 40)
+            tokens = [gid, profile.get("name"), profile.get("title"), profile.get("display_name")]
+            clean_tokens = [_single_line(token, 100) for token in tokens if _single_line(token, 100)]
+            if not query or any(q and (q == token or q in token or token in q) for q in query_variants for token in clean_tokens):
+                label = next((token for token in clean_tokens if token and token != gid), gid)
+                add(gid, label, "worldbook_group")
+        return list(matches.values())[:12]
+
     async def _resolve_atrelay_target_group(self, event: AstrMessageEvent, group_hint: Any = "") -> dict[str, Any]:
         hint = _single_line(group_hint, 80)
         if hint.isdigit():
@@ -490,6 +802,18 @@ class AtRelayMixin:
             return {"status": "success", "group_id": configured_groups[0], "source": "single_configured_group"}
         if not hint:
             return {"status": "need_group", "message": "需要补充目标群号或群名"}
+        cached_matches = self._atrelay_cached_group_matches(hint)
+        if len(cached_matches) == 1:
+            match = cached_matches[0]
+            logger.info(
+                "[PrivateCompanion] 跨群转述群名命中本地缓存: hint=%s group=%s source=%s",
+                hint,
+                match.get("group_id"),
+                match.get("source"),
+            )
+            return {"status": "success", **match}
+        if len(cached_matches) > 1:
+            return {"status": "ambiguous", "matches": cached_matches[:8], "message": "匹配到多个群，请补充群号"}
         bot = getattr(event, "bot", None)
         api = getattr(bot, "api", None)
         call_action = getattr(api, "call_action", None)
@@ -573,11 +897,11 @@ class AtRelayMixin:
             source_user = _single_line(event.get_sender_id(), 40)
         except Exception:
             source_user = ""
-        source_name = ""
         try:
-            source_name = _single_line(self._sender_display_name(event), 40)
+            source_user = self._canonical_private_user_id(source_user)
         except Exception:
-            source_name = ""
+            pass
+        source_name = self._atrelay_identity_label(source_user)
         platform = source_umo.split(":", 1)[0] if ":" in source_umo else (self.target_platform or "aiocqhttp")
         if not source_umo and source_user:
             source_umo = f"{platform}:FriendMessage:{source_user}"

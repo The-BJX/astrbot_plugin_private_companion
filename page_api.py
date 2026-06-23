@@ -5013,6 +5013,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "atrelay_require_worldbook_first",
             "atrelay_member_cache_minutes",
             "atrelay_sensitive_confirm",
+            "enable_atrelay_llm_rewrite",
             "atrelay_default_relay_style",
             "atrelay_multi_target_limit",
         ]
@@ -6109,6 +6110,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "atrelay_require_worldbook_first",
             "atrelay_member_cache_minutes",
             "atrelay_sensitive_confirm",
+            "enable_atrelay_llm_rewrite",
             "atrelay_default_relay_style",
             "atrelay_multi_target_limit",
         }
@@ -6688,6 +6690,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "atrelay_require_worldbook_first",
             "cross_user_memory_owner_only",
             "atrelay_sensitive_confirm",
+            "enable_atrelay_llm_rewrite",
         }:
             return self._normalize_bool_value(value)
         return self._single_line(value, 240)

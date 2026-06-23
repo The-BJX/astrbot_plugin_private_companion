@@ -468,9 +468,19 @@ class WorldbookMixin:
         if not isinstance(profiles, dict):
             return None
         profile = profiles.get(user_id)
-        if not isinstance(profile, dict) or not profile.get("enabled", True):
-            return None
-        return profile
+        if isinstance(profile, dict) and profile.get("enabled", True):
+            view = dict(profile)
+            view["user_id"] = _single_line(profile.get("linked_qq_user_id") or profile.get("user_id") or user_id, 40)
+            return view
+        for profile_key, item in profiles.items():
+            if not isinstance(item, dict) or not item.get("enabled", True):
+                continue
+            linked_id = _single_line(item.get("linked_qq_user_id") or item.get("user_id") or profile_key, 40)
+            if linked_id == user_id:
+                view = dict(item)
+                view["user_id"] = linked_id
+                return view
+        return None
 
     def _group_member_identity_name(self, user_id: str, fallback: str = "", *, limit: int = 30) -> str:
         profile = self._worldbook_profile_by_user_id(user_id)
@@ -548,10 +558,11 @@ class WorldbookMixin:
         for user_id, profile in profiles.items():
             if not isinstance(profile, dict) or not profile.get("enabled", True):
                 continue
-            if str(user_id) == query or self._worldbook_member_matches_name(profile, query):
+            profile_uid = _single_line(profile.get("linked_qq_user_id") or profile.get("user_id") or user_id, 40)
+            if str(user_id) == query or profile_uid == query or self._worldbook_member_matches_name(profile, query):
                 matches.append({
-                    "user_id": str(user_id),
-                    "name": _single_line(profile.get("name"), 60) or str(user_id),
+                    "user_id": profile_uid or str(user_id),
+                    "name": _single_line(profile.get("name"), 60) or profile_uid or str(user_id),
                     "gender": _single_line(profile.get("gender"), 40),
                     "aliases": self._normalize_string_list(profile.get("aliases"), limit=8, item_limit=40),
                     "observed_names": self._normalize_string_list(profile.get("observed_names"), limit=8, item_limit=40),
@@ -1019,9 +1030,10 @@ class WorldbookMixin:
             token = _single_line(token, 40)
             if token and token not in tokens:
                 tokens.append(token)
-        user_id = _single_line(profile.get("user_id"), 40)
-        if user_id and user_id not in tokens:
-            tokens.append(user_id)
+        for raw_id in (profile.get("linked_qq_user_id"), profile.get("user_id")):
+            user_id = _single_line(raw_id, 40)
+            if user_id and user_id not in tokens:
+                tokens.append(user_id)
         return tokens
 
     @staticmethod
@@ -1051,11 +1063,89 @@ class WorldbookMixin:
             return bool(re.search(pattern, text))
         return token in text
 
+    def _worldbook_token_mentioned_in_private_hint(self, token: str, text: str) -> bool:
+        token = _single_line(token, 40)
+        text = str(text or "")
+        if self._worldbook_token_mentioned(token, text):
+            return True
+        if not token or token.isdigit() or len(token) > 2 or not self._worldbook_token_usable(token):
+            return False
+        # “帮我找小白/小粉你认识吗”这类短昵称后面常直接接动词，
+        # 明确问人或转述时不能沿用普通闲聊的强边界，否则会漏掉目标。
+        before = r"(^|[\s，,。？?！!：:、@和跟找叫给对向把让问找一下])"
+        after = r"(?=(你认识|认识|认得|知道|是谁|是|说|发|问|找|叫|踢|$|[\s，,。？?！!：:、]))"
+        return bool(re.search(before + re.escape(token) + after, text))
+
     def _worldbook_profile_view(self, profile: dict[str, Any], *, match_reason: str, confidence: str) -> dict[str, Any]:
         view = dict(profile)
         view["_match_reason"] = match_reason
         view["_match_confidence"] = confidence
         return view
+
+    def _select_worldbook_member_profiles_for_private_text(self, text: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        if not self.enable_worldbook_member_recognition:
+            return []
+        profiles = self.data.get("worldbook_member_profiles")
+        if not isinstance(profiles, dict):
+            return []
+        text = str(text or "")
+        if not text:
+            return []
+        max_items = max(1, min(8, _safe_int(limit, min(self.worldbook_member_inject_limit, 4), 1)))
+        selected: dict[str, dict[str, Any]] = {}
+        for match in re.findall(r"\d{5,12}", text):
+            profile = self._worldbook_profile_by_user_id(match)
+            if isinstance(profile, dict) and profile.get("enabled", True):
+                selected[match] = self._worldbook_profile_view(
+                    profile,
+                    match_reason="当前私聊消息提到 QQ 号",
+                    confidence="mentioned",
+                )
+        for user_id, profile in profiles.items():
+            if len(selected) >= max_items:
+                break
+            if not isinstance(profile, dict) or not profile.get("enabled", True):
+                continue
+            if str(user_id) in selected:
+                continue
+            for token in self._worldbook_profile_tokens(profile):
+                if self._worldbook_token_mentioned_in_private_hint(token, text):
+                    selected[str(user_id)] = self._worldbook_profile_view(
+                        profile,
+                        match_reason=f"当前私聊消息提到：{token}",
+                        confidence="mentioned",
+                    )
+                    break
+        ranked = sorted(
+            selected.values(),
+            key=lambda item: _safe_int(item.get("priority"), 120, -1000),
+            reverse=True,
+        )
+        return ranked[:max_items]
+
+    def _format_worldbook_private_mentions_for_prompt(self, text: str, *, limit: int | None = None) -> str:
+        profiles = self._select_worldbook_member_profiles_for_private_text(text, limit=limit)
+        if not profiles:
+            return ""
+        lines = ["【本轮提到的关系网对象】"]
+        injected = []
+        for profile in profiles:
+            profile_uid = _single_line(profile.get("user_id"), 40)
+            name = _single_line(profile.get("name"), 40) or profile_uid or "-"
+            aliases = "、".join(token for token in self._worldbook_profile_tokens(profile)[:6] if token != profile_uid and token != name)
+            identity = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), 140)
+            boundary = _single_line(profile.get("boundary_note"), 80)
+            parts = [f"{name}（QQ:{profile_uid or '-'}）"]
+            if aliases:
+                parts.append(f"称呼线索：{aliases}")
+            if identity:
+                parts.append(f"身份：{identity}")
+            if boundary:
+                parts.append(f"边界：{boundary}")
+            lines.append("- " + "｜".join(parts))
+            injected.append(f"{profile_uid}:{name}")
+        logger.info("[PrivateCompanion] 本轮提及关系网对象注入: users=%s", "；".join(injected))
+        return "\n".join(lines)
 
     def _select_worldbook_member_profiles_for_group(
         self,
@@ -1094,7 +1184,7 @@ class WorldbookMixin:
                 if user_id in selected:
                     continue
                 for token in self._worldbook_profile_tokens(profile):
-                    if self._worldbook_token_mentioned(token, text):
+                    if self._worldbook_token_mentioned(token, text) or self._worldbook_token_mentioned_in_private_hint(token, text):
                         token_hits.setdefault(token, []).append((str(user_id), profile))
             for token in sorted(token_hits, key=len, reverse=True):
                 hits = token_hits[token]
@@ -1102,8 +1192,6 @@ class WorldbookMixin:
                     continue
                 user_id, profile = hits[0]
                 if user_id in selected:
-                    continue
-                if len(token) <= 2 and str(sender_id or "") != str(user_id):
                     continue
                 selected[user_id] = self._worldbook_profile_view(
                     profile,

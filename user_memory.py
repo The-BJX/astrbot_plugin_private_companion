@@ -1654,6 +1654,13 @@ class UserMemoryMixin:
             return {"event": "neutral", "intensity": 0, "reason": "", "target": "none", "rule": "", "confidence": 1.0}
         if self._is_structured_or_diagnostic_text(cleaned):
             return {"event": "neutral", "intensity": 0, "reason": "结构化/日志/代码类文本不作为情绪依据", "target": "none", "rule": "diagnostic_skip", "confidence": 0.2}
+        atrelay_checker = getattr(self, "_message_looks_like_atrelay_request", None)
+        if callable(atrelay_checker):
+            try:
+                if atrelay_checker(cleaned):
+                    return {"event": "neutral", "intensity": 0, "reason": "转述/带话请求不作为 Bot 自身情绪依据", "target": "other", "rule": "atrelay_skip", "confidence": 0.86}
+            except Exception:
+                pass
         lower = cleaned.lower()
         intent_source = str((intent_context or {}).get("source") or "")
         target_hint, third_party_hint = self._intent_target_hint(cleaned)
