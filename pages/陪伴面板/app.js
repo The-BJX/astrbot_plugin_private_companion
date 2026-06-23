@@ -37,6 +37,7 @@ const state = {
   tokenDate: "",
   worldbookLivingMemory: {},
   worldbookLivingMemoryRequestSeq: 0,
+  roleplayPersonaDraft: null,
 };
 
 const hiddenCompatibilityConfigKeys = new Set([
@@ -471,6 +472,7 @@ const featureMeta = {
   enable_humanized_states: ["拟人身体状态", "生成精力、睡眠、梦境、健康、饥饿和周期等扮演状态，影响日程、主动消息和被动语气。"],
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
+  enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
   enable_cycle_state: ["生理期模拟", "在人格适合人类身体设定时，允许当前扮演状态偶尔加入生理期前、处于生理期或生理期后的状态。"],
   enable_skill_growth_simulation: ["技能成长", "能力状态与边界；自定义技能请到观察页的技能成长卡片管理。"],
   enable_message_debounce: ["消息收口防抖", "把文本、图片、转发后的补充说明合并进同一轮；旧版语义收口等待已并入文本补话等待。"],
@@ -659,6 +661,7 @@ const featureGroups = [
 
 const embeddedFeatureParentByKey = {
   inject_passive_states: "enable_humanized_states",
+  enable_passive_state_delta_injection: "inject_passive_states",
   enable_cycle_state: "enable_humanized_states",
   enable_rest_reply_simulation: "enable_humanized_states",
   enable_recall_cancel_reply: "enable_recall_enhancement",
@@ -934,6 +937,7 @@ const configLabels = {
   humanized_state_intensity: "拟人状态强度",
   enable_humanized_states: "拟人身体状态",
   inject_passive_states: "被动状态注入",
+  enable_passive_state_delta_injection: "被动状态增量注入",
   passive_injection_position: "动态提示词注入位置",
   framework_session_lock_mode: "主链会话锁兼容模式",
   enable_rest_reply_simulation: "休息回复闸门",
@@ -1110,6 +1114,7 @@ const configDescriptions = {
   humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
   enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
+  enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",
   passive_injection_position: "选择被动状态、环境感知、TTS 本轮频控、转发/引用上下文等动态片段的注入位置。当前请求末尾会进入统一动态块并按稳定顺序排列，更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
   framework_session_lock_mode: "旧版 AstrBot 会话库并发锁兼容项。新版本通常不需要，开启会让同一会话主链请求排队并增加回复延迟。auto 只在识别到受影响旧版本时启用；always 仅建议仍遇到 database is locked 的旧版用户使用。",
   enable_rest_reply_simulation: "开启后，日程处于睡眠、午休或休息段时，普通被动回复会先经过休息闸门；未放行时静默不回复。",
@@ -1406,10 +1411,10 @@ const featureSettingGroups = {
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: [],
   enable_proactive_only_mode: [],
-  enable_humanized_states: ["humanized_state_intensity", "inject_passive_states", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
+  enable_humanized_states: ["humanized_state_intensity", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
-  inject_passive_states: ["humanized_state_intensity"],
+  inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
   enable_cycle_state: ["humanized_state_intensity"],
   enable_skill_growth_simulation: ["skill_growth_rate", "enable_skill_growth_passive_injection", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds", "text_message_debounce_max_wait_seconds", "message_debounce_max_merge_messages", "enable_smart_message_debounce", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds", "smart_message_debounce_examples_limit"],
@@ -2921,14 +2926,14 @@ function troubleshootingChainTestMarkup(results) {
       button: "测试主动消息",
     },
     {
-      type: "skill_similarity",
-      title: "技能相似项",
-      text: "先本地筛出疑似重复/别名冲突，再调用模型复核；只给建议，不自动修改",
-      button: "检查相似技能",
+      type: "model_diagnostics",
+      title: "模型数据排障",
+      text: "检查技能、群黑话、关系网、长期画像和表达学习里的模型理解杂音；只给建议，不自动修改",
+      button: "运行模型排障",
     },
   ];
   return tests.map((test) => {
-    const result = results?.[test.type] || {};
+    const result = results?.[test.type] || (test.type === "model_diagnostics" ? results?.skill_similarity : {}) || {};
     const ok = Boolean(result.ok);
     const pending = Boolean(result.pending);
     const hasResult = Boolean(result.ran_at || result.ran_at_text || result.error || result.detail);
@@ -2961,10 +2966,10 @@ function troubleshootingChainTestMarkup(results) {
 function troubleshootingChainDetailText(test, result, hasResult) {
   if (!hasResult) return test.text;
   if (result.error) return result.error;
-  if (test.type === "skill_similarity" && result.ok) {
+  if ((test.type === "skill_similarity" || test.type === "model_diagnostics") && result.ok) {
     const localCount = Number(result.local_count || 0);
     const modelCount = Number(result.model_count || 0);
-    return result.detail || `本地发现 ${localCount} 组候选，模型给出 ${modelCount} 条建议`;
+    return result.detail || `本地发现 ${localCount} 条候选，模型给出 ${modelCount} 条建议`;
   }
   return result.detail || test.text;
 }
@@ -2986,13 +2991,27 @@ function troubleshootingChainStepsMarkup(stepsRaw) {
 }
 
 function troubleshootingChainPreviewMarkup(type, result) {
-  if (type === "skill_similarity") {
+  if (type === "skill_similarity" || type === "model_diagnostics") {
+    const sections = Array.isArray(result.sections) ? result.sections.filter(Boolean) : [];
     const suggestions = Array.isArray(result.suggestions) ? result.suggestions.filter(Boolean) : [];
     if (!suggestions.length && !result.text_preview) return "";
+    const sectionMarkup = sections.length ? sections.map((section) => {
+      const items = Array.isArray(section.suggestions) ? section.suggestions.filter(Boolean) : [];
+      const meta = [
+        Number(section.local_count || 0) ? `本地 ${Number(section.local_count || 0)}` : "",
+        Number(section.model_count || 0) ? `模型 ${Number(section.model_count || 0)}` : "",
+      ].filter(Boolean).join(" · ");
+      return `
+        <div class="chain-test-preview-section">
+          <b>${escapeHtml(section.title || "排障项")}${meta ? ` · ${escapeHtml(meta)}` : ""}</b>
+          ${items.length ? items.map((item) => `<p>${escapeHtml(item)}</p>`).join("") : `<p class="muted">暂无明显问题</p>`}
+        </div>
+      `;
+    }).join("") : "";
     return `
       <details class="chain-test-steps chain-test-preview">
-        <summary>查看相似项建议${result.extra_count ? `（另有 ${escapeHtml(result.extra_count)} 条未展示）` : ""}</summary>
-        ${suggestions.length ? suggestions.map((item) => `<p>${escapeHtml(item)}</p>`).join("") : `<p>${escapeHtml(result.text_preview || "")}</p>`}
+        <summary>查看模型排障建议${result.extra_count ? `（另有 ${escapeHtml(result.extra_count)} 条未展示）` : ""}</summary>
+        ${sectionMarkup || (suggestions.length ? suggestions.map((item) => `<p>${escapeHtml(item)}</p>`).join("") : `<p>${escapeHtml(result.text_preview || "")}</p>`)}
       </details>
     `;
   }
@@ -3520,6 +3539,10 @@ function renderTokens() {
   const calls = Number(totals.calls || 0);
   const errors = Number(totals.errors || 0);
   const estimatedRatio = Number(totals.estimated_ratio || 0);
+  const cachedTokens = Number(totals.cached_tokens || 0);
+  const cacheReadTokens = Number(totals.cache_read_tokens || 0);
+  const cacheWriteTokens = Number(totals.cache_write_tokens || 0);
+  const cachedRatio = Number(totals.cached_ratio || 0);
   const externalScope = externalTokenScopeData(stats, scope);
   const externalTokens = Number(externalScope?.totals?.total_tokens || 0);
   const budget = stats.budget || {};
@@ -3542,6 +3565,10 @@ function renderTokens() {
     calls,
     errors,
     estimatedRatio,
+    cachedTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    cachedRatio,
     dailyLimit,
     dailyUsed,
     dailyRemaining,
@@ -3565,6 +3592,8 @@ function renderTokens() {
   renderTokenProviderTable(scope.providers || []);
   renderTokenTaskTable(scope.tasks || []);
   renderTokenRecentTable(scope.recent || []);
+  renderTokenExternalSessionTable(externalScope.sessions || []);
+  renderTokenExternalRecentTable(externalScope.recent || []);
 }
 
 function tokenSummaryBoard({
@@ -3576,6 +3605,10 @@ function tokenSummaryBoard({
   calls,
   errors,
   estimatedRatio,
+  cachedTokens,
+  cacheReadTokens,
+  cacheWriteTokens,
+  cachedRatio,
   dailyLimit,
   dailyUsed,
   dailyRemaining,
@@ -3597,6 +3630,7 @@ function tokenSummaryBoard({
   const scopeNote = scope.isToday
     ? (dailyLimit > 0 ? `硬限额 ${formatCompactNumber(dailyLimit)} · 剩 ${formatCompactNumber(remainingValue)}` : "今日不限额")
     : `${scope.mode === "total" ? "全部历史" : "选定日期"} · ${formatNumber(calls)} 次调用`;
+  const hasKnownCacheStats = totalTokens > 0 && estimatedRatio < 1;
   return `
     <section class="token-summary-board">
       <article class="token-primary-card">
@@ -3625,6 +3659,8 @@ function tokenSummaryBoard({
       <div class="token-metric-grid">
         ${tokenMetricCard(externalScope.label, formatNumber(externalTokens))}
         ${tokenMetricCard("主动消息", formatCompactNumber(proactiveMessages))}
+        ${hasKnownCacheStats ? tokenMetricCard("缓存命中", `${formatCompactNumber(cachedTokens || cacheReadTokens)} · ${Math.round(cachedRatio * 100)}%`) : ""}
+        ${cacheReadTokens > 0 || cacheWriteTokens > 0 ? tokenMetricCard("缓存读 / 写", `${formatCompactNumber(cacheReadTokens)} / ${formatCompactNumber(cacheWriteTokens)}`) : ""}
         ${tokenMetricCard("调用次数", formatNumber(calls))}
         ${tokenMetricCard("平均 Token", formatNumber(avgTokens))}
         ${tokenMetricCard("平均延迟", `${formatNumber(avgLatency)} ms`)}
@@ -3661,6 +3697,8 @@ function externalTokenScopeData(stats, pluginScope) {
     return {
       label: "非插件累计",
       totals: external.totals || {},
+      sessions: external.by_session || [],
+      recent: external.recent || [],
     };
   }
   const selectedDay = pluginScope?.mode === "date" ? state.tokenDate : today;
@@ -3669,6 +3707,8 @@ function externalTokenScopeData(stats, pluginScope) {
   return {
     label: selectedDay === today ? "非插件今日" : "非插件同日",
     totals: day,
+    sessions: day.sessions || [],
+    recent: (external.recent || []).filter((item) => recentItemDayKey(item) === selectedDay),
   };
 }
 
@@ -3876,11 +3916,12 @@ function tokenHourlySvg(rows, max) {
 
 function renderTokenProviderTable(rows) {
   $("#tokenProviderTable").innerHTML = tokenTable(
-    ["Provider", "总 Token", "输入", "输出", "调用", "估算", "平均延迟"],
+    ["Provider", "总 Token", "缓存", "输入", "输出", "调用", "估算", "平均延迟"],
     rows,
     (item) => [
       item.key || "default",
       formatNumber(item.total_tokens),
+      tokenCacheText(item),
       formatNumber(item.prompt_tokens),
       formatNumber(item.completion_tokens),
       formatNumber(item.calls),
@@ -3893,11 +3934,12 @@ function renderTokenProviderTable(rows) {
 
 function renderTokenTaskTable(rows) {
   $("#tokenTaskTable").innerHTML = tokenTable(
-    ["任务", "总 Token", "输入", "输出", "调用", "失败", "平均 Token"],
+    ["任务", "总 Token", "缓存", "输入", "输出", "调用", "失败", "平均 Token"],
     rows,
     (item) => [
       tokenTaskLabel(item.key),
       formatNumber(item.total_tokens),
+      tokenCacheText(item),
       formatNumber(item.prompt_tokens),
       formatNumber(item.completion_tokens),
       formatNumber(item.calls),
@@ -3931,18 +3973,71 @@ function tokenTopList(rows, labeler) {
 
 function renderTokenRecentTable(rows) {
   $("#tokenRecentTable").innerHTML = tokenTable(
-    ["时间", "任务", "Provider", "Token", "延迟", "状态"],
+    ["时间", "任务", "Provider", "Token", "缓存", "延迟", "状态"],
     rows,
     (item) => [
       formatRecentTime(item.ts, item.time),
       tokenTaskLabel(item.task),
       item.provider || "default",
       `${formatNumber(item.total_tokens)}${item.estimated ? " 估" : ""}`,
+      tokenCacheText(item),
       `${formatNumber(Math.round(Number(item.elapsed_ms || item.latency_ms || 0)))} ms`,
       item.success ? "成功" : `失败 ${item.error || ""}`.trim(),
     ],
     "暂无最近调用"
   );
+}
+
+function renderTokenExternalSessionTable(rows) {
+  $("#tokenExternalSessionTable").innerHTML = tokenTable(
+    ["会话", "总 Token", "缓存", "调用", "失败", "平均延迟"],
+    rows,
+    (item) => [
+      item.key || "-",
+      formatNumber(item.total_tokens),
+      tokenCacheText(item),
+      formatNumber(item.calls),
+      formatNumber(item.errors),
+      `${formatNumber(Math.round(Number(item.avg_latency_ms || 0)))} ms`,
+    ],
+    "暂无 AstrBot 主链会话统计"
+  );
+}
+
+function renderTokenExternalRecentTable(rows) {
+  $("#tokenExternalRecentTable").innerHTML = tokenTable(
+    ["时间", "会话", "发送者", "类型", "Provider", "Token", "缓存", "延迟", "状态"],
+    rows,
+    (item) => [
+      formatRecentTime(item.ts, item.time),
+      item.session || "-",
+      item.sender || "-",
+      item.message_type === "private" ? "私聊" : (item.message_type === "group" ? "群聊" : "-"),
+      item.provider || "default",
+      `${formatNumber(item.total_tokens)}${item.estimated ? " 估" : ""}`,
+      tokenCacheText(item),
+      `${formatNumber(Math.round(Number(item.elapsed_ms || item.latency_ms || 0)))} ms`,
+      item.success ? "成功" : `失败 ${item.error || ""}`.trim(),
+    ],
+    "暂无 AstrBot 主链最近对话"
+  );
+}
+
+function tokenCacheText(item) {
+  const cached = Number(item?.cached_tokens || 0);
+  const read = Number(item?.cache_read_tokens || 0);
+  const write = Number(item?.cache_write_tokens || 0);
+  const total = Number(item?.total_tokens || 0);
+  if (cached <= 0 && read <= 0 && write <= 0) {
+    const estimated = Boolean(item?.estimated) || Number(item?.estimated_ratio || 0) >= 1;
+    return total > 0 && !estimated ? "0 · 0%" : "-";
+  }
+  const ratio = Number(item?.cached_ratio || 0) || (total > 0 ? (cached || read) / total : 0);
+  const hit = cached || read;
+  const parts = [`命中 ${formatCompactNumber(hit)}`];
+  if (ratio > 0) parts.push(`${Math.round(ratio * 100)}%`);
+  if (read > 0 || write > 0) parts.push(`读/写 ${formatCompactNumber(read)}/${formatCompactNumber(write)}`);
+  return parts.join(" · ");
 }
 
 function tokenTable(headers, rows, mapper, emptyText) {
@@ -4322,7 +4417,7 @@ async function renderGroupDetail(forceFetch = false) {
     </div>
     <div class="detail-grid group-detail-grid">
       ${groupDetailPanel("群状态", groupStateOverview(detail), { wide: true, className: "group-state-panel" })}
-      ${groupDetailPanel("常用词", groupSlangTermsView(detail.slang_terms || []), { className: "group-compact-panel" })}
+      ${groupDetailPanel("黑话检视", groupSlangManagerView(detail.slang_items || []), { wide: true, className: "group-slang-panel" })}
       ${groupDetailPanel("活跃群友", groupActiveMembersView(detail.members || {}), { className: "group-compact-panel" })}
       ${groupDetailPanel("插话反馈", groupInterjectionFeedbackView(detail), { className: "group-compact-panel" })}
       ${groupDetailPanel("消息活跃", groupMessageActivityView(detail.recent_messages || []), { wide: true, className: "group-message-panel" })}
@@ -4399,6 +4494,116 @@ function groupSlangTermsView(items) {
   `;
 }
 
+function groupSlangManagerView(items) {
+  const rows = Array.isArray(items) ? items : [];
+  const counts = rows.reduce((acc, item) => {
+    const status = item.status || "pending";
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  const summary = rows.length
+    ? `${rows.length} 个候选，${counts.injectable || 0} 个会注入，${counts.pending || 0} 个待释义`
+    : "暂无已学习黑话";
+  return `
+    <div class="group-slang-manager">
+      <header>
+        <div>
+          <p>${escapeHtml(summary)}</p>
+          <small>这里展示群内学到的词、模型释义、联网参考和是否会进入提示词。</small>
+        </div>
+        <details class="group-slang-add">
+          <summary>手动补一条</summary>
+          <div class="group-slang-editor" data-slang-new>
+            ${groupSlangInput("term", "词", "")}
+            ${groupSlangInput("meaning", "含义", "")}
+            ${groupSlangInput("usage", "用法", "")}
+            ${groupSlangInput("type", "类型", "")}
+            ${groupSlangInput("confidence", "置信度", "0.85", "number")}
+            <button type="button" data-slang-add>保存</button>
+          </div>
+        </details>
+      </header>
+      ${rows.length ? `<div class="group-slang-list">${rows.map(groupSlangRow).join("")}</div>` : `<div class="empty small">还没有学到群内黑话。开启群黑话学习后，常见梗、简称和特殊称呼会出现在这里。</div>`}
+    </div>
+  `;
+}
+
+function groupSlangRow(item) {
+  const sourceLabel = {
+    llm_slang: "模型释义",
+    explicit_correction: "群内纠正",
+    manual: "手动校正",
+  }[item.source] || item.source || "未释义";
+  const statusClass = `status-${item.status || "pending"}`;
+  const webMatch = Number(item.web_match || 0);
+  return `
+    <details class="group-slang-row ${escapeHtml(statusClass)}" data-slang-term="${escapeHtml(item.term || "")}">
+      <summary class="group-slang-main">
+        <div>
+          <b>${escapeHtml(item.term || "-")}</b>
+          <span>${escapeHtml(item.status_label || "待确认")}</span>
+        </div>
+        <p>${escapeHtml(item.meaning || "还没有稳定释义")}</p>
+        <footer>
+          <span>出现 ${escapeHtml(item.count || 0)} 次</span>
+          <span>最近 ${escapeHtml(item.last_seen || "暂无")}</span>
+          <span>${escapeHtml(sourceLabel)}</span>
+          ${item.type ? `<span>${escapeHtml(item.type)}</span>` : ""}
+          <span>置信度 ${escapeHtml(Math.round(Number(item.confidence || 0) * 100))}%</span>
+          ${webMatch ? `<span>联网匹配 ${escapeHtml(Math.round(webMatch * 100))}%</span>` : ""}
+        </footer>
+      </summary>
+      <div class="group-slang-body">
+        ${item.usage || item.evidence || item.web_evidence || item.not_owner ? `
+          <div class="group-slang-notes">
+            ${item.usage ? `<p><b>用法</b>${escapeHtml(item.usage)}</p>` : ""}
+            ${item.not_owner ? `<p><b>不是</b>${escapeHtml(item.not_owner)}</p>` : ""}
+            ${item.evidence ? `<p><b>群内证据</b>${escapeHtml(item.evidence)}</p>` : ""}
+            ${item.web_evidence ? `<p><b>联网参考</b>${escapeHtml(item.web_evidence)}</p>` : ""}
+          </div>
+        ` : `<div class="empty small">暂无更多证据或用法说明</div>`}
+        <details class="group-slang-edit">
+          <summary>编辑</summary>
+          <div class="group-slang-editor">
+            ${groupSlangInput("meaning", "含义", item.meaning || "")}
+            ${groupSlangInput("usage", "用法", item.usage || "")}
+            ${groupSlangInput("type", "类型", item.type || "")}
+            ${groupSlangInput("not_owner", "不是谁", item.not_owner || "")}
+            ${groupSlangInput("evidence", "群内证据", item.evidence || "")}
+            ${groupSlangInput("web_evidence", "联网参考", item.web_evidence || "")}
+            ${groupSlangInput("confidence", "置信度", item.confidence || 0.85, "number")}
+            ${groupSlangInput("web_match", "联网匹配", item.web_match || 0, "number")}
+            <div class="group-slang-actions">
+              <button type="button" data-slang-save>保存校正</button>
+              <button type="button" class="danger-outline" data-slang-delete>删除</button>
+            </div>
+          </div>
+        </details>
+      </div>
+    </details>
+  `;
+}
+
+function groupSlangInput(name, label, value, type = "text") {
+  const multiline = ["meaning", "usage", "not_owner", "evidence", "web_evidence"].includes(name);
+  if (multiline) {
+    return `<label>${escapeHtml(label)} <textarea data-slang-field="${escapeHtml(name)}" rows="2">${escapeHtml(value ?? "")}</textarea></label>`;
+  }
+  const attrs = type === "number" ? ` type="number" min="0" max="1" step="0.01"` : "";
+  return `<label>${escapeHtml(label)} <input data-slang-field="${escapeHtml(name)}"${attrs} value="${escapeHtml(value ?? "")}" /></label>`;
+}
+
+function groupSlangPayloadFromEditor(editor, groupId, term = "") {
+  const payload = { group_id: groupId, term };
+  editor.querySelectorAll("[data-slang-field]").forEach((input) => {
+    const key = input.dataset.slangField;
+    if (!key) return;
+    payload[key] = input.value;
+  });
+  if (!payload.term) payload.term = "";
+  return payload;
+}
+
 function groupActiveMembersView(members) {
   const items = Object.entries(members || {})
     .map(([id, raw]) => {
@@ -4448,6 +4653,7 @@ function groupInterjectionFeedbackView(detail) {
         <i style="width:${Math.round((positive / total) * 100)}%"></i>
       </div>
       ${cleanInterjectionText(last.text) ? `<p><span>上次插话</span>${escapeHtml(cleanInterjectionText(last.text))}</p>` : `<p class="muted">暂无最近插话内容</p>`}
+      ${last.reason ? `<p><span>插话原因</span>${escapeHtml(last.reason)}</p>` : ""}
     </div>
   `;
 }
@@ -4477,6 +4683,7 @@ function groupWakeupPanel(detail) {
         <span>最近唤醒</span>
         <b>${escapeHtml(last.word || "暂无")}</b>
         <small>${escapeHtml([last.strength_label, last.sender_name, last.time].filter(Boolean).join(" · ") || "还没有记录")}</small>
+        ${last.reason_detail || last.reason_label ? `<small>${escapeHtml(last.reason_detail || last.reason_label)}</small>` : ""}
       </article>
       <article>
         <span>唤醒疲劳</span>
@@ -4509,6 +4716,7 @@ function groupWakeupLogItem(item) {
   const weightText = topicWeight.reason
     ? `权重 ${Math.round(Number(topicWeight.multiplier || 1) * 100)}%：${topicWeight.reason}`
     : "";
+  const reasonText = item.reason_detail || item.reason_label || item.reason || "";
   return `
     <article class="group-wakeup-log ${isDim ? "is-dim" : ""}">
       <header>
@@ -4520,6 +4728,7 @@ function groupWakeupLogItem(item) {
       <footer>
         <span>${escapeHtml(item.sender_name || item.sender_id || "-")}</span>
         <span>${escapeHtml(item.word ? `词：${item.word}` : item.reason || "")}</span>
+        ${reasonText ? `<span>${escapeHtml(`原因：${reasonText}`)}</span>` : ""}
         ${item.probability ? `<span>${escapeHtml(`概率 ${Math.round(Number(item.probability || 0) * 100)}%`)}</span>` : ""}
         ${item.score ? `<span>${escapeHtml(`强度 ${item.score}/${item.threshold || "-"}`)}</span>` : ""}
         ${item.help_type ? `<span>${escapeHtml(`类型 ${item.help_type}`)}</span>` : ""}
@@ -4543,6 +4752,40 @@ function bindGroupActions(detail) {
         body.clear_observation = true;
       }
       await runAction(() => postJson("/group/update", body), "已更新群聊观测", button);
+    });
+  });
+  document.querySelectorAll("[data-slang-add]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const editor = button.closest("[data-slang-new]");
+      if (!editor) return;
+      const payload = groupSlangPayloadFromEditor(editor, detail.group_id);
+      if (!String(payload.term || "").trim()) {
+        button.textContent = "先填词";
+        setTimeout(() => { button.textContent = "保存"; }, 1200);
+        return;
+      }
+      await runAction(() => postJson("/group/slang/update", payload), "已保存黑话", button);
+      await renderGroupDetail(true);
+    });
+  });
+  document.querySelectorAll("[data-slang-save]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = button.closest("[data-slang-term]");
+      const editor = button.closest(".group-slang-editor");
+      if (!row || !editor) return;
+      const payload = groupSlangPayloadFromEditor(editor, detail.group_id, row.dataset.slangTerm || "");
+      await runAction(() => postJson("/group/slang/update", payload), "已保存黑话校正", button);
+      await renderGroupDetail(true);
+    });
+  });
+  document.querySelectorAll("[data-slang-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = button.closest("[data-slang-term]");
+      const term = row?.dataset?.slangTerm || "";
+      if (!term) return;
+      if (!requireSecondClick(button, `group-slang-delete:${detail.group_id}:${term}`, "再次点击删除这条黑话", "再次点击删除")) return;
+      await runAction(() => postJson("/group/slang/update", { group_id: detail.group_id, term, delete: true }), "已删除黑话", button);
+      await renderGroupDetail(true);
     });
   });
 }
@@ -6515,8 +6758,8 @@ function renderProactiveCandidates() {
       <section class="proactive-candidate ${escapeHtml(item.status || "unknown")}">
         <div class="proactive-candidate-head">
           <div>
-            <b>${escapeHtml(item.topic || item.reason || "未命名候选")}</b>
-            <span>${escapeHtml(userLabel)} · ${escapeHtml(roleLabel)} · ${escapeHtml(item.source || "-")} · ${escapeHtml(item.reason || "-")} · ${escapeHtml(item.action || "message")}</span>
+            <b>${escapeHtml(item.topic || item.reason_label || item.reason || "未命名候选")}</b>
+            <span>${escapeHtml(userLabel)} · ${escapeHtml(roleLabel)} · ${escapeHtml(item.source || "-")} · ${escapeHtml(item.reason_label || item.reason || "-")} · ${escapeHtml(item.action || "message")}</span>
           </div>
           <span class="badge">${escapeHtml(repeat > 1 ? `${status} x${repeat}` : status)}</span>
         </div>
@@ -6528,6 +6771,7 @@ function renderProactiveCandidates() {
           <span>创建：${escapeHtml(item.created || "-")}</span>
           ${repeat > 1 ? `<span>最近：${escapeHtml(item.last_seen || "-")}</span>` : ""}
           <span>评分：${escapeHtml(item.score || 0)}</span>
+          ${item.reason_detail ? `<span>为什么：${escapeHtml(item.reason_detail)}</span>` : ""}
           ${item.note ? `<span>${escapeHtml(item.note)}</span>` : ""}
         </div>
       </section>
@@ -6577,11 +6821,13 @@ function renderProactiveTasks() {
 function proactiveTaskMarkup(item) {
   const status = proactiveTaskStatusLabel(item.status);
   const source = proactiveTaskSourceLabel(item.source, item.has_timer_event);
-  const title = item.topic || item.reason || "未命名主动任务";
+  const title = item.topic || item.reason_label || item.reason || "未命名主动任务";
   const meta = [
     `用户：${item.user_label || item.user_id || "-"}`,
     `来源：${source}`,
     `动作：${item.action || "message"}`,
+    item.reason_label ? `原因：${item.reason_label}` : "",
+    item.reason_detail ? `为什么：${item.reason_detail}` : "",
     `计划：${item.scheduled || "-"}`,
     item.last_skip_reason ? `最近${item.last_skip_prefix || "跳过"}：${item.last_skip_reason}` : "",
     item.last_skip_ts ? `记录：${item.last_skip || "-"}` : "",
@@ -6670,11 +6916,12 @@ function proactiveAuditHtml(items) {
   }
   return items.slice(0, 30).map((item) => {
     const status = proactiveAuditStatusLabel(item.status);
-    const title = item.topic || item.reason || item.note || "主动执行记录";
+    const title = item.topic || item.reason_label || item.reason || item.note || "主动执行记录";
     const meta = [
       `用户：${item.user_label || item.user_id || "-"}`,
       `动作：${item.action || "message"}`,
-      item.reason ? `原因：${item.reason}` : "",
+      item.reason_label ? `原因：${item.reason_label}` : (item.reason ? `原因：${item.reason}` : ""),
+      item.reason_detail ? `为什么：${item.reason_detail}` : "",
       item.note ? `结果：${item.note}` : "",
       item.text_preview ? `消息：${item.text_preview}` : "",
       item.has_image ? "包含图片" : "",
@@ -7751,6 +7998,8 @@ function bindRoleplayModeSwitch() {
   document.querySelectorAll("[data-roleplay-example]").forEach((button) => {
     button.addEventListener("click", () => applyRoleplayExample(button.dataset.roleplayExample));
   });
+  const draftButton = document.getElementById("generateRoleplayDraftBtn");
+  if (draftButton) draftButton.addEventListener("click", () => generateRoleplayDraftFromPersona(draftButton));
 }
 
 function applyRoleplayExample(kind) {
@@ -7782,6 +8031,144 @@ function applyRoleplayExample(kind) {
   }
   const form = document.getElementById("roleplayProfileForm");
   if (form) markModuleFormDirty(form);
+}
+
+async function generateRoleplayDraftFromPersona(button) {
+  setActionBusy(button, true);
+  showToast("正在读取主回复人格并生成草稿...");
+  try {
+    const scopes = selectedRoleplayDraftScopes();
+    const result = await postJson("/roleplay/draft_from_persona", { scopes });
+    state.roleplayPersonaDraft = result || null;
+    renderRoleplayPersonaDraftPanel();
+    showToast("草稿已生成，请先预览再填入");
+  } catch (error) {
+    showToast(`生成失败：${error.message}`, "error");
+  } finally {
+    setActionBusy(button, false);
+  }
+}
+
+function selectedRoleplayDraftScopes() {
+  const scopes = Array.from(document.querySelectorAll("[data-roleplay-draft-scope]:checked"))
+    .map((input) => input.dataset.roleplayDraftScope || "")
+    .filter(Boolean);
+  return scopes.length ? scopes : ["persona"];
+}
+
+function renderRoleplayPersonaDraftPanel() {
+  const panel = document.getElementById("roleplayPersonaDraftPanel");
+  if (!panel) return;
+  const result = state.roleplayPersonaDraft || {};
+  const draft = result.draft || {};
+  const scopes = Array.isArray(result.scopes) ? result.scopes : [];
+  const rows = [
+    ...roleplayDraftPartRows(draft.persona_parts, roleplayPersonaParts, "角色"),
+    ...roleplayDraftPartRows(draft.world_parts, roleplayWorldParts, "世界观"),
+    ...roleplayDraftPartRows(draft.user_parts, roleplayVisionParts, "主人/用户"),
+    ...roleplayTranslationParts.map((label) => ["翻译", label, draft.translations?.[label] || ""]).filter(([, , value]) => String(value || "").trim()),
+  ];
+  const imageHint = String(draft.image_self_recognition_hint || "").trim();
+  if (imageHint) rows.push(["识图", "图片自我识别线索", imageHint]);
+  const notes = Array.isArray(draft.notes) ? draft.notes.filter(Boolean) : [];
+  panel.hidden = false;
+  panel.innerHTML = `
+    <header>
+      <div>
+        <b>主回复人格草稿</b>
+        <span>${escapeHtml(roleplayDraftScopeLabel(scopes))} · ${escapeHtml(result.persona_id ? `指定人格：${result.persona_id}` : "继承 AstrBot 默认人格")} · ${escapeHtml(result.provider_id || "主模型")} · 来源 ${escapeHtml(result.source_chars || 0)} 字</span>
+      </div>
+      <div class="persona-draft-panel-actions">
+        <button type="button" data-roleplay-draft-apply="empty">填入空白项</button>
+        <button type="button" data-roleplay-draft-apply="overwrite" class="soft">覆盖当前草稿</button>
+        <button type="button" data-roleplay-draft-close class="ghost">关闭</button>
+      </div>
+    </header>
+    <p>${escapeHtml(result.source_preview || "已读取主回复人格。")} </p>
+    ${rows.length ? `
+      <div class="persona-draft-grid">
+        ${rows.map(([group, label, value]) => `
+          <section>
+            <small>${escapeHtml(group)}</small>
+            <b>${escapeHtml(label)}</b>
+            <p>${escapeHtml(value)}</p>
+          </section>
+        `).join("")}
+      </div>
+    ` : `<div class="empty small">主模型没有抽取到足够明确的字段。可以换一个写得更具体的主回复人格后再试。</div>`}
+    ${notes.length ? `<div class="persona-draft-notes">${notes.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+  `;
+  panel.querySelector("[data-roleplay-draft-close]")?.addEventListener("click", () => {
+    panel.hidden = true;
+  });
+  panel.querySelectorAll("[data-roleplay-draft-apply]").forEach((control) => {
+    control.addEventListener("click", () => {
+      const overwrite = control.dataset.roleplayDraftApply === "overwrite";
+      if (overwrite && !requireSecondClick(control, "roleplay-draft-overwrite", "再次点击会覆盖当前设定工作台里对应范围的草稿", "再次点击覆盖")) {
+        return;
+      }
+      applyRoleplayPersonaDraft(overwrite);
+    });
+  });
+}
+
+function roleplayDraftPartRows(source, parts, group) {
+  const data = source && typeof source === "object" ? source : {};
+  return parts
+    .map(([key, label]) => [group, label, data[key] || ""])
+    .filter(([, , value]) => String(value || "").trim());
+}
+
+function roleplayDraftScopeLabel(scopes) {
+  const selected = new Set(scopes || []);
+  const labels = [
+    selected.has("persona") ? "角色设定" : "",
+    selected.has("world") ? "世界观设定" : "",
+    selected.has("user") ? "主人/用户设定" : "",
+  ].filter(Boolean);
+  return labels.length ? `范围：${labels.join("、")}` : "范围：角色设定";
+}
+
+function applyRoleplayPersonaDraft(overwrite = false) {
+  const draft = state.roleplayPersonaDraft?.draft || {};
+  const scopes = new Set(Array.isArray(state.roleplayPersonaDraft?.scopes) ? state.roleplayPersonaDraft.scopes : ["persona"]);
+  setRoleplayMode("standard");
+  let changed = 0;
+  if (scopes.has("persona")) {
+    roleplayPersonaParts.forEach(([key]) => {
+      changed += fillRoleplayDraftControl(`[data-roleplay-persona-part="${key}"]`, draft.persona_parts?.[key], overwrite);
+    });
+    changed += fillRoleplayDraftControl('#roleplayProfileForm [name="private_image_self_recognition_hint"]', draft.image_self_recognition_hint, overwrite);
+  }
+  if (scopes.has("world")) {
+    roleplayWorldParts.forEach(([key]) => {
+      changed += fillRoleplayDraftControl(`[data-roleplay-world-part="${key}"]`, draft.world_parts?.[key], overwrite);
+    });
+    roleplayTranslationParts.forEach((label) => {
+      changed += fillRoleplayDraftControl(`[data-roleplay-translation-part="${label}"]`, draft.translations?.[label], overwrite);
+    });
+  }
+  if (scopes.has("user")) {
+    changed += fillRoleplayDraftControl('#roleplayProfileForm [name="default_nickname"]', draft.user_parts?.nickname, overwrite);
+    roleplayVisionParts.forEach(([key]) => {
+      if (key === "nickname") return;
+      changed += fillRoleplayDraftControl(`[data-roleplay-user-part="${key}"]`, draft.user_parts?.[key], overwrite);
+    });
+  }
+  syncRoleplayStandardFieldsToFreeform();
+  const form = document.getElementById("roleplayProfileForm");
+  if (changed && form) markModuleFormDirty(form);
+  showToast(changed ? `已填入 ${changed} 项，请检查后保存角色设定` : "没有可填入的新字段");
+}
+
+function fillRoleplayDraftControl(selector, value, overwrite = false) {
+  const text = String(value || "").trim();
+  if (!text) return 0;
+  const control = document.querySelector(selector);
+  if (!control) return 0;
+  if (!overwrite && String(control.value || "").trim()) return 0;
+  control.value = text;
+  return 1;
 }
 
 function extractLabeledValue(text, labels, label) {
@@ -9339,6 +9726,12 @@ const featureDetailGuides = {
     trigger: "私聊或允许的群聊回复前。",
     enabled: "回复会参考精力、情绪、睡眠、健康、饥饿、周期或叠加状态，但不汇报字段。",
     disabled: "状态主要影响主动行为，普通回复不一定体现状态。",
+  },
+  enable_passive_state_delta_injection: {
+    summary: "把被动状态从“每轮完整注入”改成“同会话按变化注入”。",
+    trigger: "私聊被动回复准备提示词时。",
+    enabled: "首次、状态明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞日程和生活背景，更利于缓存命中。",
+    disabled: "恢复旧逻辑：每轮按轻量/完整模式注入当前状态和相关生活背景。",
   },
   passive_injection_position: {
     summary: "选择动态提示词注入到当前请求末尾还是系统提示词。",

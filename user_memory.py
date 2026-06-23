@@ -462,6 +462,8 @@ class UserMemoryMixin:
             return True
         if re.search(r"(傻逼|滚|闭嘴|垃圾|废物|妈的|草泥马|操你|死全家)", cleaned):
             return True
+        if re.search(r"(习近平|共产党|中共|六四|天安门|法轮功|台独|港独|藏独|疆独|民主运动|政治敏感)", cleaned):
+            return True
         if re.search(r"(复制|日志|报错|堆栈|代码|配置|schema|版本号|commit|diff|traceback)", cleaned, re.IGNORECASE):
             return True
         return False

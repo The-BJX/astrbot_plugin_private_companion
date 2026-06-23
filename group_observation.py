@@ -815,7 +815,7 @@ class GroupObservationMixin:
             term = _single_line(item.get("term") if isinstance(item, dict) else item, 40)
             meanings = group.get("slang_meanings")
             meaning_item = meanings.get(term) if isinstance(meanings, dict) else None
-            if isinstance(meaning_item, dict) and meaning_item.get("source") == "explicit_correction":
+            if isinstance(meaning_item, dict) and meaning_item.get("source") in {"explicit_correction", "manual"}:
                 kept.append(item)
                 continue
             if isinstance(item, dict):
@@ -1151,6 +1151,7 @@ class GroupObservationMixin:
                     + (f"｜不是：{not_owner}" if not_owner else "")
                     + (f"｜用法：{usage}" if usage else "")
                     + ("｜显式纠正" if source == "explicit_correction" else "")
+                    + ("｜手动校正" if source == "manual" else "")
                 )
         return "\n".join(lines)
 
@@ -1173,7 +1174,7 @@ class GroupObservationMixin:
         for term, item in list(meanings.items()):
             if not isinstance(item, dict):
                 continue
-            if item.get("source") == "explicit_correction":
+            if item.get("source") in {"explicit_correction", "manual"}:
                 continue
             confidence = min(1.0, _safe_float(item.get("confidence"), 1.0, 0.0))
             if confidence < 0.55 or self._is_uncertain_group_slang_meaning(item.get("meaning"), item.get("usage")):
@@ -1944,6 +1945,13 @@ class GroupObservationMixin:
             "reason": reason,
             "topic_signature": self._group_topic_signature(text),
         }
+        logger.info(
+            "[PrivateCompanion] 群聊主动插话已发送: group=%s reason=%s trigger=%s reply=%s",
+            group.get("group_id") or "",
+            _single_line(reason, 80),
+            _single_line(text, 80),
+            _single_line(reply, 80),
+        )
         threads = group.get("topic_threads")
         if isinstance(threads, list):
             signature = self._group_topic_signature(text)
@@ -2182,7 +2190,7 @@ class GroupObservationMixin:
                 current["slang_meanings"] = meanings
             for term, payload in normalized.items():
                 existing = meanings.get(term)
-                if isinstance(existing, dict) and existing.get("source") == "explicit_correction":
+                if isinstance(existing, dict) and existing.get("source") in {"explicit_correction", "manual"}:
                     continue
                 meanings[term] = payload
             current["last_slang_summary_at"] = now
@@ -2266,7 +2274,7 @@ class GroupObservationMixin:
             return ""
         lines: list[str] = []
         for term in picked_terms:
-            query = f"{term} 网络用语 梗 黑话 含义"
+            query = f"群聊环境下的网络用语“{term}”是什么意思？"
             try:
                 results = await searcher(query, umo=search_umo, topic="general")
             except Exception as exc:
@@ -2282,7 +2290,7 @@ class GroupObservationMixin:
                     continue
                 hits.append(f"- {title}: {snippet}".strip())
             if hits:
-                lines.append(f"{term}:\n" + "\n".join(hits))
+                lines.append(f"{term}（搜索：{query}）:\n" + "\n".join(hits))
         if lines:
             logger.info("[PrivateCompanion] 群黑话联网参考已收集: group=%s terms=%s", group_id, len(lines))
         return "\n".join(lines)[:1800]

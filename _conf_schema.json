@@ -3267,6 +3267,15 @@
       "enable_humanized_states": true
     }
   },
+  "enable_passive_state_delta_injection": {
+    "description": "被动状态增量注入",
+    "type": "bool",
+    "hint": "开启后，同一会话只在状态首次出现、明显变化或用户主动询问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景，可显著提高主模型缓存命中率。关闭后恢复每轮完整状态注入。",
+    "default": true,
+    "condition": {
+      "inject_passive_states": true
+    }
+  },
   "passive_injection_position": {
     "description": "动态提示词注入位置",
     "type": "string",

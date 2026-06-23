@@ -8150,15 +8150,26 @@ class DailyStateMixin:
                 self._debug_tick_skip(user_id, "主动行为失败或不适合发送", prefix="放弃")
                 continue
             try:
+                reason_label = _REASON_TEXT.get(reason, reason or "check_in")
+                reason_detail = "；".join(
+                    item
+                    for item in (
+                        f"话题={_single_line(topic, 80)}" if _single_line(topic, 80) else "",
+                        f"动机={_single_line(motive, 100)}" if _single_line(motive, 100) else "",
+                    )
+                    if item
+                )
                 logger.info(
-                    "[PrivateCompanion] 准备主动发送给 %s: reason=%s action=%s quote=%s text=%s image=%s extra=%s",
+                    "[PrivateCompanion] 准备主动发送给 %s: reason=%s(%s) action=%s quote=%s text=%s image=%s extra=%s%s",
                     user_id,
                     reason,
+                    reason_label,
                     effective_action_for_send or planned_action_for_send or "message",
                     bool(proactive_quote_message_id),
                     _single_line(text, 120),
                     bool(image_path),
                     len(extra_components),
+                    f" detail={reason_detail}" if reason_detail else "",
                 )
                 await self._send_proactive_message_chain(
                     user["umo"],

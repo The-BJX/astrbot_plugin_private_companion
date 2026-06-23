@@ -439,6 +439,55 @@ class GroupWakeupMixin:
             "interrupt": "打断休息",
         }.get(str(strength or ""), "普通唤醒")
 
+    @staticmethod
+    def _group_wakeup_reason_label(wakeup_type: str, reason: str = "") -> str:
+        wakeup_type = str(wakeup_type or "")
+        reason = str(reason or "")
+        labels = {
+            "direct_wakeup_word": "提到 Bot 名字或强唤醒词",
+            "contextual_wakeup_word": "提到弱相关唤醒词且语境需要 Bot 接话",
+            "interest_keyword": "命中兴趣关键词",
+            "probability_miss": "命中兴趣词但概率未触发",
+            "cooldown": "命中线索但仍在冷却",
+            "high_intensity": "高强度收口中暂停弱唤醒",
+            "open_help": "群里有人向懂的人求助",
+            "help_request": "群里有人明确求助",
+            "explain_question": "群里有人问原因或含义",
+            "identify_question": "群里有人请求识别或判断",
+            "question_mark": "句末疑问且包含问题词",
+            "question": "群里有人提出问题",
+            "cold_group_opening": "群聊安静后有人开场叫人",
+            "cold_group_greeting": "群聊安静后有人问候/冒泡",
+            "cold_group_help": "群聊安静后有人求助",
+            "cold_group": "群聊安静后有人重新开口",
+        }
+        return labels.get(reason) or {
+            "question": "答疑唤醒",
+            "cold_group": "冷群唤醒",
+            "direct_word": "强唤醒词",
+            "context_word": "弱相关唤醒",
+            "interest": "兴趣唤醒",
+        }.get(wakeup_type, reason or wakeup_type or "唤醒")
+
+    def _group_wakeup_reason_detail(self, wakeup: dict[str, Any], *, score_notes: list[str] | None = None) -> str:
+        wakeup_type = _single_line(wakeup.get("type"), 40)
+        reason = _single_line(wakeup.get("reason"), 80)
+        label = self._group_wakeup_reason_label(wakeup_type, reason)
+        score = _safe_int(wakeup.get("score"), 0, 0)
+        threshold = _safe_int(wakeup.get("threshold"), 0, 0)
+        parts = [label]
+        if score or threshold:
+            parts.append(f"强度 {score}/{threshold or '-'}")
+        help_type = _single_line(wakeup.get("help_type"), 24)
+        if help_type:
+            parts.append(f"类型 {help_type}")
+        idle_seconds = _safe_float(wakeup.get("idle_seconds"), 0.0, 0.0)
+        if idle_seconds > 0:
+            parts.append(f"冷群 {max(1, int(idle_seconds // 60))} 分钟")
+        if score_notes:
+            parts.append("；".join(score_notes[:3]))
+        return _single_line("，".join(parts), 180)
+
     def _record_group_wakeup_log(
         self,
         group: dict[str, Any],
@@ -460,6 +509,9 @@ class GroupWakeupMixin:
         fatigue = fatigue if isinstance(fatigue, dict) else self._group_wakeup_fatigue(group)
         wakeup_type = _single_line(wakeup.get("type"), 40)
         strength = _single_line(strength or wakeup.get("strength"), 24)
+        reason = _single_line(wakeup.get("reason"), 80)
+        reason_label = _single_line(wakeup.get("reason_label"), 80) or self._group_wakeup_reason_label(wakeup_type, reason)
+        reason_detail = _single_line(wakeup.get("reason_detail"), 180) or self._group_wakeup_reason_detail(wakeup)
         logs.append(
             {
                 "ts": _now_ts(),
@@ -473,7 +525,9 @@ class GroupWakeupMixin:
                 "threshold": _safe_int(wakeup.get("threshold"), 0, 0),
                 "intensity": _single_line(wakeup.get("intensity"), 20),
                 "help_type": _single_line(wakeup.get("help_type"), 30),
-                "reason": _single_line(wakeup.get("reason"), 80),
+                "reason": reason,
+                "reason_label": reason_label,
+                "reason_detail": reason_detail,
                 "topic_weight": wakeup.get("topic_weight") if isinstance(wakeup.get("topic_weight"), dict) else {},
                 "note": _single_line(note or wakeup.get("note"), 180),
                 "sender_id": _single_line(sender_id, 40),
@@ -735,7 +789,15 @@ class GroupWakeupMixin:
         if score <= 0:
             return {}
         intensity = "高" if score >= 85 else ("中" if score >= 70 else "低")
-        return {"word": "疑问", "reason": reason or "question", "score": min(100, score), "intensity": intensity, "help_type": help_type}
+        reason = reason or "question"
+        return {
+            "word": "疑问",
+            "reason": reason,
+            "reason_label": self._group_wakeup_reason_label("question", reason),
+            "score": min(100, score),
+            "intensity": intensity,
+            "help_type": help_type,
+        }
 
     def _group_wakeup_question_score_context(
         self,
@@ -801,16 +863,16 @@ class GroupWakeupMixin:
             return {}
         direct = re.search(r"(有人吗|在吗|还在吗|睡了吗|怎么没人|好安静|冷群|冒泡|路过|诈尸|开门|醒醒)", cleaned)
         if direct:
-            return {"word": "冷群", "reason": "cold_group_opening", "score": 86, "idle_seconds": round(now - last_seen, 1)}
+            return {"word": "冷群", "reason": "cold_group_opening", "reason_label": self._group_wakeup_reason_label("cold_group", "cold_group_opening"), "score": 86, "idle_seconds": round(now - last_seen, 1)}
         if re.search(r"(早|早上好|上午好|中午好|下午好|晚上好|晚好|嗨|hello|hi|哈喽|冒个泡|有人不|人呢)", cleaned, flags=re.I):
-            return {"word": "冷群", "reason": "cold_group_greeting", "score": 72, "idle_seconds": round(now - last_seen, 1)}
+            return {"word": "冷群", "reason": "cold_group_greeting", "reason_label": self._group_wakeup_reason_label("cold_group", "cold_group_greeting"), "score": 72, "idle_seconds": round(now - last_seen, 1)}
         if re.search(r"(急急如律令|急急国王|急急急急|急死谁了)", cleaned):
             return {}
         failure_context_pattern = r"(安装|配置|运行|启动|登录|请求|发送|上传|下载|连接|编译|构建|部署|调用|识别|读取|解析|保存|加载|同步|执行|支付|打开|导入|导出|更新|提交|注册|验证|接口|插件|程序|脚本|命令|模型|图片|语音|视频|文件|消息|任务).{0,8}失败|(?:一直|总是|老是|反复|还是|又).{0,6}失败|失败.{0,8}(怎么办|咋办|怎么弄|怎么解决|怎么处理|原因|报错|日志|重试|一直|总是|还是|又)"
         if re.search(r"救命", cleaned) and not (re.search(r"(怎么|咋办|怎么办|怎么弄|怎么解决|怎么处理|帮忙|帮我|报错|异常|卡住|跑不起来|急求|急问|在线等)", cleaned, flags=re.I) or re.search(failure_context_pattern, cleaned, flags=re.I)):
             return {}
         if re.search(r"(救命.{0,12}(怎么|咋办|怎么办|怎么弄|怎么解决|怎么处理|帮忙|帮我|报错|异常|卡住|跑不起来)|急求|急问|急用|急等|在线等|有点急|很急|比较急|挺急|急着|求问|请教|有没有人|有人懂|谁会|帮忙|咋办|怎么办|怎么弄|报错|崩了|卡住)", cleaned, flags=re.I) or re.search(failure_context_pattern, cleaned, flags=re.I):
-            return {"word": "冷群", "reason": "cold_group_help", "score": 78, "idle_seconds": round(now - last_seen, 1)}
+            return {"word": "冷群", "reason": "cold_group_help", "reason_label": self._group_wakeup_reason_label("cold_group", "cold_group_help"), "score": 78, "idle_seconds": round(now - last_seen, 1)}
         if re.search(r"[?？]$", cleaned):
             return {}
         return {}
@@ -907,6 +969,16 @@ class GroupWakeupMixin:
             if score >= threshold:
                 strength = self._group_wakeup_strength("question", group, scene)
                 final_intensity = "高" if score >= 85 else ("中" if score >= threshold else "低")
+                reason_detail = self._group_wakeup_reason_detail(
+                    {
+                        **question_signal,
+                        "type": "question",
+                        "score": score,
+                        "threshold": threshold,
+                        "intensity": final_intensity,
+                    },
+                    score_notes=score_notes,
+                )
                 return {
                     "type": "question",
                     "word": _single_line(question_signal.get("word"), 60) or "疑问",
@@ -916,7 +988,9 @@ class GroupWakeupMixin:
                     "intensity": final_intensity,
                     "help_type": _single_line(question_signal.get("help_type"), 24) or "解释",
                     "reason": _single_line(question_signal.get("reason"), 60) or "open_question",
-                    "note": f"群里有人提出求助问题，强度：{final_intensity}，类型：{_single_line(question_signal.get('help_type'), 24) or '解释'}。",
+                    "reason_label": _single_line(question_signal.get("reason_label"), 80) or self._group_wakeup_reason_label("question", question_signal.get("reason")),
+                    "reason_detail": reason_detail,
+                    "note": f"答疑唤醒：{reason_detail}。",
                 }
             self._record_group_wakeup_log(
                 group,
@@ -944,6 +1018,14 @@ class GroupWakeupMixin:
             fatigue = self._group_wakeup_fatigue(group)
             if score >= threshold:
                 strength = self._group_wakeup_strength("cold_group", group, scene)
+                reason_detail = self._group_wakeup_reason_detail(
+                    {
+                        **cold_group_signal,
+                        "type": "cold_group",
+                        "score": score,
+                        "threshold": threshold,
+                    }
+                )
                 return {
                     "type": "cold_group",
                     "word": _single_line(cold_group_signal.get("word"), 60) or "冷群",
@@ -951,7 +1033,9 @@ class GroupWakeupMixin:
                     "score": score,
                     "threshold": threshold,
                     "reason": _single_line(cold_group_signal.get("reason"), 60) or "cold_group",
-                    "note": "群聊安静后有人重新开口。",
+                    "reason_label": _single_line(cold_group_signal.get("reason_label"), 80) or self._group_wakeup_reason_label("cold_group", cold_group_signal.get("reason")),
+                    "reason_detail": reason_detail,
+                    "note": f"冷群唤醒：{reason_detail}。",
                 }
             self._record_group_wakeup_log(
                 group,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
@@ -209,6 +210,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "interjection_feedback": group.get("interjection_feedback") if isinstance(group.get("interjection_feedback"), dict) else {},
                     "last_bot_interjection": self._sanitize_last_bot_interjection(group.get("last_bot_interjection")),
                     "group_wakeup_logs": self._group_wakeup_logs(group),
+                    "slang_items": self._group_slang_items(group),
                     "formatted": {
                         "status": self.plugin._format_group_status(group),
                         "feedback": self.plugin._format_group_interjection_feedback(group),
@@ -270,4 +272,67 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             return self._ok(self._group_summary(group_id, snapshot))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新群失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def update_group_slang(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        group_id = str(payload.get("group_id", "")).strip()
+        term = self._single_line(payload.get("term"), 40)
+        if not group_id:
+            return self._error("缺少 group_id")
+        if not term:
+            return self._error("缺少黑话词")
+        try:
+            async with self.plugin._data_lock:
+                group = self.plugin._get_group(group_id)
+                terms = group.setdefault("slang_terms", [])
+                if not isinstance(terms, list):
+                    terms = []
+                    group["slang_terms"] = terms
+                meanings = group.setdefault("slang_meanings", {})
+                if not isinstance(meanings, dict):
+                    meanings = {}
+                    group["slang_meanings"] = meanings
+
+                if payload.get("delete"):
+                    group["slang_terms"] = [
+                        item
+                        for item in terms
+                        if self._single_line(item.get("term") if isinstance(item, dict) else item, 40) != term
+                    ]
+                    meanings.pop(term, None)
+                else:
+                    existing_term = None
+                    for item in terms:
+                        if isinstance(item, dict) and self._single_line(item.get("term"), 40) == term:
+                            existing_term = item
+                            break
+                    if existing_term is None:
+                        existing_term = {"term": term, "count": 0, "last_seen": 0}
+                        terms.append(existing_term)
+                    previous = meanings.get(term) if isinstance(meanings.get(term), dict) else {}
+                    confidence_raw = payload.get("confidence") if "confidence" in payload else previous.get("confidence", 0.85)
+                    web_match_raw = payload.get("web_match") if "web_match" in payload else previous.get("web_match", 0.0)
+                    confidence = max(0.0, min(1.0, self._float(confidence_raw)))
+                    web_match = max(0.0, min(1.0, self._float(web_match_raw)))
+                    meanings[term] = {
+                        "meaning": self._single_line(payload.get("meaning"), 120),
+                        "usage": self._single_line(payload.get("usage"), 120),
+                        "type": self._single_line(payload.get("type"), 24),
+                        "not_owner": self._single_line(payload.get("not_owner"), 90),
+                        "evidence": self._single_line(payload.get("evidence"), 160),
+                        "web_evidence": self._single_line(payload.get("web_evidence"), 220),
+                        "confidence": f"{confidence:.2f}",
+                        "web_match": f"{web_match:.2f}" if web_match > 0 else "",
+                        "source": "manual",
+                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    }
+                    terms.sort(key=lambda item: (_safe_int(item.get("count"), 0) if isinstance(item, dict) else 0), reverse=True)
+                self.plugin._save_data_sync()
+                snapshot = deepcopy(group)
+            detail = self._group_summary(group_id, snapshot)
+            detail["slang_items"] = self._group_slang_items(snapshot)
+            return self._ok(detail)
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新群黑话失败: {exc}", exc_info=True)
             return self._error(str(exc))

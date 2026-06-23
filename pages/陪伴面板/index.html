@@ -121,6 +121,16 @@
             </label>
             <p class="section-desc">和下方“设定工作台”的区别：这里是主回复人格，会影响私聊被动回复、关系评估和主动消息；下方角色设定补充只给日程、状态、日记、识图和生活背景使用，不应拿来覆盖主聊天人格。</p>
             <p class="section-desc">如需修改，请到 AstrBot 插件配置页，打开“我会永远陪着你”的配置项，在“插件指定人格 ID”里使用人格选择器选择；留空即继承 AstrBot 当前默认人格。</p>
+            <div class="persona-draft-actions">
+              <div class="persona-draft-scope" aria-label="草稿生成范围">
+                <label><input type="checkbox" data-roleplay-draft-scope="persona" checked /> 角色设定</label>
+                <label><input type="checkbox" data-roleplay-draft-scope="world" /> 世界观设定</label>
+                <label><input type="checkbox" data-roleplay-draft-scope="user" /> 主人/用户设定</label>
+              </div>
+              <button type="button" id="generateRoleplayDraftBtn">根据主回复人格生成草稿</button>
+              <span>只抽取明确写在主回复人格里的内容；生成后先预览，不会自动保存。</span>
+            </div>
+            <div id="roleplayPersonaDraftPanel" class="persona-draft-panel" hidden></div>
           </div>
         </article>
         <article class="roleplay-studio module-card" data-roleplay-mode="standard">
@@ -221,7 +231,8 @@
 其他补充信息："></textarea>
                 </label>
                 <label class="roleplay-textarea roleplay-freeform">世界观翻译提示
-                  <textarea name="worldview_adaptation_prompt" rows="8" placeholder="群聊 = 公会闲谈
+                  <textarea name="worldview_adaptation_prompt" rows="8" placeholder="可选。只有需要把现实平台换成世界观称呼时再填，例如：
+群聊 = 公会闲谈
 识屏 = 水晶映像
 B站 = 影像记录
 QQ空间 = 公开札记
@@ -236,12 +247,16 @@ QQ空间 = 公开札记
                   <label>世界观关系网 <textarea data-roleplay-world-part="network" rows="2"></textarea></label>
                   <label class="wide-field">其他补充信息 <textarea data-roleplay-world-part="extra" rows="2"></textarea></label>
                 </div>
+                <div class="roleplay-optional-note roleplay-standard">
+                  <b>平台称呼转写是可选项</b>
+                  <span>只有角色世界观需要把“群聊、识屏、B站、QQ空间、书柜”换成设定内说法时再填；普通现代日常可以全部留空。</span>
+                </div>
                 <div class="roleplay-standard translation-standard-grid">
-                  <label>群聊 <input data-roleplay-translation-part="群聊" placeholder="例如 公会闲谈" /></label>
-                  <label>识屏 <input data-roleplay-translation-part="识屏" placeholder="例如 水晶映像" /></label>
-                  <label>B站 <input data-roleplay-translation-part="B站" placeholder="例如 影像记录" /></label>
-                  <label>QQ空间 <input data-roleplay-translation-part="QQ空间" placeholder="例如 公开札记" /></label>
-                  <label>书柜 <input data-roleplay-translation-part="书柜" placeholder="例如 行囊书匣" /></label>
+                  <label>群聊（可选） <input data-roleplay-translation-part="群聊" placeholder="可留空，例如 公会闲谈" /></label>
+                  <label>识屏（可选） <input data-roleplay-translation-part="识屏" placeholder="可留空，例如 水晶映像" /></label>
+                  <label>B站（可选） <input data-roleplay-translation-part="B站" placeholder="可留空，例如 影像记录" /></label>
+                  <label>QQ空间（可选） <input data-roleplay-translation-part="QQ空间" placeholder="可留空，例如 公开札记" /></label>
+                  <label>书柜（可选） <input data-roleplay-translation-part="书柜" placeholder="可留空，例如 行囊书匣" /></label>
                 </div>
               </div>
               <div class="roleplay-knowledge-panel">
@@ -633,6 +648,14 @@ QQ空间 = 公开札记
           <article class="wide">
             <h2>最近调用</h2>
             <div id="tokenRecentTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide">
+            <h2>AstrBot 主链会话</h2>
+            <div id="tokenExternalSessionTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide">
+            <h2>AstrBot 主链最近对话</h2>
+            <div id="tokenExternalRecentTable" class="table-wrap compact-table"></div>
           </article>
         </div>
       </section>

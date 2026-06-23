@@ -1548,6 +1548,8 @@ class EventDispatchMixin:
                         "group_wakeup_direct_word",
                         "group_wakeup_context_word",
                         "group_wakeup_interest",
+                        "group_wakeup_question",
+                        "group_wakeup_cold_group",
                         "bot_conversation_followup",
                     }:
                         triggered = True
@@ -2240,6 +2242,8 @@ class EventDispatchMixin:
             "group_wakeup_direct_word",
             "group_wakeup_context_word",
             "group_wakeup_interest",
+            "group_wakeup_question",
+            "group_wakeup_cold_group",
             "bot_conversation_followup",
         }:
             return 0.0

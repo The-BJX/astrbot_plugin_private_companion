@@ -31,15 +31,27 @@ class TokenBudgetMixin:
         return max(1, int(ascii_chars / 4.0 + non_ascii_chars / 1.6))
 
     @staticmethod
-    def _usage_value(usage: Any, *keys: str) -> int:
+    def _usage_raw_value(usage: Any, key: str) -> Any:
+        if not usage:
+            return None
+        current = usage
+        for part in str(key or "").split("."):
+            if not part:
+                return None
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                current = getattr(current, part, None)
+            if current is None:
+                return None
+        return current
+
+    @classmethod
+    def _usage_value(cls, usage: Any, *keys: str) -> int:
         if not usage:
             return 0
         for key in keys:
-            value = None
-            if isinstance(usage, dict):
-                value = usage.get(key)
-            else:
-                value = getattr(usage, key, None)
+            value = cls._usage_raw_value(usage, key)
             try:
                 parsed = int(value)
             except (TypeError, ValueError):
@@ -64,6 +76,37 @@ class TokenBudgetMixin:
         prompt_tokens = self._usage_value(usage, "prompt_tokens", "input_tokens", "prompt", "input")
         completion_tokens = self._usage_value(usage, "completion_tokens", "output_tokens", "completion", "output")
         total_tokens = self._usage_value(usage, "total_tokens", "total")
+        cache_read_tokens = self._usage_value(
+            usage,
+            "input_cached",
+            "prompt_tokens_details.cached_tokens",
+            "input_tokens_details.cached_tokens",
+            "input_token_details.cached_tokens",
+            "input_token_details.cache_read",
+            "cache_read_input_tokens",
+            "cache_read_tokens",
+            "prompt_cache_hit_tokens",
+        )
+        cache_write_tokens = self._usage_value(
+            usage,
+            "cache_creation_input_tokens",
+            "cache_creation_tokens",
+            "cache_write_input_tokens",
+            "cache_write_tokens",
+            "prompt_cache_creation_tokens",
+        )
+        cached_tokens = self._usage_value(
+            usage,
+            "input_cached",
+            "cached_tokens",
+            "prompt_cached_tokens",
+            "input_cached_tokens",
+            "prompt_tokens_details.cached_tokens",
+            "input_tokens_details.cached_tokens",
+            "input_token_details.cached_tokens",
+        )
+        if cached_tokens <= 0:
+            cached_tokens = cache_read_tokens
         estimated = False
         if total_tokens <= 0:
             if prompt_tokens <= 0:
@@ -79,6 +122,9 @@ class TokenBudgetMixin:
             "prompt_tokens": max(0, prompt_tokens),
             "completion_tokens": max(0, completion_tokens),
             "total_tokens": max(0, total_tokens),
+            "cached_tokens": max(0, cached_tokens),
+            "cache_read_tokens": max(0, cache_read_tokens),
+            "cache_write_tokens": max(0, cache_write_tokens),
             "estimated": estimated or not usage,
         }
 
@@ -163,6 +209,9 @@ class TokenBudgetMixin:
             bucket["prompt_tokens"] = _safe_int(bucket.get("prompt_tokens"), 0) + usage["prompt_tokens"]
             bucket["completion_tokens"] = _safe_int(bucket.get("completion_tokens"), 0) + usage["completion_tokens"]
             bucket["total_tokens"] = _safe_int(bucket.get("total_tokens"), 0) + usage["total_tokens"]
+            bucket["cached_tokens"] = _safe_int(bucket.get("cached_tokens"), 0) + usage["cached_tokens"]
+            bucket["cache_read_tokens"] = _safe_int(bucket.get("cache_read_tokens"), 0) + usage["cache_read_tokens"]
+            bucket["cache_write_tokens"] = _safe_int(bucket.get("cache_write_tokens"), 0) + usage["cache_write_tokens"]
             bucket["estimated_tokens"] = _safe_int(bucket.get("estimated_tokens"), 0) + (usage["total_tokens"] if usage["estimated"] else 0)
             bucket["elapsed_ms"] = _safe_int(bucket.get("elapsed_ms"), 0) + max(0, elapsed_ms)
             bucket["last_ts"] = now_ts
@@ -198,6 +247,9 @@ class TokenBudgetMixin:
                 "prompt_tokens": usage["prompt_tokens"],
                 "completion_tokens": usage["completion_tokens"],
                 "total_tokens": usage["total_tokens"],
+                "cached_tokens": usage["cached_tokens"],
+                "cache_read_tokens": usage["cache_read_tokens"],
+                "cache_write_tokens": usage["cache_write_tokens"],
                 "estimated": usage["estimated"],
                 "elapsed_ms": max(0, elapsed_ms),
                 "prompt_chars": len(str(prompt or "")),
@@ -227,6 +279,9 @@ class TokenBudgetMixin:
         success: bool,
         error: str = "",
         resp: Any = None,
+        session_id: str = "",
+        sender_id: str = "",
+        message_type: str = "",
     ) -> None:
         usage = self._extract_llm_usage(resp, prompt, completion)
         now_ts = _now_ts()
@@ -247,6 +302,8 @@ class TokenBudgetMixin:
         by_day = store.setdefault("by_day", {})
         by_day_provider = store.setdefault("by_day_provider", {})
         by_day_task = store.setdefault("by_day_task", {})
+        by_session = store.setdefault("by_session", {})
+        by_day_session = store.setdefault("by_day_session", {})
         by_hour = store.setdefault("by_hour", {})
         recent = store.setdefault("recent", [])
         if not isinstance(recent, list):
@@ -254,6 +311,9 @@ class TokenBudgetMixin:
             store["recent"] = recent
         task_key = _single_line(task, 40) or "astrbot_reply"
         provider_key = provider_id or "(default)"
+        session_key = _single_line(session_id, 160) or "(unknown_session)"
+        sender_key = _single_line(sender_id, 80)
+        message_type_key = _single_line(message_type, 20)
 
         def bump(bucket: dict[str, Any]) -> None:
             bucket["calls"] = _safe_int(bucket.get("calls"), 0) + 1
@@ -262,6 +322,9 @@ class TokenBudgetMixin:
             bucket["prompt_tokens"] = _safe_int(bucket.get("prompt_tokens"), 0) + usage["prompt_tokens"]
             bucket["completion_tokens"] = _safe_int(bucket.get("completion_tokens"), 0) + usage["completion_tokens"]
             bucket["total_tokens"] = _safe_int(bucket.get("total_tokens"), 0) + usage["total_tokens"]
+            bucket["cached_tokens"] = _safe_int(bucket.get("cached_tokens"), 0) + usage["cached_tokens"]
+            bucket["cache_read_tokens"] = _safe_int(bucket.get("cache_read_tokens"), 0) + usage["cache_read_tokens"]
+            bucket["cache_write_tokens"] = _safe_int(bucket.get("cache_write_tokens"), 0) + usage["cache_write_tokens"]
             bucket["estimated_tokens"] = _safe_int(bucket.get("estimated_tokens"), 0) + (usage["total_tokens"] if usage["estimated"] else 0)
             bucket["elapsed_ms"] = _safe_int(bucket.get("elapsed_ms"), 0) + max(0, elapsed_ms)
             bucket["last_ts"] = now_ts
@@ -273,6 +336,8 @@ class TokenBudgetMixin:
             by_day.setdefault(day, {}),
             by_day_provider.setdefault(day, {}).setdefault(provider_key, {}),
             by_day_task.setdefault(day, {}).setdefault(task_key, {}),
+            by_session.setdefault(session_key, {}),
+            by_day_session.setdefault(day, {}).setdefault(session_key, {}),
             by_hour.setdefault(hour, {}),
         ):
             if isinstance(target, dict):
@@ -283,10 +348,16 @@ class TokenBudgetMixin:
                 "time": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "provider": provider_key,
                 "task": task_key,
+                "session": session_key,
+                "sender": sender_key,
+                "message_type": message_type_key,
                 "success": success,
                 "prompt_tokens": usage["prompt_tokens"],
                 "completion_tokens": usage["completion_tokens"],
                 "total_tokens": usage["total_tokens"],
+                "cached_tokens": usage["cached_tokens"],
+                "cache_read_tokens": usage["cache_read_tokens"],
+                "cache_write_tokens": usage["cache_write_tokens"],
                 "estimated": usage["estimated"],
                 "elapsed_ms": max(0, elapsed_ms),
                 "prompt_chars": len(str(prompt or "")),

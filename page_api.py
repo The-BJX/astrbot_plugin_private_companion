@@ -19,6 +19,7 @@ from urllib.parse import quote
 from astrbot.api import logger
 from quart import request, send_file
 
+from .constants import _REASON_TEXT
 from .helpers import _safe_int, _strip_internal_message_blocks, _today_key
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 
@@ -61,6 +62,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/groups", self.list_groups, ["GET"], "Private Companion Page groups"),
             ("/group", self.get_group, ["GET"], "Private Companion Page group detail"),
             ("/group/update", self.update_group, ["POST"], "Private Companion Page update group"),
+            ("/group/slang/update", self.update_group_slang, ["POST"], "Private Companion Page update group slang"),
             ("/settings/update", self.update_settings, ["POST"], "Private Companion Page update settings"),
             ("/proactive_only/unlock", self.update_proactive_only_unlock, ["POST"], "Private Companion Page proactive-only temporary unlock"),
             ("/diagnostics", self.get_diagnostics, ["GET"], "Private Companion Page diagnostics"),
@@ -88,6 +90,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/food_menu/update", self.update_food_menu, ["POST"], "Private Companion Page update food menu"),
             ("/food_menu/bulk_update", self.bulk_update_food_menu, ["POST"], "Private Companion Page bulk update food menu"),
             ("/external_ability/update", self.update_external_ability, ["POST"], "Private Companion Page update external proactive ability"),
+            ("/roleplay/draft_from_persona", self.generate_roleplay_draft_from_persona, ["POST"], "Private Companion Page roleplay draft from persona"),
             ("/preset/apply", self.apply_preset, ["POST"], "Private Companion Page apply preset"),
             ("/providers/available", self.list_available_providers, ["GET"], "Private Companion Page available providers"),
             ("/provider/test", self.test_provider, ["POST"], "Private Companion Page test provider"),
@@ -594,8 +597,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 result = await self._run_tts_generation_chain_test(payload)
             elif test_type == "proactive_message":
                 result = await self._run_proactive_message_chain_test(payload)
-            elif test_type == "skill_similarity":
-                result = await self._run_skill_similarity_check(payload)
+            elif test_type in {"skill_similarity", "model_diagnostics"}:
+                result = await self._run_model_diagnostics_check(payload)
             else:
                 return self._error("未知排障测试类型")
         except Exception as exc:
@@ -943,21 +946,88 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         return fallback
 
     async def _run_skill_similarity_check(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._run_model_diagnostics_check(payload)
+
+    async def _run_model_diagnostics_check(self, payload: dict[str, Any]) -> dict[str, Any]:
         started = time.time()
         use_model = self._normalize_bool_value(payload.get("use_model", True))
         async with self.plugin._data_lock:
             data = deepcopy(self.plugin.data)
-        local_items = self._skill_similarity_local_candidates(data)
+        skill_items = self._skill_similarity_local_candidates(data)
+        slang_items = self._model_diagnostics_slang_candidates(data)
+        pending_items = self._model_diagnostics_pending_observation_candidates(data)
+        memory_items = self._model_diagnostics_companion_memory_candidates(data)
+        expression_items = self._model_diagnostics_expression_candidates(data)
+        total_local = len(skill_items) + len(slang_items) + len(pending_items) + len(memory_items) + len(expression_items)
+        sections: list[dict[str, Any]] = [
+            {
+                "key": "skills",
+                "title": "技能相似项",
+                "local_count": len(skill_items),
+                "model_count": 0,
+                "suggestions": [
+                    f"技能｜{item.get('a')} ↔ {item.get('b')}：{item.get('reason')}"
+                    for item in skill_items[:4]
+                ],
+            },
+            {
+                "key": "slang",
+                "title": "群黑话杂音",
+                "local_count": len(slang_items),
+                "model_count": 0,
+                "suggestions": [
+                    f"黑话｜{item.get('group_name') or item.get('group_id')}｜{item.get('term')}：{item.get('reason')}"
+                    for item in slang_items[:4]
+                ],
+            },
+            {
+                "key": "worldbook",
+                "title": "关系网待确认观察",
+                "local_count": len(pending_items),
+                "model_count": 0,
+                "suggestions": [
+                    f"关系网｜{item.get('name') or item.get('user_id')}：{item.get('reason')}｜{item.get('evidence')}"
+                    for item in pending_items[:4]
+                ],
+            },
+            {
+                "key": "memory",
+                "title": "长期画像噪音",
+                "local_count": len(memory_items),
+                "model_count": 0,
+                "suggestions": [
+                    f"长期画像｜{item.get('name') or item.get('user_id')}｜{item.get('field')}：{item.get('reason')}｜{item.get('text')}"
+                    for item in memory_items[:4]
+                ],
+            },
+            {
+                "key": "expression",
+                "title": "表达学习污染",
+                "local_count": len(expression_items),
+                "model_count": 0,
+                "suggestions": [
+                    f"表达学习｜{item.get('name') or item.get('user_id')}：{item.get('reason')}｜{item.get('text')}"
+                    for item in expression_items[:4]
+                ],
+            },
+        ]
         steps: list[dict[str, str]] = [
             {
                 "name": "本地规则",
-                "status": "ok" if local_items else "info",
-                "detail": f"发现 {len(local_items)} 组疑似相似/冲突项" if local_items else "未发现明显重复、别名冲突或高重叠项",
+                "status": "ok" if total_local else "info",
+                "detail": (
+                    (
+                        f"发现 {total_local} 条候选：技能 {len(skill_items)}、黑话 {len(slang_items)}、"
+                        f"关系网 {len(pending_items)}、长期画像 {len(memory_items)}、表达学习 {len(expression_items)}"
+                    )
+                    if total_local
+                    else "未发现明显技能冲突、黑话杂音、无效关系观察或私聊学习污染"
+                ),
             }
         ]
         model_items: list[str] = []
         provider_id = ""
-        if use_model and local_items:
+        if use_model and total_local:
             caller = getattr(self.plugin, "_llm_call", None)
             if callable(caller):
                 provider_selector = getattr(self.plugin, "_task_provider", None)
@@ -976,20 +1046,28 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         or getattr(self.plugin, "llm_provider_id", "")
                         or ""
                     )
-                prompt = self._skill_similarity_review_prompt(data, local_items)
+                prompt = self._model_diagnostics_review_prompt(
+                    data,
+                    skill_items,
+                    slang_items,
+                    pending_items,
+                    memory_items,
+                    expression_items,
+                )
                 try:
                     raw = await caller(
                         prompt,
-                        max_tokens=500,
+                        max_tokens=700,
                         provider_id=provider_id,
-                        task="troubleshooting_skill_similarity",
+                        task="troubleshooting_model_diagnostics",
                     )
                     model_items = self._parse_skill_similarity_model_result(raw)
+                    self._attach_model_diagnostics_section_suggestions(sections, model_items)
                     steps.append(
                         {
                             "name": "模型复核",
                             "status": "ok" if model_items else "info",
-                            "detail": f"模型给出 {len(model_items)} 条建议" if model_items else "模型未给出额外合并建议",
+                            "detail": f"模型给出 {len(model_items)} 条建议" if model_items else "模型未给出额外排障建议",
                         }
                     )
                 except Exception as exc:
@@ -998,27 +1076,30 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 steps.append({"name": "模型复核", "status": "warn", "detail": "插件缺少 _llm_call，无法调用模型"})
         elif not use_model:
             steps.append({"name": "模型复核", "status": "info", "detail": "本次按请求仅执行本地规则检查"})
-        elif not local_items:
+        elif not total_local:
             steps.append({"name": "模型复核", "status": "info", "detail": "没有本地候选，未调用模型"})
 
-        local_preview = [
-            f"{item.get('a')} ↔ {item.get('b')}：{item.get('reason')}"
-            for item in local_items[:8]
-        ]
-        all_suggestions = [*local_preview, *model_items]
+        local_preview = []
+        for section in sections:
+            local_preview.extend(section.get("suggestions") if isinstance(section.get("suggestions"), list) else [])
+        all_suggestions = [*local_preview]
+        for item in model_items:
+            if item not in all_suggestions:
+                all_suggestions.append(item)
         detail = (
-            f"本地发现 {len(local_items)} 组候选，模型给出 {len(model_items)} 条建议"
+            f"本地发现 {total_local} 条候选，模型给出 {len(model_items)} 条建议"
             if all_suggestions
-            else "技能项目前看起来没有明显相似/冲突问题"
+            else "模型相关数据目前没有明显杂音"
         )
         return {
             "ok": True,
-            "title": "技能相似项检查",
+            "title": "模型数据排障",
             "provider": self._single_line(provider_id, 100),
             "detail": self._single_line(detail, 220),
             "text_preview": self._single_line(" | ".join(all_suggestions[:5]), 220),
-            "suggestions": [self._single_line(item, 220) for item in all_suggestions[:10]],
-            "local_count": len(local_items),
+            "suggestions": [self._single_line(item, 220) for item in all_suggestions[:12]],
+            "sections": sections,
+            "local_count": total_local,
             "model_count": len(model_items),
             "suggestion_count": len(all_suggestions),
             "extra_count": max(0, len(all_suggestions) - 5),
@@ -1107,6 +1188,370 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 candidates.append({"a": left["name"], "b": right["name"], "reason": reason})
         return candidates[:12]
 
+    def _model_diagnostics_slang_candidates(self, data: dict[str, Any]) -> list[dict[str, str]]:
+        groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+        common_terms = {
+            "什么",
+            "这个",
+            "那个",
+            "就是",
+            "可以",
+            "没有",
+            "真的",
+            "一下",
+            "今天",
+            "明天",
+            "昨天",
+            "然后",
+            "现在",
+            "等等",
+            "不是",
+            "因为",
+            "所以",
+            "但是",
+            "感觉",
+            "可能",
+            "应该",
+            "好像",
+            "知道",
+            "看看",
+            "消息",
+            "图片",
+        }
+        reaction_terms = {"哈哈", "哈哈哈", "笑死", "草", "好的", "收到", "嗯嗯", "啊啊", "救命", "失败", "报错"}
+        media_markers = ("[图片]", "[视频]", "[语音]", "[表情]", "[文件]", "[CQ:", "http://", "https://")
+        candidates: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for group_id, group in groups.items():
+            if not isinstance(group, dict):
+                continue
+            group_name = self._single_line(group.get("name") or group.get("group_name") or group_id, 40)
+            terms = group.get("slang_terms") if isinstance(group.get("slang_terms"), list) else []
+            meanings = group.get("slang_meanings") if isinstance(group.get("slang_meanings"), dict) else {}
+            indexed: list[dict[str, Any]] = []
+            for raw in terms:
+                if isinstance(raw, dict):
+                    indexed.append(raw)
+                else:
+                    indexed.append({"term": raw})
+            for raw in indexed[:160]:
+                term = self._single_line(raw.get("term") if isinstance(raw, dict) else raw, 50)
+                if not term:
+                    continue
+                if isinstance(raw, dict) and self._single_line(raw.get("source"), 20) == "manual":
+                    continue
+                compact = re.sub(r"\s+", "", term)
+                reason = ""
+                if any(marker.lower() in term.lower() for marker in media_markers):
+                    reason = "像媒体占位或链接，不像黑话"
+                elif re.fullmatch(r"\d{5,}", compact):
+                    reason = "像纯数字 ID，不像黑话"
+                elif compact in common_terms:
+                    reason = "像普通高频词，不像群内黑话"
+                elif compact in reaction_terms:
+                    reason = "像一次性语气/反应词，容易污染黑话"
+                elif len(compact) <= 1 and not re.fullmatch(r"[a-zA-Z]+", compact):
+                    reason = "过短，缺少可解释语义"
+                elif len(compact) >= 18 and re.search(r"[。！？!?，,]", term):
+                    reason = "像整句聊天内容，不像词条"
+                else:
+                    raw_meaning = meanings.get(term) if isinstance(meanings.get(term), dict) else {}
+                    meaning = self._single_line(raw_meaning.get("meaning"), 80) if isinstance(raw_meaning, dict) else ""
+                    confidence = self._float(raw_meaning.get("confidence")) if isinstance(raw_meaning, dict) else 0.0
+                    count = self._int(raw.get("count")) if isinstance(raw, dict) else 0
+                    if meaning and confidence < 0.35 and count <= 2:
+                        reason = "低频且释义置信度很低"
+                    elif meaning and any(marker in meaning for marker in ("无法判断", "语境不明", "不确定")) and count <= 2:
+                        reason = "释义长期不确定，建议复核"
+                if not reason:
+                    continue
+                key = (str(group_id), term)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "group_id": self._single_line(group_id, 40),
+                        "group_name": group_name,
+                        "term": term,
+                        "reason": reason,
+                        "count": str(self._int(raw.get("count")) if isinstance(raw, dict) else 0),
+                    }
+                )
+                if len(candidates) >= 24:
+                    return candidates
+        return candidates
+
+    def _model_diagnostics_pending_observation_candidates(self, data: dict[str, Any]) -> list[dict[str, str]]:
+        profiles = data.get("worldbook_member_profiles") if isinstance(data.get("worldbook_member_profiles"), dict) else {}
+        generic_reactions = {"哈哈", "哈哈哈", "笑死", "草", "好的", "收到", "嗯嗯", "啊啊啊", "救命", "离谱", "不是吧"}
+        log_markers = ("Traceback", "[ERROR]", "[WARN]", "Exception", "File \"", "```", "ERROR", "WARN")
+        candidates: list[dict[str, str]] = []
+        seen_global: set[str] = set()
+        for user_id, profile in profiles.items():
+            if not isinstance(profile, dict):
+                continue
+            name = self._single_line(profile.get("name") or user_id, 40)
+            pending = profile.get("pending_observations") if isinstance(profile.get("pending_observations"), list) else []
+            seen_local: set[str] = set()
+            for raw in pending[:12]:
+                if not isinstance(raw, dict):
+                    continue
+                evidence = self._single_line(raw.get("evidence") or raw.get("content") or raw.get("title"), 140)
+                content = self._single_line(raw.get("content") or evidence, 180)
+                compact = re.sub(r"[\s，。！？!?~～…、,.]+", "", evidence)
+                norm = compact.lower()
+                reason = ""
+                if not compact or len(compact) <= 2:
+                    reason = "内容过短，难以沉淀成人物观察"
+                elif compact in generic_reactions:
+                    reason = "像临时语气反应，不像稳定人物信息"
+                elif any(marker in evidence or marker in content for marker in log_markers):
+                    reason = "像日志/代码片段，不适合写入关系网"
+                elif norm in seen_local:
+                    reason = "同一成员下重复观察"
+                elif norm in seen_global:
+                    reason = "跨成员重复泛化观察，可能没有辨识度"
+                elif re.fullmatch(r"[\dA-Za-z_-]{8,}", compact):
+                    reason = "像 ID 或文件名，不像人物观察"
+                elif any(marker in evidence for marker in ("今天", "刚刚", "现在", "一会儿", "等下")) and self._int(raw.get("count")) <= 1:
+                    reason = "像临时状态，缺少长期价值"
+                seen_local.add(norm)
+                seen_global.add(norm)
+                if not reason:
+                    continue
+                candidates.append(
+                    {
+                        "user_id": self._single_line(user_id, 40),
+                        "name": name,
+                        "title": self._single_line(raw.get("title"), 50),
+                        "evidence": evidence,
+                        "reason": reason,
+                    }
+                )
+                if len(candidates) >= 24:
+                    return candidates
+        return candidates
+
+    def _model_diagnostics_companion_memory_candidates(self, data: dict[str, Any]) -> list[dict[str, str]]:
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        temporary_tokens = ("今天", "刚刚", "刚才", "现在", "今晚", "明天", "这次", "暂时", "一会儿", "等会儿", "刚睡醒", "刚下课")
+        joke_tokens = ("开玩笑", "不是认真的", "随口", "口嗨", "逗你的", "反话", "阴阳怪气")
+        log_markers = ("Traceback", "Error code:", "Exception", "[INFO]", "[WARN]", "[ERRO]", "[Core]", "```", "git ", "python ", "node ")
+        internal_markers = ("提示词", "系统提示", "内部控制标签", "插件配置", "schema", "token", "cache hit", "PCTTS", "<pc_tts")
+        profile_fields = {
+            "strong_memories": "强记忆",
+            "weak_preferences": "弱偏好",
+            "user_traits": "用户画像",
+            "interests": "兴趣/偏好",
+            "boundaries": "边界/雷点",
+            "relationship_notes": "关系线索",
+            "speaking_style": "说话习惯",
+        }
+
+        def reason_for(text: str) -> str:
+            if any(marker.lower() in text.lower() for marker in log_markers):
+                return "像日志/代码/报错内容，不适合长期画像"
+            if any(marker.lower() in text.lower() for marker in internal_markers):
+                return "像系统或插件内部文本，不适合长期画像"
+            if any(token in text for token in joke_tokens):
+                return "带有玩笑/反讽不确定性，建议人工确认"
+            if any(token in text for token in temporary_tokens) and not any(token in text for token in ("以后", "长期", "一直", "固定", "默认", "记住", "记得")):
+                return "像临时状态，不像长期画像"
+            if re.fullmatch(r"[\dA-Za-z_-]{8,}", re.sub(r"\s+", "", text)):
+                return "像 ID 或文件名，不像用户画像"
+            return ""
+
+        candidates: list[dict[str, str]] = []
+        for user_id, user in users.items():
+            if not isinstance(user, dict):
+                continue
+            name = self._single_line(user.get("nickname") or user.get("name") or user_id, 40)
+            memory = user.get("companion_memory") if isinstance(user.get("companion_memory"), dict) else {}
+            raw_items = memory.get("items") if isinstance(memory.get("items"), list) else []
+            for raw in raw_items[:24]:
+                if not isinstance(raw, dict):
+                    continue
+                text = self._single_line(raw.get("text"), 160)
+                reason = reason_for(text)
+                if not reason:
+                    continue
+                candidates.append(
+                    {
+                        "user_id": self._single_line(user_id, 40),
+                        "name": name,
+                        "field": self._single_line(raw.get("kind") or "原始记录", 30),
+                        "text": text,
+                        "reason": reason,
+                    }
+                )
+                if len(candidates) >= 24:
+                    return candidates
+            profile = memory.get("profile") if isinstance(memory.get("profile"), dict) else {}
+            for key, label in profile_fields.items():
+                value = profile.get(key)
+                values = value if isinstance(value, list) else ([value] if value else [])
+                for raw_text in values[:8]:
+                    text = self._single_line(raw_text, 160)
+                    reason = reason_for(text)
+                    if not reason:
+                        continue
+                    candidates.append(
+                        {
+                            "user_id": self._single_line(user_id, 40),
+                            "name": name,
+                            "field": label,
+                            "text": text,
+                            "reason": reason,
+                        }
+                    )
+                    if len(candidates) >= 24:
+                        return candidates
+        return candidates
+
+    def _model_diagnostics_expression_candidates(self, data: dict[str, Any]) -> list[dict[str, str]]:
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        log_markers = ("Traceback", "Error code:", "Exception", "[INFO]", "[WARN]", "[ERRO]", "[Core]", "```", "commit ", "diff ")
+        model_markers = ("<pc_tts", "</pc_tts>", "[[PCTTS:", "send_message_to_user", "assistant", "system prompt", "提示词")
+        political_markers = (
+            "习近平",
+            "共产党",
+            "中共",
+            "六四",
+            "天安门",
+            "法轮功",
+            "台独",
+            "港独",
+            "藏独",
+            "疆独",
+            "民主运动",
+            "政治敏感",
+        )
+
+        def reason_for(text: str) -> str:
+            lowered = text.lower()
+            if any(marker.lower() in lowered for marker in log_markers):
+                return "像日志/代码/报错内容，不该作为表达习惯"
+            if any(marker.lower() in lowered for marker in model_markers):
+                return "像模型输出格式或内部标签，不该作为表达习惯"
+            if any(marker in text for marker in political_markers):
+                return "含政治敏感内容，不适合进入表达学习"
+            if text.count("…") + text.count("～") + text.count("~") >= 5:
+                return "标点留白过多，容易污染表达节奏"
+            if text.count("？") + text.count("?") + text.count("！") + text.count("!") >= 6:
+                return "疑问/感叹标点过多，容易污染表达节奏"
+            return ""
+
+        candidates: list[dict[str, str]] = []
+        for user_id, user in users.items():
+            if not isinstance(user, dict):
+                continue
+            name = self._single_line(user.get("nickname") or user.get("name") or user_id, 40)
+            profile = user.get("expression_profile") if isinstance(user.get("expression_profile"), dict) else {}
+            samples = profile.get("samples") if isinstance(profile.get("samples"), list) else []
+            for raw in samples[:36]:
+                if not isinstance(raw, dict):
+                    continue
+                text = self._single_line(raw.get("phrase") or raw.get("ending"), 120)
+                marks = raw.get("punctuation") if isinstance(raw.get("punctuation"), dict) else {}
+                pause_total = sum(self._int(marks.get(mark)) for mark in ("…", "～", "~"))
+                strong_total = sum(self._int(marks.get(mark)) for mark in ("？", "?", "！", "!"))
+                direct_reason = ""
+                if pause_total >= 5:
+                    direct_reason = "标点留白过多，容易污染表达节奏"
+                elif strong_total >= 6:
+                    direct_reason = "疑问/感叹标点过多，容易污染表达节奏"
+                if not text:
+                    text = " ".join(f"{mark}×{self._int(count)}" for mark, count in marks.items() if self._int(count) > 0)
+                reason = direct_reason or reason_for(text)
+                if not reason:
+                    continue
+                candidates.append(
+                    {
+                        "user_id": self._single_line(user_id, 40),
+                        "name": name,
+                        "text": text,
+                        "reason": reason,
+                    }
+                )
+                if len(candidates) >= 24:
+                    return candidates
+            for raw_text in [*(profile.get("recent_phrases") if isinstance(profile.get("recent_phrases"), list) else []), *(profile.get("endings") if isinstance(profile.get("endings"), list) else [])][:36]:
+                text = self._single_line(raw_text, 120)
+                reason = reason_for(text)
+                if not reason:
+                    continue
+                candidates.append(
+                    {
+                        "user_id": self._single_line(user_id, 40),
+                        "name": name,
+                        "text": text,
+                        "reason": reason,
+                    }
+                )
+                if len(candidates) >= 24:
+                    return candidates
+        return candidates
+
+    def _model_diagnostics_review_prompt(
+        self,
+        data: dict[str, Any],
+        skill_candidates: list[dict[str, str]],
+        slang_candidates: list[dict[str, str]],
+        pending_candidates: list[dict[str, str]],
+        memory_candidates: list[dict[str, str]],
+        expression_candidates: list[dict[str, str]],
+    ) -> str:
+        skill_lines = [f"- {item.get('a')} / {item.get('b')}：{item.get('reason')}" for item in skill_candidates[:12]]
+        slang_lines = [
+            f"- {item.get('group_name') or item.get('group_id')}｜{item.get('term')}｜{item.get('reason')}｜次数:{item.get('count') or 0}"
+            for item in slang_candidates[:18]
+        ]
+        pending_lines = [
+            f"- {item.get('name') or item.get('user_id')}｜{item.get('reason')}｜{item.get('evidence')}"
+            for item in pending_candidates[:18]
+        ]
+        memory_lines = [
+            f"- {item.get('name') or item.get('user_id')}｜{item.get('field')}｜{item.get('reason')}｜{item.get('text')}"
+            for item in memory_candidates[:18]
+        ]
+        expression_lines = [
+            f"- {item.get('name') or item.get('user_id')}｜{item.get('reason')}｜{item.get('text')}"
+            for item in expression_candidates[:18]
+        ]
+        return (
+            "你是陪伴插件的数据排障助手。请复核下面这些由本地规则挑出的候选项，只指出明显会影响模型理解的杂音。\n"
+            "范围包括：技能相似项、群黑话杂音、关系网待确认观察、长期画像噪音、表达学习污染。不要修改数据，不要发散，不要把正常口癖或真实群梗误报。\n"
+            "表达学习污染只关注日志、复制模型格式、政治敏感内容和过度标点等，不要扩展到普通语气判断。\n"
+            "输出 1-10 条短建议，每条不超过 45 字，必须用分类前缀：技能｜、黑话｜、关系网｜、长期画像｜、表达学习｜。\n"
+            "如果某一类没有明显问题，不要为了凑数输出。若全部无明显问题，输出“未发现明显模型数据杂音”。\n\n"
+            "技能候选：\n" + ("\n".join(skill_lines) if skill_lines else "- 无") + "\n\n"
+            "群黑话候选：\n" + ("\n".join(slang_lines) if slang_lines else "- 无") + "\n\n"
+            "关系网待确认观察候选：\n" + ("\n".join(pending_lines) if pending_lines else "- 无") + "\n\n"
+            "长期画像候选：\n" + ("\n".join(memory_lines) if memory_lines else "- 无") + "\n\n"
+            "表达学习候选：\n" + ("\n".join(expression_lines) if expression_lines else "- 无")
+        )
+
+    def _attach_model_diagnostics_section_suggestions(self, sections: list[dict[str, Any]], suggestions: list[str]) -> None:
+        section_by_key = {str(section.get("key")): section for section in sections if isinstance(section, dict)}
+        prefix_map = {
+            "技能": "skills",
+            "黑话": "slang",
+            "关系网": "worldbook",
+            "长期画像": "memory",
+            "表达学习": "expression",
+        }
+        for suggestion in suggestions:
+            prefix = self._single_line(str(suggestion).split("｜", 1)[0], 20)
+            key = prefix_map.get(prefix)
+            section = section_by_key.get(key or "")
+            if not section:
+                continue
+            items = section.setdefault("suggestions", [])
+            if isinstance(items, list):
+                items.append(self._single_line(suggestion, 180))
+            section["model_count"] = self._int(section.get("model_count")) + 1
+
     def _skill_similarity_review_prompt(self, data: dict[str, Any], candidates: list[dict[str, str]]) -> str:
         summary = self._skill_growth_summary(data)
         skills = summary.get("items") if isinstance(summary.get("items"), list) else []
@@ -1137,9 +1582,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         for line in re.split(r"[\r\n]+", text):
             item = re.sub(r"^\s*[-*•\d.、)）]+\s*", "", line).strip()
             item = self._single_line(item, 90)
+            if re.search(r"^(未发现|没有发现|暂无|无明显|无额外)", item):
+                continue
             if item and item not in lines:
                 lines.append(item)
-        return lines[:6]
+        return lines[:10]
 
     async def _remember_troubleshooting_test_result(self, test_type: str, result: dict[str, Any]) -> None:
         if not test_type:
@@ -1253,6 +1700,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "action": self._single_line(result.get("action"), 60),
             "reason": self._single_line(result.get("reason"), 40),
             "extra_count": self._int(result.get("extra_count")),
+            "local_count": self._int(result.get("local_count")),
+            "model_count": self._int(result.get("model_count")),
+            "suggestion_count": self._int(result.get("suggestion_count")),
+            "suggestions": [
+                self._single_line(item, 220)
+                for item in (result.get("suggestions") if isinstance(result.get("suggestions"), list) else [])[:12]
+                if self._single_line(item, 220)
+            ],
+            "sections": [
+                {
+                    "key": self._single_line(section.get("key"), 40),
+                    "title": self._single_line(section.get("title"), 60),
+                    "local_count": self._int(section.get("local_count")),
+                    "model_count": self._int(section.get("model_count")),
+                    "suggestions": [
+                        self._single_line(item, 220)
+                        for item in (section.get("suggestions") if isinstance(section.get("suggestions"), list) else [])[:8]
+                        if self._single_line(item, 220)
+                    ],
+                }
+                for section in (result.get("sections") if isinstance(result.get("sections"), list) else [])[:6]
+                if isinstance(section, dict)
+            ],
             "steps": [
                 {
                     "name": self._single_line(step.get("name"), 40),
@@ -1273,6 +1743,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "image_generation": "图片生成链路测试",
             "tts_generation": "TTS 生成链路测试",
             "proactive_message": "主动消息链路测试",
+            "model_diagnostics": "模型数据排障",
             "skill_similarity": "技能相似项检查",
         }.get(test_type, "排障链路测试")
 
@@ -3028,6 +3499,176 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             logger.error(f"[PrivateCompanionPage] 更新外部主动能力失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def generate_roleplay_draft_from_persona(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        umo = self._single_line(payload.get("umo"), 220)
+        scopes = self._normalize_roleplay_draft_scopes(payload.get("scopes"))
+        try:
+            refresher = getattr(self.plugin, "_refresh_default_persona_prompt", None)
+            if callable(refresher):
+                persona_prompt = await refresher(umo)
+            else:
+                getter = getattr(self.plugin, "_get_default_persona_prompt", None)
+                persona_prompt = getter() if callable(getter) else ""
+            persona_prompt = str(persona_prompt or "").strip()
+            if not persona_prompt or persona_prompt.startswith("未读取到 AstrBot 默认人格"):
+                return self._error("还没有读取到可用的主回复人格文本，请先让 Bot 触发一次对话或检查人格配置")
+            caller = getattr(self.plugin, "_llm_call", None)
+            if not callable(caller):
+                return self._error("当前插件运行态无法调用主模型")
+            provider_id = str(getattr(self.plugin, "llm_provider_id", "") or "").strip()
+            raw = await caller(
+                self._roleplay_draft_from_persona_prompt(persona_prompt, scopes),
+                max_tokens=1400,
+                provider_id=provider_id,
+                task="roleplay_draft_from_persona",
+            )
+            draft = self._normalize_roleplay_draft_result(self._loads_json_object(raw), scopes)
+            return self._ok(
+                {
+                    "draft": draft,
+                    "scopes": scopes,
+                    "provider_id": provider_id,
+                    "persona_id": self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120),
+                    "source_chars": len(persona_prompt),
+                    "source_preview": self._single_line(persona_prompt, 220),
+                    "raw_preview": self._single_line(raw, 220),
+                }
+            )
+        except Exception as exc:
+            logger.warning(f"[PrivateCompanionPage] 根据主回复人格生成设定草稿失败: {exc}", exc_info=True)
+            return self._error(f"生成草稿失败: {self._single_line(exc, 160)}")
+
+    def _normalize_roleplay_draft_scopes(self, raw: Any) -> list[str]:
+        allowed = {"persona", "world", "user"}
+        aliases = {
+            "角色": "persona",
+            "角色设定": "persona",
+            "worldview": "world",
+            "世界观": "world",
+            "世界观设定": "world",
+            "owner": "user",
+            "master": "user",
+            "主人": "user",
+            "主人设定": "user",
+            "用户": "user",
+            "用户设定": "user",
+        }
+        if isinstance(raw, list):
+            items = raw
+        else:
+            items = str(raw or "").split(",") if raw else []
+        result: list[str] = []
+        for item in items:
+            text = str(item or "").strip()
+            normalized = aliases.get(text, text.lower())
+            if normalized in allowed and normalized not in result:
+                result.append(normalized)
+        return result or ["persona"]
+
+    def _roleplay_draft_from_persona_prompt(self, persona_prompt: str, scopes: list[str] | None = None) -> str:
+        source = str(persona_prompt or "").strip()
+        if len(source) > 9000:
+            source = source[:9000] + "\n（后文已截断）"
+        selected = set(scopes or ["persona"])
+        scope_lines = [
+            "本次需要整理的范围：",
+            f"- 角色设定：{'生成' if 'persona' in selected else '不要生成，字段留空'}",
+            f"- 世界观设定：{'生成' if 'world' in selected else '不要生成，字段留空'}",
+            f"- 主人/用户设定：{'生成' if 'user' in selected else '不要生成，字段留空'}",
+        ]
+        user_rule = (
+            "主人/用户设定只在原文明确写出对用户的称呼、用户身份或相处方式时抽取；"
+            "不要推断用户性别、生日、职业、权限、隐私偏好或亲密关系。"
+            if "user" in selected
+            else "不要生成任何用户资料、主人资料、用户关系或用户偏好。"
+        )
+        return (
+            "你要把一段 AstrBot 主回复人格文本谨慎整理成陪伴插件的角色/世界观设定草稿。\n"
+            + "\n".join(scope_lines)
+            + "\n"
+            "只允许从原文明确抽取或保守改写，不要扩写成新人格，不要补完缺失设定。\n"
+            "不确定、没有出现、只是氛围暗示的字段一律留空。\n"
+            f"{user_rule}\n"
+            "外貌线索只写角色自己的可视特征，方便识图，不要写回复策略。\n"
+            "世界观只写原文明确存在的背景；现代日常默认不需要硬写世界观。\n"
+            "翻译词只在原文有明确世界观替代表达时填写，否则留空。\n"
+            "所有字段尽量短，适合用户二次编辑。只输出 JSON 对象，不要 Markdown，不要解释。\n"
+            "JSON 结构如下，缺失字段也要保留为空字符串：\n"
+            "{\n"
+            '  "persona_parts": {"name":"","species":"","age":"","gender":"","appearance":"","hair":"","eyes":"","clothing":"","identity":"","personality":"","desire":"","hobbies":"","taboo":"","key_lore":"","extra":""},\n'
+            '  "world_parts": {"world":"","era":"","tone":"","rules":"","scenes":"","network":"","extra":""},\n'
+            '  "user_parts": {"nickname":"","user_gender":"","user_age":"","user_occupation":"","role_relation":"","interaction":"","extra":""},\n'
+            '  "translations": {"群聊":"","识屏":"","B站":"","QQ空间":"","书柜":""},\n'
+            '  "image_self_recognition_hint": "",\n'
+            '  "notes": []\n'
+            "}\n\n"
+            "主回复人格原文：\n"
+            f"{source}"
+        )
+
+    def _loads_json_object(self, raw: Any) -> dict[str, Any]:
+        text = str(raw or "").strip()
+        if not text:
+            raise ValueError("模型返回为空")
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+            text = re.sub(r"\s*```$", "", text).strip()
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start < 0 or end <= start:
+                raise ValueError("模型没有返回 JSON 对象")
+            parsed = json.loads(text[start : end + 1])
+        if not isinstance(parsed, dict):
+            raise ValueError("模型返回的 JSON 不是对象")
+        return parsed
+
+    def _normalize_roleplay_draft_result(self, raw: dict[str, Any], scopes: list[str] | None = None) -> dict[str, Any]:
+        selected = set(scopes or ["persona"])
+        persona_keys = {
+            "name",
+            "species",
+            "age",
+            "gender",
+            "appearance",
+            "hair",
+            "eyes",
+            "clothing",
+            "identity",
+            "personality",
+            "desire",
+            "hobbies",
+            "taboo",
+            "key_lore",
+            "extra",
+        }
+        world_keys = {"world", "era", "tone", "rules", "scenes", "network", "extra"}
+        user_keys = {"nickname", "user_gender", "user_age", "user_occupation", "role_relation", "interaction", "extra"}
+        translation_keys = {"群聊", "识屏", "B站", "QQ空间", "书柜"}
+
+        def text_map(value: Any, allowed: set[str], limit: int = 220) -> dict[str, str]:
+            source = value if isinstance(value, dict) else {}
+            return {key: self._multi_line(source.get(key), limit) for key in allowed}
+
+        notes_raw = raw.get("notes")
+        notes: list[str] = []
+        if isinstance(notes_raw, list):
+            for item in notes_raw[:8]:
+                note = self._single_line(item, 120)
+                if note:
+                    notes.append(note)
+        return {
+            "persona_parts": text_map(raw.get("persona_parts"), persona_keys) if "persona" in selected else text_map({}, persona_keys),
+            "world_parts": text_map(raw.get("world_parts"), world_keys) if "world" in selected else text_map({}, world_keys),
+            "user_parts": text_map(raw.get("user_parts"), user_keys) if "user" in selected else text_map({}, user_keys),
+            "translations": text_map(raw.get("translations"), translation_keys, 80) if "world" in selected else text_map({}, translation_keys, 80),
+            "image_self_recognition_hint": self._multi_line(raw.get("image_self_recognition_hint"), 360) if "persona" in selected else "",
+            "notes": notes,
+        }
+
     async def list_available_providers(self) -> dict[str, Any]:
         try:
             items = self._available_provider_items()
@@ -3360,6 +4001,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "intensity": self._single_line(raw.get("intensity"), 20),
                     "help_type": self._single_line(raw.get("help_type"), 30),
                     "reason": self._single_line(raw.get("reason"), 80),
+                    "reason_label": self._single_line(raw.get("reason_label"), 80),
+                    "reason_detail": self._single_line(raw.get("reason_detail"), 180),
                     "topic_weight": raw.get("topic_weight") if isinstance(raw.get("topic_weight"), dict) else {},
                     "note": self._single_line(raw.get("note"), 180),
                     "sender_id": self._single_line(raw.get("sender_id"), 40),
@@ -3371,9 +4014,88 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             )
         return items
 
+    def _group_slang_items(self, group: dict[str, Any], limit: int = 120) -> list[dict[str, Any]]:
+        terms = group.get("slang_terms") if isinstance(group.get("slang_terms"), list) else []
+        meanings = group.get("slang_meanings") if isinstance(group.get("slang_meanings"), dict) else {}
+        indexed: dict[str, dict[str, Any]] = {}
+        for raw in terms:
+            if isinstance(raw, dict):
+                term = self._single_line(raw.get("term"), 40)
+                if not term:
+                    continue
+                indexed[term] = {
+                    "term": term,
+                    "count": self._int(raw.get("count")),
+                    "last_seen_ts": self._float(raw.get("last_seen")),
+                    "last_seen": self.plugin._format_timestamp_elapsed(raw.get("last_seen", 0)),
+                    "learned": True,
+                }
+            else:
+                term = self._single_line(raw, 40)
+                if term:
+                    indexed[term] = {"term": term, "count": 0, "last_seen_ts": 0.0, "last_seen": "", "learned": True}
+        for term, raw in meanings.items():
+            key = self._single_line(term, 40)
+            if key and key not in indexed:
+                indexed[key] = {"term": key, "count": 0, "last_seen_ts": 0.0, "last_seen": "", "learned": False}
+
+        uncertain_checker = getattr(self.plugin, "_is_uncertain_group_slang_meaning", None)
+        items: list[dict[str, Any]] = []
+        for term, base in indexed.items():
+            raw_meaning = meanings.get(term) if isinstance(meanings.get(term), dict) else {}
+            meaning = self._single_line(raw_meaning.get("meaning"), 120) if isinstance(raw_meaning, dict) else ""
+            usage = self._single_line(raw_meaning.get("usage"), 120) if isinstance(raw_meaning, dict) else ""
+            confidence = min(1.0, self._float(raw_meaning.get("confidence"))) if isinstance(raw_meaning, dict) else 0.0
+            web_match = min(1.0, self._float(raw_meaning.get("web_match"))) if isinstance(raw_meaning, dict) else 0.0
+            is_uncertain = True
+            if meaning:
+                if callable(uncertain_checker):
+                    is_uncertain = bool(uncertain_checker(meaning, usage))
+                else:
+                    is_uncertain = any(marker in f"{meaning} {usage}" for marker in ("不确定", "无法判断", "语境不明", "可能是"))
+            if meaning and confidence >= 0.55 and not is_uncertain:
+                status = "injectable"
+                status_label = "会注入"
+            elif meaning and confidence < 0.55:
+                status = "low_confidence"
+                status_label = "低置信度"
+            elif meaning and is_uncertain:
+                status = "uncertain"
+                status_label = "释义不足"
+            else:
+                status = "pending"
+                status_label = "尚未释义"
+            items.append(
+                {
+                    **base,
+                    "meaning": meaning,
+                    "usage": usage,
+                    "type": self._single_line(raw_meaning.get("type"), 24) if isinstance(raw_meaning, dict) else "",
+                    "not_owner": self._single_line(raw_meaning.get("not_owner"), 90) if isinstance(raw_meaning, dict) else "",
+                    "evidence": self._single_line(raw_meaning.get("evidence"), 160) if isinstance(raw_meaning, dict) else "",
+                    "source": self._single_line(raw_meaning.get("source"), 32) if isinstance(raw_meaning, dict) else "",
+                    "updated_at": self._single_line(raw_meaning.get("updated_at"), 32) if isinstance(raw_meaning, dict) else "",
+                    "confidence": round(confidence, 2),
+                    "web_match": round(web_match, 2),
+                    "web_evidence": self._single_line(raw_meaning.get("web_evidence"), 220) if isinstance(raw_meaning, dict) else "",
+                    "status": status,
+                    "status_label": status_label,
+                }
+            )
+        items.sort(
+            key=lambda item: (
+                item.get("status") != "injectable",
+                -self._int(item.get("count")),
+                -self._float(item.get("last_seen_ts")),
+                item.get("term") or "",
+            )
+        )
+        return items[:limit]
+
     def _group_summary(self, group_id: str, group: dict[str, Any]) -> dict[str, Any]:
         atmosphere = group.get("atmosphere") if isinstance(group.get("atmosphere"), dict) else {}
         slang_terms = group.get("slang_terms") if isinstance(group.get("slang_terms"), list) else []
+        slang_meanings = group.get("slang_meanings") if isinstance(group.get("slang_meanings"), dict) else {}
         cleaner = getattr(self.plugin, "_cleanup_group_slang_terms", None)
         if callable(cleaner):
             try:
@@ -3398,6 +4120,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "recognized_member_count": identity_count,
             "recent_message_count": len(group.get("recent_messages") or []),
             "slang_count": len(slang_terms),
+            "slang_meaning_count": len(slang_meanings),
             "slang_terms": slang_terms[:16],
             "topic_count": len(group.get("topic_threads") or []),
             "episode_count": len(group.get("group_episodes") or []),
@@ -3416,6 +4139,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "threshold": self._int(last_wakeup.get("threshold")),
                 "intensity": self._single_line(last_wakeup.get("intensity"), 20),
                 "help_type": self._single_line(last_wakeup.get("help_type"), 30),
+                "reason": self._single_line(last_wakeup.get("reason"), 80),
+                "reason_label": self._single_line(last_wakeup.get("reason_label"), 80),
+                "reason_detail": self._single_line(last_wakeup.get("reason_detail"), 180),
                 "sender_name": self._single_line(last_wakeup.get("sender_name"), 40),
                 "text": self._display_message_text(last_wakeup.get("text"), 120),
             } if last_wakeup else {},
@@ -3696,6 +4422,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_quote_private_proactive",
             "enable_photo_text_action",
             "inject_passive_states",
+            "enable_passive_state_delta_injection",
             "enable_cycle_state",
             "enable_skill_growth_simulation",
             "enable_skill_growth_passive_injection",
@@ -7100,6 +7827,37 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "secret_books": secret_books,
         }
 
+    def _proactive_reason_label(self, reason: Any) -> str:
+        key = self._single_line(reason, 40)
+        if not key:
+            return "未记录原因"
+        extra = {
+            "bookshelf_reading_share": "跟你提起刚翻到的漫画本子",
+            "bookshelf_recommendation_request": "想问你要不要推荐阅读",
+            "web_exploration_share": "分享主动搜索后的发现",
+            "news_share": "分享刚读到的新闻",
+            "timer": "聊天中形成的临时约定",
+            "troubleshooting_test": "排障测试触发",
+        }
+        return extra.get(key) or _REASON_TEXT.get(key) or key
+
+    def _proactive_reason_detail(self, *, reason: Any, source: Any = "", topic: Any = "", motive: Any = "", note: Any = "") -> str:
+        label = self._proactive_reason_label(reason)
+        parts = [label]
+        topic_text = self._single_line(topic, 80)
+        motive_text = self._single_line(motive, 140)
+        note_text = self._single_line(note, 120)
+        source_text = self._single_line(source, 40)
+        if topic_text:
+            parts.append(f"话题：{topic_text}")
+        if motive_text:
+            parts.append(f"动机：{motive_text}")
+        if note_text:
+            parts.append(f"记录：{note_text}")
+        if source_text:
+            parts.append(f"来源：{source_text}")
+        return self._single_line("；".join(parts), 220)
+
     def _proactive_candidate_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         raw = data.get("proactive_candidate_pool") if isinstance(data.get("proactive_candidate_pool"), list) else []
         users = data.get("users") if isinstance(data.get("users"), dict) else {}
@@ -7227,6 +7985,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         "user_role_label": user_meta["role_label"],
                         "source": display_source,
                         "reason": reason,
+                        "reason_label": self._proactive_reason_label(reason),
+                        "reason_detail": self._proactive_reason_detail(reason=reason, source=display_source, topic=topic, motive=motive, note=note),
                         "action": action,
                         "topic": topic,
                         "motive": motive,
@@ -7380,6 +8140,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "status": status,
                     "action": action,
                     "reason": reason,
+                    "reason_label": self._proactive_reason_label(reason),
+                    "reason_detail": self._proactive_reason_detail(reason=reason, source=source, topic=topic, motive=motive, note=user.get("last_proactive_skip_reason")),
                     "topic": topic,
                     "motive": motive,
                     "scheduled_ts": scheduled_ts,
@@ -7465,6 +8227,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "status": status,
                 "source": self._single_line(raw.get("source"), 40),
                 "reason": audit_reason,
+                "reason_label": self._proactive_reason_label(audit_reason),
+                "reason_detail": self._proactive_reason_detail(reason=audit_reason, source=raw.get("source"), topic=audit_topic, motive=audit_motive, note=note),
                 "action": audit_action,
                 "topic": audit_topic,
                 "motive": audit_motive,
@@ -7800,6 +8564,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         "prompt_tokens": self._int(item.get("prompt_tokens")),
                         "completion_tokens": self._int(item.get("completion_tokens")),
                         "total_tokens": self._int(item.get("total_tokens")),
+                        "cached_tokens": self._int(item.get("cached_tokens")),
+                        "cache_read_tokens": self._int(item.get("cache_read_tokens")),
+                        "cache_write_tokens": self._int(item.get("cache_write_tokens")),
                         "estimated": bool(item.get("estimated", False)),
                         "elapsed_ms": self._int(item.get("elapsed_ms")),
                         "prompt_chars": self._int(item.get("prompt_chars")),
@@ -7827,6 +8594,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         by_day = self._token_series_map(usage.get("by_day"), limit=30)
         by_day_provider_raw = usage.get("by_day_provider") if isinstance(usage.get("by_day_provider"), dict) else {}
         by_day_task_raw = usage.get("by_day_task") if isinstance(usage.get("by_day_task"), dict) else {}
+        by_day_session_raw = usage.get("by_day_session") if isinstance(usage.get("by_day_session"), dict) else {}
         by_day_detail = []
         for item in by_day:
             day_key = item.get("key", "")
@@ -7835,6 +8603,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     **item,
                     "providers": self._token_ranked_map(by_day_provider_raw.get(day_key))[:5],
                     "tasks": self._token_ranked_map(by_day_task_raw.get(day_key))[:6],
+                    "sessions": self._token_ranked_map(by_day_session_raw.get(day_key))[:8],
                 }
             )
         recent = []
@@ -7849,10 +8618,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         "ts": self._float(item.get("ts")),
                         "provider": self._single_line(item.get("provider"), 80),
                         "task": self._single_line(item.get("task"), 40),
+                        "session": self._single_line(item.get("session"), 160),
+                        "sender": self._single_line(item.get("sender"), 80),
+                        "message_type": self._single_line(item.get("message_type"), 20),
                         "success": bool(item.get("success", True)),
                         "prompt_tokens": self._int(item.get("prompt_tokens")),
                         "completion_tokens": self._int(item.get("completion_tokens")),
                         "total_tokens": self._int(item.get("total_tokens")),
+                        "cached_tokens": self._int(item.get("cached_tokens")),
+                        "cache_read_tokens": self._int(item.get("cache_read_tokens")),
+                        "cache_write_tokens": self._int(item.get("cache_write_tokens")),
                         "estimated": bool(item.get("estimated", False)),
                         "elapsed_ms": self._int(item.get("elapsed_ms")),
                         "prompt_chars": self._int(item.get("prompt_chars")),
@@ -7866,6 +8641,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "totals": self._token_bucket(usage.get("totals")),
             "by_provider": self._token_ranked_map(usage.get("by_provider")),
             "by_task": self._token_ranked_map(usage.get("by_task")),
+            "by_session": self._token_ranked_map(usage.get("by_session")),
             "by_day": by_day,
             "by_day_detail": by_day_detail,
             "by_hour": self._token_series_map(usage.get("by_hour"), limit=48),
@@ -7879,6 +8655,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         elapsed = cls._int(bucket.get("elapsed_ms"))
         total_tokens = cls._int(bucket.get("total_tokens"))
         estimated_tokens = cls._int(bucket.get("estimated_tokens"))
+        cached_tokens = cls._int(bucket.get("cached_tokens"))
+        cache_read_tokens = cls._int(bucket.get("cache_read_tokens"))
+        cache_write_tokens = cls._int(bucket.get("cache_write_tokens"))
         return {
             "calls": calls,
             "success": cls._int(bucket.get("success")),
@@ -7886,6 +8665,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "prompt_tokens": cls._int(bucket.get("prompt_tokens")),
             "completion_tokens": cls._int(bucket.get("completion_tokens")),
             "total_tokens": total_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "cached_ratio": round(cached_tokens / total_tokens, 4) if total_tokens > 0 else 0,
             "estimated_tokens": estimated_tokens,
             "estimated_ratio": round(estimated_tokens / total_tokens, 4) if total_tokens > 0 else 0,
             "avg_tokens": round(total_tokens / calls, 1) if calls > 0 else 0,
@@ -8436,6 +9219,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _single_line(value: Any, limit: int) -> str:
         text = " ".join(str(value or "").strip().split())
         return text[:limit]
+
+    @staticmethod
+    def _multi_line(value: Any, limit: int) -> str:
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text[:limit].strip()
 
     @staticmethod
     def _ok(data: Any = None) -> dict[str, Any]:
