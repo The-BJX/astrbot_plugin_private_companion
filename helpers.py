@@ -88,3 +88,87 @@ def _strip_outbound_control_blocks(
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
     return normalized
+
+
+_MISSING = object()
+
+
+def _flat_get(config: Any, key: str, default: Any = None) -> Any:
+    """Read both flat config keys and keys nested under schema object/items groups."""
+    if isinstance(config, dict):
+        if key in config:
+            return config[key]
+        for value in config.values():
+            if isinstance(value, dict):
+                found = _flat_get(value, key, _MISSING)
+                if found is not _MISSING:
+                    return found
+    for attr in ("data", "config"):
+        target = getattr(config, attr, None)
+        if isinstance(target, dict):
+            found = _flat_get(target, key, _MISSING)
+            if found is not _MISSING:
+                return found
+    getter = getattr(config, "get", None)
+    if callable(getter):
+        try:
+            value = getter(key, _MISSING)
+        except Exception:
+            value = _MISSING
+        if value is not _MISSING:
+            return value
+    return default
+
+
+def _set_into_config(config: Any, key: str, value: Any, *, allow_flat_fallback: bool = True) -> bool:
+    """Write a config value back to its existing flat or nested location."""
+
+    def convert(existing: Any, new_value: Any) -> Any:
+        if isinstance(existing, bool) and isinstance(new_value, str):
+            text = new_value.strip().lower()
+            if text in {"true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"}:
+                return True
+            if text in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""}:
+                return False
+        if isinstance(existing, int) and not isinstance(existing, bool) and isinstance(new_value, str):
+            try:
+                return int(new_value)
+            except (TypeError, ValueError):
+                return new_value
+        if isinstance(existing, float) and isinstance(new_value, str):
+            try:
+                return float(new_value)
+            except (TypeError, ValueError):
+                return new_value
+        return new_value
+
+    def find_and_set(target: dict[str, Any]) -> bool:
+        if key in target:
+            target[key] = convert(target.get(key), value)
+            return True
+        for child in target.values():
+            if isinstance(child, dict) and find_and_set(child):
+                return True
+        return False
+
+    if isinstance(config, dict) and find_and_set(config):
+        return True
+    for attr in ("data", "config"):
+        target = getattr(config, attr, None)
+        if isinstance(target, dict) and find_and_set(target):
+            return True
+    if not allow_flat_fallback:
+        return False
+    try:
+        config[key] = value
+        return True
+    except Exception:
+        pass
+    setter = getattr(config, "set", None)
+    if callable(setter):
+        try:
+            setter(key, value)
+            return True
+        except Exception:
+            pass
+    return False
