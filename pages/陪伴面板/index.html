@@ -4,18 +4,30 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260625-vitruvian" />
+  <link rel="stylesheet" href="./app.css?v=20260625-vitruvian2" />
 </head>
 <body>
   <main class="shell">
     <section class="folio">
       <div class="folio-plate" aria-hidden="true">
         <div class="plate-cv-grid"></div>
-        <svg class="vitruvian" viewBox="0 0 200 200" role="img" aria-label="维特鲁威人">
-          <circle cx="100" cy="100" r="92" fill="none" stroke="#1a4b8c" stroke-width="1" opacity="0.5"/>
-          <rect x="16" y="16" width="168" height="168" fill="none" stroke="#1a4b8c" stroke-width="1" opacity="0.5"/>
-          <rect x="40" y="40" width="120" height="120" fill="none" stroke="#1a4b8c" stroke-width="0.6" opacity="0.28"/>
-          <g stroke="#0f2a4a" stroke-width="2.2" fill="none" stroke-linecap="round">
+        <svg class="vitruvian" viewBox="0 0 200 200" role="img" aria-label="维特鲁威人手稿">
+          <g class="vitruvian-geometry" fill="none">
+            <circle cx="100" cy="100" r="92"/>
+            <circle cx="100" cy="100" r="69"/>
+            <rect x="16" y="16" width="168" height="168"/>
+            <rect x="40" y="40" width="120" height="120"/>
+            <path d="M24 118 C52 58 91 33 146 48"/>
+            <path d="M52 170 C78 134 121 132 148 170"/>
+            <path d="M100 22 V190"/>
+            <path d="M28 150 H172"/>
+          </g>
+          <g class="vitruvian-measure" fill="none">
+            <path d="M52 30 C88 12 122 12 158 30"/>
+            <path d="M48 178 C80 194 120 194 152 178"/>
+            <path d="M18 92 C36 72 54 58 76 50"/>
+          </g>
+          <g class="vitruvian-body" stroke="#0f2a4a" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="100" cy="62" r="8.5" fill="#f6e1df" stroke="#0f2a4a"/>
             <line x1="100" y1="70.5" x2="100" y2="116"/>
             <line x1="100" y1="82" x2="64" y2="98"/>
@@ -39,19 +51,22 @@
             <circle cx="100" cy="22" r="1.6"/>
             <circle cx="100" cy="190" r="1.6"/>
           </g>
-          <g fill="#1a4b8c" opacity="0.55" font-family="Consolas, monospace" font-size="6" font-weight="700">
+          <g class="vitruvian-notes" fill="#1a4b8c" font-family="Consolas, monospace" font-size="6" font-weight="700">
             <text x="30" y="146">a</text>
             <text x="166" y="146">b</text>
             <text x="46" y="186">c</text>
             <text x="150" y="186">d</text>
             <text x="104" y="20">e</text>
+            <text x="26" y="36">ratio 1:1</text>
+            <text x="128" y="64">axis</text>
+            <text x="24" y="174">field note</text>
           </g>
         </svg>
         <div class="plate-block plate-block--red"></div>
         <div class="plate-block plate-block--blue"></div>
         <div class="plate-diagonal"></div>
         <div class="plate-stamp">FOLIO&nbsp;·&nbsp;I</div>
-        <div class="plate-caption">HOMO QUADRATUS<br><span>人 · 度量 · 陪伴</span></div>
+        <div class="plate-caption">VITRUVIAN STUDY<br><span>人 · 比例 · 陪伴</span></div>
       </div>
 
       <div class="folio-meta">

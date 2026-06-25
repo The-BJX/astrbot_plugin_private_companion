@@ -1483,7 +1483,7 @@
       "response_review_mode": {
         "description": "回复/主动复核模式",
         "type": "string",
-        "hint": "local_only 只做本地识别；severe_only 默认会让主动消息发送前进行模型价值复核，被动回复只复核严重问题；full 会让更多被动回复也参与模型改写，可能明显增加延迟。",
+        "hint": "local_only 只做本地识别；severe_only 会让主动消息发送前统一进行模型价值复核，被动回复只复核严重问题；full 会让更多被动回复也参与模型改写，可能明显增加延迟。",
         "default": "severe_only",
         "options": [
           "local_only",
@@ -2270,6 +2270,15 @@
           "enable_group_companion": true
         }
       },
+      "enable_group_injection_guard": {
+        "description": "群聊防注入",
+        "type": "bool",
+        "hint": "拦截群友通过改称呼、改语气、改设定或改输出格式等话术污染群聊上下文和长期观察；不影响正常回复，只阻止学习、沉淀和再次注入。",
+        "default": true,
+        "condition": {
+          "enable_group_companion": true
+        }
+      },
       "enable_group_persona_denoise": {
         "description": "群聊人格降噪",
         "type": "bool",
@@ -2919,6 +2928,26 @@
           "enable_worldbook_member_recognition": true
         }
       },
+      "worldbook_self_registration_block_words": {
+        "description": "自登记屏蔽词",
+        "type": "string",
+        "hint": "填写不允许进入关系网自登记的称呼/关键词。命中自报名字、别名或原始自登记文本时，会直接拒绝进入待确认流程。多个词用换行、英文逗号或中文逗号分隔。",
+        "default": "",
+        "condition": {
+          "enable_worldbook_member_recognition": true,
+          "worldbook_self_registration": true
+        }
+      },
+      "worldbook_self_registration_block_reply": {
+        "description": "屏蔽词命中回复",
+        "type": "string",
+        "hint": "命中自登记屏蔽词后，Bot 返回给用户的回复文案。留空时使用默认回复“这个称呼我先不记。”",
+        "default": "这个称呼我先不记。",
+        "condition": {
+          "enable_worldbook_member_recognition": true,
+          "worldbook_self_registration": true
+        }
+      },
       "worldbook_auto_pending_observations": {
         "description": "低频生成待确认观察",
         "type": "bool",
@@ -3472,6 +3501,24 @@
         "type": "bool",
         "hint": "生成精力、睡眠、梦境、健康、饥饿、生理期模拟等身体余波，并影响日程、主动消息和被动回复的语气节奏。",
         "default": true
+      },
+      "enable_health_state": {
+        "description": "启用健康/不适状态",
+        "type": "bool",
+        "hint": "开启后，且人格适合生物身体设定时，当前扮演状态才可能出现生病、头疼、身体不舒服或恢复尾声等健康余波；关闭后自动生成和手动增添都会跳过这类状态。",
+        "default": true,
+        "condition": {
+          "enable_humanized_states": true
+        }
+      },
+      "enable_hunger_state": {
+        "description": "启用饥饿/胃口状态",
+        "type": "bool",
+        "hint": "开启后，且人格适合进食设定时，当前扮演状态才可能出现饿、胃口不好、想吃东西或想吃甜的等余波；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
+        "default": true,
+        "condition": {
+          "enable_humanized_states": true
+        }
       },
       "inject_passive_states": {
         "description": "被动回复前注入拟人状态",
@@ -4162,10 +4209,10 @@
       "tts_trigger_probability": {
         "description": "TTS全局触发概率(%)",
         "type": "int",
-        "default": 20,
+        "default": 25,
         "min": 0,
         "max": 100,
-        "hint": "仅全局频控生效。作为私聊/群聊未覆盖时的默认触发概率；概率未命中时会提示 LLM 在没有用户明确语音请求时必须纯文字，不主动输出 <pc_tts>、<tts> 或等价语音内容；弱约束不会剥离 LLM 已输出的语音标签。",
+        "hint": "仅全局频控生效。作为私聊/群聊未覆盖时的默认触发概率；概率未命中时本轮不注入 TTS 提示词，也不进入后处理语音判断；弱约束不会剥离 LLM 自发输出的语音标签。",
         "condition": {
           "enable_tts_enhancement": true
         }
@@ -4290,7 +4337,7 @@
       "auto_voice_probability": {
         "description": "自动语音触发概率(旧)",
         "type": "int",
-        "default": 20,
+        "default": 25,
         "min": 0,
         "max": 100,
         "hint": "仅旧版行为下生效。控制快速标签自动语音的旧触发概率；全局频控下请使用“TTS全局触发概率(%)”。",

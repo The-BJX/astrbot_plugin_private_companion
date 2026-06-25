@@ -413,7 +413,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.0.2",
+    "5.1.0",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -619,6 +619,8 @@ class PrivateCompanionPlugin(
         self.private_image_self_recognition_hint = self._cfg_str(c, "private_image_self_recognition_hint", "")
         self.daily_plan_item_count = self._cfg_int(c, "daily_plan_item_count", 10, 5, 16)
         self.enable_humanized_states = self._cfg_bool(c, "enable_humanized_states", True)
+        self.enable_health_state = self._cfg_bool(c, "enable_health_state", True)
+        self.enable_hunger_state = self._cfg_bool(c, "enable_hunger_state", True)
         self.enable_cycle_state = self._cfg_bool(c, "enable_cycle_state", True)
         self.humanized_state_intensity = self._cfg_int(c, "humanized_state_intensity", 50, 0, 100)
         self.enable_rest_reply_simulation = self._cfg_bool(c, "enable_rest_reply_simulation", False)
@@ -860,6 +862,7 @@ class PrivateCompanionPlugin(
         self.enable_group_slang_learning = self._cfg_bool(c, "enable_group_slang_learning", True)
         self.enable_group_member_profiles = self._cfg_bool(c, "enable_group_member_profiles", True)
         self.enable_group_context_injection = self._cfg_bool(c, "enable_group_context_injection", True)
+        self.enable_group_injection_guard = self._cfg_bool(c, "enable_group_injection_guard", True)
         self.enable_group_persona_denoise = self._cfg_bool(c, "enable_group_persona_denoise", True)
         self.enable_forward_message_adaptation = self._cfg_bool(c, "enable_forward_message_adaptation", True)
         self.forward_message_mode = self._cfg_str(c, "forward_message_mode", "inject", "inject").lower()
@@ -947,6 +950,15 @@ class PrivateCompanionPlugin(
         self.worldbook_auto_import = self._cfg_bool(c, "worldbook_auto_import", True)
         self.worldbook_member_match_aliases = self._cfg_bool(c, "worldbook_member_match_aliases", True)
         self.worldbook_self_registration = self._cfg_bool(c, "worldbook_self_registration", True)
+        self.worldbook_self_registration_block_words = self._parse_text_list_config(
+            self._cfg_raw(c, "worldbook_self_registration_block_words", []),
+            limit=120,
+        )
+        self.worldbook_self_registration_block_reply = self._cfg_str(
+            c,
+            "worldbook_self_registration_block_reply",
+            "这个称呼我先不记。",
+        )
         self.worldbook_auto_pending_observations = self._cfg_bool(c, "worldbook_auto_pending_observations", True)
         self.worldbook_member_inject_limit = self._cfg_int(c, "worldbook_member_inject_limit", 6, 1, 20)
         self.worldbook_config_paths = self._cfg_str(c, "worldbook_config_paths", "")
@@ -1132,6 +1144,10 @@ class PrivateCompanionPlugin(
         self._recent_inbound_activity_by_scope: dict[str, dict[str, Any]] = {}
         self.data = self._load_data_sync()
         self._apply_tts_runtime_overrides()
+        if self._cleanup_legacy_proactive_prompt_traces():
+            self._save_data_sync()
+        if self._sanitize_runtime_social_facts_inplace():
+            self._save_data_sync()
         if self._merge_private_user_alias_records():
             self._save_data_sync()
         if self._cleanup_all_group_slang_terms():
@@ -1722,6 +1738,77 @@ class PrivateCompanionPlugin(
             segments.append(text)
         return segments
 
+    def _segmented_context_chars(self, text: str) -> set[str]:
+        text = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", str(text or ""), flags=re.IGNORECASE)
+        stop_chars = set(
+            "的一是不了在有和人就都而及与着或个上也很到说要去会这那我你他她它们"
+            "吧呢呀啊吗么啦喔哦噢嘛哈嘿诶哎被把给让才还再又没别刚边里外"
+        )
+        chars = {ch for ch in text if "\u4e00" <= ch <= "\u9fff" and ch not in stop_chars}
+        chars.update(re.findall(r"[a-zA-Z][a-zA-Z0-9_]{1,}", text.lower()))
+        return chars
+
+    def _segmented_context_overlap_ratio(self, left: str, right: str) -> float:
+        left_chars = self._segmented_context_chars(left)
+        right_chars = self._segmented_context_chars(right)
+        if not left_chars or not right_chars:
+            return 1.0
+        return len(left_chars & right_chars) / max(1, min(len(left_chars), len(right_chars)))
+
+    def _segmented_remainder_context_drift_reason(
+        self,
+        event: AstrMessageEvent,
+        *,
+        previous_text: str,
+        next_text: str,
+        source: str = "",
+    ) -> str:
+        """Stop delayed passive chunks when they look like a different reply turn."""
+        if source != "decorating_result" or self.segmented_proactive_scope != "all_llm":
+            return ""
+        prev = _single_line(previous_text, 260)
+        nxt = _single_line(next_text, 260)
+        if not prev or not nxt:
+            return ""
+        inbound = ""
+        getter = getattr(event, "get_message_str", None)
+        if callable(getter):
+            try:
+                inbound = str(getter() or "")
+            except Exception:
+                inbound = ""
+        if not inbound:
+            inbound = str(getattr(event, "message_str", "") or "")
+        if any(marker in inbound for marker in ("在干嘛", "干什么", "忙什么", "忙啥", "进度", "代码", "项目", "修到", "跑通", "测试", "校验")):
+            return ""
+
+        context = f"{inbound}\n{prev}"
+        context_chars = self._segmented_context_chars(context)
+        next_chars = self._segmented_context_chars(nxt)
+        if len(context_chars) < 8 or len(next_chars) < 6:
+            return ""
+        overlap = self._segmented_context_overlap_ratio(context, nxt)
+        if overlap >= 0.08:
+            return ""
+
+        food_markers = ("西瓜", "水果", "吃", "甜", "买", "拎", "饭", "餐", "晚饭", "午饭", "口", "手勒", "奖励")
+        work_markers = ("逻辑", "校验", "进度", "跑通", "顺手", "焦躁", "代码", "编译", "测试", "调试", "需求", "项目")
+        checkin_markers = ("忙完没", "忙完了吗", "忙完了没", "你那边忙", "歇会", "休息一下", "停下来")
+        fresh_turn_pattern = r"^\s*(在呢|我在|我这边|这边|刚把|刚刚把|刚刚|我刚|你那边|你这边)"
+
+        context_has_food = any(marker in context for marker in food_markers)
+        next_has_work = any(marker in nxt for marker in work_markers)
+        next_is_checkin = any(marker in nxt for marker in checkin_markers)
+        if context_has_food and (next_has_work or next_is_checkin):
+            return "food_topic_to_work_or_checkin"
+        if re.search(fresh_turn_pattern, nxt) and (next_has_work or next_is_checkin):
+            return "fresh_turn_without_topic_overlap"
+        if re.search(r"^\s*(你那边|你这边)", nxt) and next_is_checkin:
+            return "new_checkin_without_topic_overlap"
+        if "昨晚" in nxt and "昨晚" not in context and re.search(fresh_turn_pattern, nxt):
+            return "unexpected_time_anchor"
+        return ""
+
     def _clean_segmented_reply_chunks(self, chunks: list[list[Any]]) -> list[list[Any]]:
         cleaned_chunks: list[list[Any]] = []
         for chunk in chunks or []:
@@ -1793,6 +1880,23 @@ class PrivateCompanionPlugin(
                 try:
                     preview = self._segmented_chunk_log_text(chunk)
                     outbound_chunk = chunk
+                    drift_reason = self._segmented_remainder_context_drift_reason(
+                        event,
+                        previous_text=prev,
+                        next_text=preview,
+                        source=source,
+                    )
+                    if drift_reason:
+                        logger.info(
+                            "[PrivateCompanion] 分段剩余组件疑似上下文割裂，停止发送: source=%s reason=%s sent=%s/%s prev=%s next=%s",
+                            source or "unknown",
+                            drift_reason,
+                            max(0, sent_index - 1),
+                            total,
+                            _single_line(prev, 120),
+                            _single_line(preview, 120),
+                        )
+                        return
                     wait_for = prev or preview
                     delay = await self._calc_segmented_proactive_interval(wait_for)
                     if delay > 0:
@@ -1895,6 +1999,23 @@ class PrivateCompanionPlugin(
                 continue
             sent_index += 1
             try:
+                drift_reason = self._segmented_remainder_context_drift_reason(
+                    event,
+                    previous_text=prev,
+                    next_text=segment,
+                    source=source,
+                )
+                if drift_reason:
+                    logger.info(
+                        "[PrivateCompanion] 分段剩余片段疑似上下文割裂，停止发送: source=%s reason=%s sent=%s/%s prev=%s next=%s",
+                        source or "unknown",
+                        drift_reason,
+                        max(0, sent_index - 1),
+                        total,
+                        _single_line(prev, 120),
+                        _single_line(segment, 120),
+                    )
+                    return
                 wait_for = prev or segment
                 delay = await self._calc_segmented_proactive_interval(wait_for)
                 if delay > 0:
@@ -3836,6 +3957,7 @@ class PrivateCompanionPlugin(
             await self._append_capability_boundary_to_request(event, req)
         if not is_private_chat:
             await self._mark_group_conversation_from_llm_request(event)
+            await self._append_group_injection_guard_to_request(event, req)
             await self._append_group_persona_denoise_to_request(event, req)
         else:
             await self._append_non_target_private_identity_guard_to_request(event, req)

@@ -4528,6 +4528,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_user_habit_learning",
             "enable_food_menu_recommendation",
             "enable_humanized_states",
+            "enable_health_state",
+            "enable_hunger_state",
             "enable_segmented_proactive_reply",
             "enable_proactive_quote_trigger_message",
             "enable_quote_group_reply",
@@ -4559,6 +4561,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_group_slang_learning",
             "enable_group_member_profiles",
             "enable_group_context_injection",
+            "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "enable_forward_message_adaptation",
             "enable_group_scene_awareness",
@@ -5517,6 +5520,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
             "humanized_state_intensity",
+            "enable_health_state",
+            "enable_hunger_state",
             "enable_rest_reply_simulation",
             "rest_reply_mode",
             "rest_reply_probability",
@@ -5747,6 +5752,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "worldbook_auto_import",
             "worldbook_member_match_aliases",
             "worldbook_self_registration",
+            "worldbook_self_registration_block_words",
+            "worldbook_self_registration_block_reply",
             "worldbook_auto_pending_observations",
             "worldbook_member_inject_limit",
             "worldbook_config_paths",
@@ -5799,10 +5806,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
         values.update(
             {
-                "tts_trigger_probability": _percent_attr("tts_trigger_probability", 0.2),
+                "tts_trigger_probability": _percent_attr("tts_trigger_probability", 0.25),
                 "tts_private_trigger_probability": _percent_attr("tts_private_trigger_probability", -0.01, inherit=True),
                 "tts_group_trigger_probability": _percent_attr("tts_group_trigger_probability", -0.01, inherit=True),
-                "auto_voice_probability": _percent_attr("auto_voice_probability", 0.2),
+                "auto_voice_probability": _percent_attr("auto_voice_probability", 0.25),
                 "main_user_voice_probability": _percent_attr("main_user_voice_probability", -0.01, inherit=True),
                 "main_user_mention_voice_probability": _percent_attr("main_user_mention_voice_probability", 0.0),
                 "rest_reply_probability": _percent_attr("rest_reply_probability", 0.18),
@@ -6146,6 +6153,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "enable_group_companion": True,
                     "enable_group_interjection": False,
                     "enable_group_context_injection": True,
+                    "enable_group_injection_guard": True,
                     "enable_companion_memory": True,
                     "enable_expression_learning": True,
                     "enable_dialogue_episode_memory": True,
@@ -6167,6 +6175,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 },
                 "features": {
                     "enable_group_companion": True,
+                    "enable_group_injection_guard": True,
                     "enable_companion_memory": True,
                     "enable_expression_learning": True,
                     "enable_intent_emotion_analysis": True,
@@ -6191,6 +6200,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "features": {
                     "enable_group_companion": True,
                     "enable_group_context_injection": True,
+                    "enable_group_injection_guard": True,
                     "enable_group_slang_learning": True,
                     "enable_group_member_profiles": True,
                     "enable_group_topic_threads": True,
@@ -6284,6 +6294,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             self.plugin.private_user_aliases = self.plugin._parse_private_user_aliases(value)
             if self.plugin._merge_private_user_alias_records():
                 self.plugin._save_data_sync()
+            return
+        if key == "worldbook_self_registration_block_words":
+            parser = getattr(self.plugin, "_parse_text_list_config", None)
+            if callable(parser):
+                self.plugin.worldbook_self_registration_block_words = parser(value, limit=120)
+            else:
+                self.plugin.worldbook_self_registration_block_words = value
+            return
+        if key == "worldbook_self_registration_block_reply":
+            self.plugin.worldbook_self_registration_block_reply = str(value or "").strip()
             return
         if key in {"group_repeat_follow_probability", "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step"}:
             raw = float(value or 0)
@@ -6450,6 +6470,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_user_habit_learning",
             "enable_food_menu_recommendation",
             "enable_humanized_states",
+            "enable_health_state",
+            "enable_hunger_state",
             "enable_segmented_proactive_reply",
             "enable_proactive_quote_trigger_message",
             "enable_quote_group_reply",
@@ -6480,6 +6502,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_group_slang_learning",
             "enable_group_member_profiles",
             "enable_group_context_injection",
+            "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "enable_forward_message_adaptation",
             "enable_group_reality_promise_guard",
@@ -6718,6 +6741,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "group_repeat_interrupt_text",
             "group_repeat_interrupt_image_path",
             "group_scene_recent_limit",
+            "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "group_wakeup_direct_words",
             "group_wakeup_context_words",
@@ -6845,6 +6869,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "worldbook_auto_import",
             "worldbook_member_match_aliases",
             "worldbook_self_registration",
+            "worldbook_self_registration_block_words",
+            "worldbook_self_registration_block_reply",
             "worldbook_auto_pending_observations",
             "worldbook_member_inject_limit",
             "worldbook_config_paths",
@@ -6912,6 +6938,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             return self._normalize_multiline_source_config(value, limit=4000)
         if key in {"news_hot_sources", "web_exploration_interests", "private_reading_default_keywords", "private_reading_blocked_tags"}:
             return str(value or "").strip()[:1200]
+        if key == "worldbook_self_registration_block_words":
+            return str(value or "").strip()[:1200]
+        if key == "worldbook_self_registration_block_reply":
+            return str(value or "").strip()[:200]
         if key == "QZONE_COOKIE":
             return str(value or "").replace("\r", ";").replace("\n", ";").strip()[:8000]
         if key in {"group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords", "recall_forbidden_words"}:
@@ -7128,7 +7158,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 raw = float(value)
                 return max(0, min(100, int(round(raw * 100 if 0 <= raw <= 1 else raw))))
             except (TypeError, ValueError):
-                return 18 if key == "rest_reply_probability" else 20
+                if key == "rest_reply_probability":
+                    return 18
+                if key in {"tts_trigger_probability", "auto_voice_probability"}:
+                    return 25
+                return 20
         if key in self.INHERIT_PERCENT_PROBABILITY_KEYS:
             try:
                 raw = float(value)
@@ -7388,12 +7422,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "auto_voice_full_conversion_enabled",
             "enable_humanized_states",
             "inject_passive_states",
+            "enable_health_state",
+            "enable_hunger_state",
             "enable_cycle_state",
             "enable_worldbook_member_recognition",
             "enable_group_scene_awareness",
             "enable_group_reality_promise_guard",
             "enable_group_wakeup_enhancement",
             "enable_group_high_intensity_mode",
+            "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "enable_group_repeat_follow",
             "group_repeat_count_distinct_users_only",
@@ -7429,11 +7466,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_segmented_proactive_content_cleanup",
             "enable_humanized_states",
             "inject_passive_states",
+            "enable_health_state",
+            "enable_hunger_state",
             "enable_cycle_state",
             "enable_group_conversation_followup",
             "worldbook_auto_import",
             "worldbook_member_match_aliases",
             "worldbook_self_registration",
+            "worldbook_self_registration_block_words",
+            "worldbook_self_registration_block_reply",
             "enable_atrelay_tools",
             "enable_cross_user_memory_bridge",
             "atrelay_require_worldbook_first",
@@ -7860,6 +7901,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "auto_import": bool(getattr(self.plugin, "worldbook_auto_import", False)),
             "match_aliases": bool(getattr(self.plugin, "worldbook_member_match_aliases", False)),
             "self_registration": bool(getattr(self.plugin, "worldbook_self_registration", False)),
+            "self_registration_block_word_count": len(
+                getattr(self.plugin, "worldbook_self_registration_block_words", [])
+                if isinstance(getattr(self.plugin, "worldbook_self_registration_block_words", []), list)
+                else []
+            ),
             "auto_pending_observations": bool(getattr(self.plugin, "worldbook_auto_pending_observations", False)),
             "inject_limit": getattr(self.plugin, "worldbook_member_inject_limit", 0),
             "entry_count": len(entries),

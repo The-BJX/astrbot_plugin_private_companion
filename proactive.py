@@ -466,7 +466,23 @@ class ProactiveMixin:
             "观察你", "看你在忙", "看看你在干嘛", "看你在干嘛",
         )
         combined = f"{normalized_topic} {normalized_motive}"
-        if not any(token in combined for token in sensitive_markers):
+        has_sensitive_action_text = any(token in combined for token in sensitive_markers)
+        has_friend_interaction_text = self._friend_plan_has_private_interaction_text(combined)
+        if not has_sensitive_action_text and not has_friend_interaction_text:
+            return {
+                "reason": str(reason or "check_in"),
+                "action": normalized_action,
+                "topic": normalized_topic,
+                "motive": normalized_motive,
+            }
+        if has_friend_interaction_text:
+            if not normalized_topic or self._friend_plan_has_private_interaction_text(normalized_topic):
+                normalized_topic = "顺手分享一点日常近况"
+            normalized_motive = (
+                "作为普通朋友轻轻分享一个不指向第三方私聊互动的小片段,不要求立刻回复"
+                if str(reason or "") in {"", "check_in", "quiet_care", "state_share", "activity_share"}
+                else "按朋友关系做一次克制的普通文字分享,不写成和朋友用户聊天或约见"
+            )
             return {
                 "reason": str(reason or "check_in"),
                 "action": normalized_action,
@@ -493,6 +509,19 @@ class ProactiveMixin:
             "topic": normalized_topic,
             "motive": normalized_motive,
         }
+
+    @staticmethod
+    def _friend_plan_has_private_interaction_text(text: Any) -> bool:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return False
+        patterns = (
+            r"给.{0,16}(?:回了?消息|发了?消息|回信|回复了?|发私聊)",
+            r"(?:回了?消息|发了?消息|回信|发私聊|私聊|聊天|互相吐槽|互相安慰)",
+            r"(?:约饭|夜宵|见面|出门|一起(?:做|看|聊|吃|去|玩|散步|上课|写|打))",
+            r"(?:朋友用户|朋友边界|朋友那边|朋友私聊)",
+        )
+        return any(re.search(pattern, cleaned) for pattern in patterns)
 
     def _sync_configured_targets(self):
         for user_id in self._configured_target_ids():

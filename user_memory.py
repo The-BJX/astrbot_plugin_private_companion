@@ -1659,7 +1659,7 @@ class UserMemoryMixin:
             if not isinstance(user, dict) or not user.get("enabled", True) or not self._is_target_private_user(str(user_id), user):
                 continue
             name = _single_line(user.get("nickname") or user_id, 24)
-            text = self._format_user_behavior_habits_for_prompt(user, current_only=False, limit=3)
+            text = self._format_user_behavior_habits_for_prompt(user, current_only=False, limit=3, natural=True)
             habit_lines = [line for line in text.splitlines() if line.startswith("- ")]
             for line in habit_lines:
                 lines.append(f"- {name}：{line[2:]}")
@@ -1667,7 +1667,13 @@ class UserMemoryMixin:
                     break
             if len(lines) >= limit:
                 break
-        return "用户近期行为习惯：\n" + "\n".join(lines) if lines else "暂无用户习惯线索。"
+        if not lines:
+            return "暂无用户习惯线索。"
+        return (
+            "用户近期行为习惯（只作日程软背景）：\n"
+            + "\n".join(lines)
+            + "\n使用方式：只帮助判断对方常出现的时段和话题,不要把用户习惯、食物偏好或避雷直接改写成 Bot 今天必须执行的购买、带饭、约饭或准备任务。"
+        )
 
     def _habit_proactive_event_for_user(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | None:
         if not self.enable_user_habit_learning:

@@ -105,9 +105,37 @@ body::after {
   place-items: center;
   border-right: 1px solid var(--line);
   background:
-    radial-gradient(circle at 50% 46%, rgba(255,255,255,0.85), rgba(238,243,251,0.4) 62%, rgba(228,237,248,0.2)),
+    radial-gradient(circle at 50% 45%, rgba(255,255,255,0.92), rgba(238,243,251,0.36) 60%, rgba(228,237,248,0.22)),
+    linear-gradient(115deg, transparent 0 52%, rgba(15,42,74,0.08) 52.2%, transparent 52.6%),
     linear-gradient(180deg, #fbfdff, #e8eff8);
   overflow: hidden;
+}
+
+.folio-plate::before,
+.folio-plate::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.folio-plate::before {
+  inset: 10px 12px;
+  z-index: 1;
+  border: 1px solid rgba(26, 75, 140, 0.18);
+  box-shadow:
+    0 0 0 24px rgba(255,255,255,0.16) inset,
+    0 0 0 1px rgba(255,255,255,0.8);
+}
+
+.folio-plate::after {
+  inset: 0;
+  z-index: 0;
+  background:
+    linear-gradient(90deg, rgba(15,42,74,0.035) 1px, transparent 1px),
+    linear-gradient(rgba(15,42,74,0.025) 1px, transparent 1px);
+  background-size: 7px 7px;
+  opacity: 0.55;
+  mix-blend-mode: multiply;
 }
 
 .plate-cv-grid {
@@ -126,10 +154,35 @@ body::after {
 
 .vitruvian {
   position: relative;
-  width: 248px;
-  height: 248px;
+  width: 252px;
+  height: 252px;
   display: block;
-  z-index: 2;
+  z-index: 4;
+  filter: drop-shadow(0 8px 16px rgba(15,42,74,0.08));
+}
+
+.vitruvian-geometry {
+  stroke: rgba(26, 75, 140, 0.48);
+  stroke-width: 0.7;
+}
+
+.vitruvian-geometry circle:first-child,
+.vitruvian-geometry rect:first-of-type {
+  stroke-width: 1.05;
+}
+
+.vitruvian-measure {
+  stroke: rgba(26, 75, 140, 0.34);
+  stroke-width: 0.5;
+  stroke-dasharray: 2 3;
+}
+
+.vitruvian-body {
+  filter: drop-shadow(0 1px 0 rgba(255,255,255,0.5));
+}
+
+.vitruvian-notes {
+  opacity: 0.58;
 }
 
 .plate-block {
@@ -139,32 +192,32 @@ body::after {
 
 .plate-block--red {
   left: 0; bottom: 0;
-  width: 84px; height: 84px;
+  width: 90px; height: 84px;
   background: var(--red);
   clip-path: polygon(0 0, 100% 0, 0 100%);
-  opacity: 0.92;
+  opacity: 0.9;
 }
 
 .plate-block--blue {
   right: 0; top: 0;
-  width: 64px; height: 120px;
+  width: 58px; height: 108px;
   background: var(--accent);
-  opacity: 0.92;
+  opacity: 0.9;
 }
 
 .plate-diagonal {
   position: absolute;
   inset: 0;
-  z-index: 1;
-  background: linear-gradient(118deg, transparent 49.5%, var(--ink) 49.7%, var(--ink) 49.9%, transparent 50.1%);
-  opacity: 0.18;
+  z-index: 2;
+  background: linear-gradient(118deg, transparent 49.45%, var(--ink) 49.7%, var(--ink) 49.88%, transparent 50.12%);
+  opacity: 0.16;
   pointer-events: none;
 }
 
 .plate-stamp {
   position: absolute;
-  left: 12px; top: 10px;
-  z-index: 3;
+  left: 14px; top: 12px;
+  z-index: 5;
   font-size: 10px;
   letter-spacing: 0.28em;
   font-weight: 900;
@@ -174,8 +227,8 @@ body::after {
 
 .plate-caption {
   position: absolute;
-  right: 12px; bottom: 10px;
-  z-index: 3;
+  right: 14px; bottom: 12px;
+  z-index: 5;
   text-align: right;
   font-size: 11px;
   font-weight: 800;

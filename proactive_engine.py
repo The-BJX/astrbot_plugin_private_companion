@@ -3368,23 +3368,17 @@ class ProactiveEngineMixin:
     def _format_proactive_ability_search_hint(self, user: dict[str, Any] | None = None) -> str:
         abilities = self._available_proactive_abilities(user)
         if not abilities:
-            return "当前只按普通文字私聊处理。"
+            return "可用动作：message=普通文字。"
         terms = self._worldview_terms()
-        lines = [
-            "以下内容只供内部决策,角色本人不感知这些能力名,最终聊天正文也不得提到能力、检索、工具、action 或模块。",
-            "先在当前场景里检索主动能力,再选择 action；不要凭空猜一个能力名。",
-            "能力按领域分层如下：",
-        ]
+        lines = ["可用动作："]
         for item in abilities:
             name = _single_line(item.get("name"), 24)
             label = _single_line(item.get("label"), 16)
             when = _single_line(item.get("when"), 80)
             use_for = _single_line(item.get("use_for"), 80)
-            avoid = _single_line(item.get("avoid"), 80)
             if name == "screen_peek":
                 label = f"观察{terms['screen']}"
                 when = when.replace("轻窥屏", f"看一眼{terms['screen']}").replace("探头一下", "轻轻确认一下")
-                avoid = avoid.replace("屏幕", terms["screen"]).replace("偷看", "后台过程")
             elif name == "jm_cosmos_read":
                 label = terms["private_reading"]
                 when = f"有空、无聊或夜里自己想给{terms['bookshelf']}{terms['secret_drawer']}添一点阅读内容"
@@ -3392,29 +3386,17 @@ class ProactiveEngineMixin:
             elif name == "photo_text" and terms.get("mode") in {"fantasy", "sci_fi"}:
                 label = "画面加一句话"
             lines.append(
-                "- {module}/{name}（{label}）：适用={when}；用于={use_for}；避开={avoid}".format(
-                    module=_single_line(item.get("module"), 16),
+                "- {name}（{label}）：{when}；{use_for}".format(
                     name=name,
                     label=label,
                     when=when,
                     use_for=use_for,
-                    avoid=avoid,
                 )
             )
         preference_hint = self._action_preference_hint(user)
         if preference_hint:
-            lines.append("【用户媒介偏好】\n" + preference_hint)
-        lines.append("选择顺序：先看生活场景是否自然需要媒介,再看依赖是否可用,最后才落到 message。输出时只保留真人会发出的聊天内容。")
+            lines.append("用户媒介偏好：\n" + preference_hint)
         return "\n".join(lines)
-
-    def _format_presence_layer_hint(self) -> str:
-        return (
-            "状态表现层只在平台侧短暂发生,不属于聊天正文："
-            "发普通文字前可以尝试短暂显示“正在输入”,让消息像人慢慢打出来；"
-            "QQ 在线/睡觉/自定义状态由当前时间段的细化模型通过 presence_status 决定,执行层只按结果同步一次；"
-            "优先用在线或自定义短状态表达生活感,少用忙碌,避免离开、隐身和请勿打扰；"
-            "正文里不得提到正在输入、在线状态、状态同步或平台接口。"
-        )
 
     def _format_proactive_ability_list_for_user(self, user: dict[str, Any] | None = None) -> str:
         abilities = self._available_proactive_abilities(user)
@@ -3433,8 +3415,6 @@ class ProactiveEngineMixin:
             lines.append(
                 f"- {item.get('module')}/{name}：{label}｜{when}"
             )
-        lines.append("- 状态表现/typing_status：发送前短暂显示正在输入｜平台支持时自动尝试,不进聊天正文")
-        lines.append("- 状态表现/qq_presence：在线/睡觉/自定义短状态｜平台支持时自动尝试,少用忙碌,避免离开/隐身/请勿打扰")
         return "\n".join(lines)
 
     def _summarize_test_action_labels(self, actions: list[str]) -> str:
@@ -4693,7 +4673,7 @@ class ProactiveEngineMixin:
             return "今天记录里值得顺手递过去的一小段"
         return "当前时段里自然冒出来的小内容"
 
-    def _format_content_choice_options_for_prompt(self) -> str:
+    def _format_content_choice_options_for_prompt(self, action: Any = None) -> str:
         terms = self._worldview_terms()
         if terms.get("mode") == "fantasy":
             object_examples = "营火边、行囊、靴扣、地图角、药草包、酒馆杯沿、委托纸、斗篷边、旅店窗、书页边缘"
@@ -4707,15 +4687,66 @@ class ProactiveEngineMixin:
             object_examples = "桌边、手边、路上、食物、衣物、门口、杯沿、包装、车窗、书页边缘"
             record_examples = "日记、备忘录、作业、阅读/刷到内容里的一小句,或某个没写完的标题"
             photo_examples = "任何当前场景里适合顺手拍给熟人的具体画面"
+        has_action_limit = action is not None and bool(str(action).strip())
+        normalized_action = str(action or "").strip().lower()
+        is_photo_action = "photo" in normalized_action or "image" in normalized_action or normalized_action in {"selfie", "text2img"}
+        is_touch_action = "poke" in normalized_action
+        is_voice_action = "voice" in normalized_action or "tts" in normalized_action
+        options: list[str] = []
+        if not has_action_limit:
+            options.extend(
+                [
+                    f"- 眼前物：从当前{terms['schedule']}里的{object_examples}等具体物件里自选一个。",
+                    "- 脑内念头：一句突然冒出来的短想法、吐槽、联想或没头没尾的小结论。",
+                    "- 输入残留：上一轮聊天留下的余味、没接完的话、想补但没正式补的一点。",
+                    f"- 记录碎片：{record_examples}。",
+                    f"- 可拍画面：{photo_examples},不限定天气。",
+                    "- 关系试探：想靠近但不直说的半句、轻轻碰一下、把话放下就走。",
+                ]
+            )
+        elif is_photo_action:
+            options.extend(
+                [
+                    f"- 眼前物：从当前{terms['schedule']}里的{object_examples}等具体物件里自选一个。",
+                    f"- 可拍画面：{photo_examples},不限定天气。",
+                ]
+            )
+        elif is_touch_action:
+            options.extend(
+                [
+                    "- 脑内念头：一句突然冒出来的短想法、吐槽、联想或没头没尾的小结论。",
+                    "- 输入残留：上一轮聊天留下的余味、没接完的话、想补但没正式补的一点。",
+                    "- 关系试探：想靠近但不直说的半句、轻轻碰一下、把话放下就走。",
+                ]
+            )
+        elif is_voice_action:
+            options.extend(
+                [
+                    "- 脑内念头：一句突然冒出来的短想法、吐槽、联想或没头没尾的小结论。",
+                    "- 输入残留：上一轮聊天留下的余味、没接完的话、想补但没正式补的一点。",
+                    f"- 记录碎片：{record_examples}。",
+                    "- 关系试探：想靠近但不直说的半句、轻轻碰一下、把话放下就走。",
+                ]
+            )
+        else:
+            options.extend(
+                [
+                    f"- 眼前物：从当前{terms['schedule']}里的{object_examples}等具体物件里自选一个。",
+                    "- 脑内念头：一句突然冒出来的短想法、吐槽、联想或没头没尾的小结论。",
+                    "- 输入残留：上一轮聊天留下的余味、没接完的话、想补但没正式补的一点。",
+                    f"- 记录碎片：{record_examples}。",
+                    "- 关系试探：想靠近但不直说的半句、轻轻碰一下、把话放下就走。",
+                ]
+            )
+        if has_action_limit and not is_photo_action:
+            options.append("- 可拍画面：本轮不是发图动作时不能选；不要在正文里声称拍照、发图或递照片。")
         return (
-            "给模型的内容选择菜单,只供内部挑选,不要把类别名写进正文：\n"
-            f"- 眼前物：从当前{terms['schedule']}里的{object_examples}等具体物件里自选一个。\n"
-            "- 脑内念头：一句突然冒出来的短想法、吐槽、联想或没头没尾的小结论。\n"
-            "- 输入残留：上一轮聊天留下的余味、没接完的话、想补但没正式补的一点。\n"
-            f"- 记录碎片：{record_examples}。\n"
-            f"- 可拍画面：{photo_examples},不限定天气。\n"
-            "- 关系试探：想靠近但不直说的半句、轻轻碰一下、把话放下就走。\n"
-            "选择原则：每次只选一个方向,再根据人格、当前时间段、日程和聊天历史生成新的具体内容；避免复用示例词。不要反复使用草稿纸、小画、画圆圈、笔尖划来划去这类廉价重复桥段。"
+            "给模型的内容选择菜单,只供内部单选,不要把类别名写进正文：\n"
+            + "\n".join(options)
+            + "\n单选规则：先选且只选一个正文锚点；正文只围绕这个锚点展开,不要把两个以上动机、画面、旧话题或关系试探并列拼接。"
+            "人格、当前时间段、日程和聊天历史只能用于筛选锚点和调整语气,不能各自贡献一段内容。"
+            "如果动机、话题、日程、聊天历史指向不同内容,优先保留最贴近本次动作和当前日程的一项,其余全部舍弃。"
+            "避免复用示例词。不要反复使用草稿纸、小画、画圆圈、笔尖划来划去这类廉价重复桥段。"
         )
 
     def _motive_action_bias(self, motive: str) -> dict[str, float]:

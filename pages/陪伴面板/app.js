@@ -183,6 +183,7 @@ function featureDraftFromOverview(overview = {}) {
   const settingBackedFeatureKeys = [
     "enable_rest_reply_simulation",
     "enable_worldview_perception",
+    "enable_group_injection_guard",
     "enable_group_persona_denoise",
     "auto_voice_enabled",
     "auto_voice_full_conversion_enabled",
@@ -490,6 +491,8 @@ const featureMeta = {
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么；被动只在相关时理解，主动可到点关心。"],
   enable_food_menu_recommendation: ["吃什么候选", "管理常吃菜、菜馆和外卖；用户纠结吃什么时，只取少量贴合项作为回复参考。"],
   enable_humanized_states: ["拟人身体状态", "生成精力、睡眠、梦境、健康、饥饿和周期等扮演状态，影响日程、主动消息和被动语气。"],
+  enable_health_state: ["健康/不适状态", "在人格适合生物身体设定时，允许当前扮演状态出现生病、不舒服或恢复尾声。"],
+  enable_hunger_state: ["饥饿/胃口状态", "在人格适合进食设定时，允许当前扮演状态出现饿、胃口不好或想吃东西。"],
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
@@ -516,6 +519,7 @@ const featureMeta = {
   enable_group_slang_learning: ["群黑话学习", "记录群内常用梗、简称和特殊表达。"],
   enable_group_member_profiles: ["群内成员观察", "记录成员在当前群里的近期发言、短句和活跃痕迹。"],
   enable_group_context_injection: ["群上下文注入", "在群聊回复时加入群氛围、话题和成员信息。"],
+  enable_group_injection_guard: ["群聊防注入", "拦截群友通过改称呼、改语气、改设定或改输出格式污染群聊上下文和长期观察。"],
   enable_group_persona_denoise: ["群聊人格降噪", "降低群聊里的私聊腔、状态汇报和私聊关系外溢。"],
   enable_forward_message_adaptation: ["合并消息阅读", "读取合并转发节点并整理成自然聊天记录，让 Bot 能理解转发里的发言顺序、人物和话题。"],
   enable_group_scene_awareness: ["群聊场景感知", "推断当前消息是在对 Bot、某个群友还是整个群说话，减少误以为别人都在问自己。"],
@@ -609,6 +613,7 @@ const featureGroups = [
     keys: [
       "enable_group_companion",
       "enable_group_context_injection",
+      "enable_group_injection_guard",
       "enable_group_persona_denoise",
       "enable_group_scene_awareness",
       "enable_group_reality_promise_guard",
@@ -682,6 +687,8 @@ const featureGroups = [
 const embeddedFeatureParentByKey = {
   inject_passive_states: "enable_humanized_states",
   enable_passive_state_delta_injection: "inject_passive_states",
+  enable_health_state: "enable_humanized_states",
+  enable_hunger_state: "enable_humanized_states",
   enable_cycle_state: "enable_humanized_states",
   enable_rest_reply_simulation: "enable_humanized_states",
   enable_recall_cancel_reply: "enable_recall_enhancement",
@@ -699,6 +706,7 @@ const embeddedFeatureParentByKey = {
   enable_solar_term_perception: "enable_environment_perception",
   enable_almanac_perception: "enable_environment_perception",
   enable_group_context_injection: "enable_group_companion",
+  enable_group_injection_guard: "enable_group_companion",
   enable_group_persona_denoise: "enable_group_companion",
   enable_group_reality_promise_guard: "enable_group_companion",
   enable_group_high_intensity_mode: "enable_group_wakeup_enhancement",
@@ -948,6 +956,7 @@ const configLabels = {
   group_conversation_followup_max_turns: "群聊连续续接上限",
   enable_group_conversation_followup: "启用连续对话保持",
   enable_group_context_injection: "群上下文注入",
+  enable_group_injection_guard: "群聊防注入",
   enable_group_persona_denoise: "群聊人格降噪",
   enable_group_scene_awareness: "群聊场景感知",
   enable_group_privacy_guard: "群隐私保护",
@@ -966,6 +975,8 @@ const configLabels = {
   daily_token_soft_limit: "每日 Token 软限额",
   humanized_state_intensity: "拟人状态强度",
   enable_humanized_states: "拟人身体状态",
+  enable_health_state: "健康/不适状态",
+  enable_hunger_state: "饥饿/胃口状态",
   inject_passive_states: "被动状态注入",
   enable_passive_state_delta_injection: "被动状态增量注入",
   passive_injection_position: "动态提示词注入位置",
@@ -1044,6 +1055,8 @@ const configLabels = {
   worldbook_auto_import: "启动时刷新关系网",
   worldbook_member_match_aliases: "允许别名辅助匹配",
   worldbook_self_registration: "允许群聊自登记",
+  worldbook_self_registration_block_words: "自登记屏蔽词",
+  worldbook_self_registration_block_reply: "屏蔽词命中回复",
   worldbook_auto_pending_observations: "低频待确认观察",
   worldbook_member_inject_limit: "单次注入节点数",
   worldbook_config_paths: "关系网配置路径",
@@ -1152,6 +1165,8 @@ const configDescriptions = {
   roleplay_user_profile_prompt: "描述角色如何称呼用户、用户身份、彼此关系和相处方式；不会作为图片自我识别的外观线索。",
   humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
   enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
+  enable_health_state: "开启后，且人格适合生物身体设定时，拟人状态才可能出现生病、不舒服、头疼或恢复尾声；关闭后自动生成和手动增添都会跳过这类状态。",
+  enable_hunger_state: "开启后，且人格适合进食设定时，拟人状态才可能出现饿、胃口不好、想吃东西或想吃甜的；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",
   passive_injection_position: "选择被动状态、环境感知、TTS 本轮频控、转发/引用上下文等动态片段的注入位置。当前请求末尾会进入统一动态块并按稳定顺序排列，更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
@@ -1189,11 +1204,11 @@ const configDescriptions = {
   tts_conversion_provider_id: "用于后处理判断+翻译、快速标签自动语音、语种修正和中文释义补全的文本模型，不是语音合成模型。转换时会参考当前 AstrBot 人格的语气、称呼和距离感；留空时后处理模式会保持纯文本，显式标签仍可由插件处理。",
   tts_extra_prompt: "只填写本人格或声线的额外要求。基础 <pc_tts> 格式、目标语种和 provider 情绪标签适配规则会自动生成，留空最稳。",
   tts_frequency_control_mode: "选择频率规则。全局频控：用概率影响快速标签模式下 LLM 是否倾向输出 TTS，并控制后处理模式是否进入判断+翻译；弱约束下显式 <pc_tts>/<tts> 不再被概率剥离，只受 provider 和会话间隔保护；强约束下按约束强度硬拦。",
-  tts_constraint_mode: "仅快速标签模式 + 全局频控生效。弱约束用提示词引导模型默认少用语音；强约束会在概率未命中或冷却内反向提示本轮禁止语音，并在发送前阻止语音生成。后处理模式不使用该项。",
+  tts_constraint_mode: "仅快速标签模式 + 全局频控生效。弱约束只在概率命中时注入语音规则；强约束会在冷却内反向提示本轮禁止语音，并在发送前阻止语音生成。后处理模式不使用该项。",
   tts_session_min_interval_seconds: "仅全局频控生效。私聊/群聊未单独覆盖时使用的默认最小间隔；0 表示不限制。",
   tts_private_min_interval_seconds: "仅全局频控生效。私聊会话的最小间隔覆盖值；-1 表示继承默认间隔，0 表示私聊不限制。",
   tts_group_min_interval_seconds: "仅全局频控生效。群聊会话的最小间隔覆盖值；-1 表示继承默认间隔，0 表示群聊不限制。建议群聊比私聊更长。",
-  tts_trigger_probability: "仅全局频控生效。私聊/群聊未单独覆盖时使用的默认触发概率。概率未命中时会提示 LLM 在没有用户明确语音请求时必须纯文字，不主动输出 <pc_tts>、<tts> 或等价语音内容；弱约束不会剥离已输出的语音标签。",
+  tts_trigger_probability: "仅全局频控生效。私聊/群聊未单独覆盖时使用的默认触发概率。概率未命中时本轮不注入 TTS 提示词，也不进入后处理语音判断；弱约束不会剥离已输出的语音标签。",
   tts_private_trigger_probability: "仅全局频控生效。私聊触发概率覆盖值；-1 表示继承默认概率，0 表示私聊默认不主动使用 TTS。",
   tts_group_trigger_probability: "仅全局频控生效。群聊触发概率覆盖值；-1 表示继承默认概率。建议群聊低于私聊，避免打扰。",
   enable_tts_local_playback: "开启后，TTS 音频生成成功时会在运行 AstrBot 的电脑上直接播放。默认关闭，避免群聊自动语音频繁出声。",
@@ -1271,6 +1286,7 @@ const configDescriptions = {
   group_conversation_followup_seconds: "群里用户叫过 Bot 后，后续未 @ 的消息在多久内可能被判断为仍在对 Bot 说。",
   group_conversation_followup_max_turns: "一次群聊连续对话最多自动续接几轮，防止 Bot 一直卷进对话。",
   enable_group_context_injection: "开启后，群聊回复会参考最近群消息、当前话题、活跃成员和群内氛围；关闭后只按当前单条消息理解。",
+  enable_group_injection_guard: "开启后，会识别群里试图改称呼、改语气、改设定或改输出格式的注入话术；这些内容不会写进群观察、黑话、话题线或后续 prompt。",
   enable_group_persona_denoise: "开启后，会主动压低群聊里的私聊腔、状态汇报和过于贴身的关系投射，让群聊发言更像在公共场合说话。",
   enable_group_scene_awareness: "开启后，会判断当前这句话是在对 Bot、某个群友还是整个群说话，并结合上下文减少误接话。",
   enable_group_privacy_guard: "开启后，群聊回复会额外防止把私聊记忆、私下关系细节或只适合一对一场景的信息带进群里。",
@@ -1397,6 +1413,8 @@ const configDescriptions = {
   worldbook_auto_import: "启动或打开页面时自动从关系网资料源刷新用户/群资料。",
   worldbook_member_match_aliases: "提到别名或称呼时辅助匹配 QQ 锚点，但 QQ 号仍是身份主锚点。",
   worldbook_self_registration: "群成员 @Bot 说“我是 XX”时，允许进入二次确认的自登记流程。",
+  worldbook_self_registration_block_words: "命中这些词的自报名字、别名或原始自登记文本会被直接拒绝，不进入关系网待确认流程。",
+  worldbook_self_registration_block_reply: "命中自登记屏蔽词后，Bot 返回给用户的回复文案。留空时回退到默认回复。",
   worldbook_auto_pending_observations: "根据低频互动生成待确认观察，不直接写死到资料正文。",
   worldbook_member_inject_limit: "单次回复最多自动注入多少个相关用户词条。",
   worldbook_config_paths: "关系网资料来源路径。用于读取既有资料，不应写死在代码里。",
@@ -1407,7 +1425,7 @@ const configDescriptions = {
   enable_atrelay_llm_rewrite: "开启后先用模型把要转述的话改成 Bot 自然会说的短句；关闭后直接发送解析出的正文，速度更快。",
   atrelay_default_relay_style: "默认转述方式：persona 按人格改写，soft 委婉，original 原话。",
   atrelay_multi_target_limit: "一次转述最多允许几个目标，防止刷屏。",
-  response_review_mode: "控制回复/主动复核范围。默认只处理高风险主动消息；full 会额外让较长被动回复参与模型改写，延迟更高。",
+  response_review_mode: "控制回复/主动复核范围。主动消息发送前统一复核；full 会额外让较长被动回复参与模型改写，延迟更高。",
   response_review_max_chars: "仅 full 模式使用。普通被动回复超过该长度才可能进入模型改写，避免短回复也被额外拖慢。",
   emotional_gate_hurt_threshold: "用户消息让 Bot 伤心、短期变安静的触发阈值；应低于生气触发阈值。",
   emotional_gate_refuse_threshold: "累计刺痛感让 Bot 生气、短暂回避的触发阈值；应高于伤心触发阈值。",
@@ -1457,10 +1475,12 @@ const featureSettingGroups = {
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: [],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
-  enable_humanized_states: ["humanized_state_intensity", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
+  enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
+  enable_health_state: ["humanized_state_intensity"],
+  enable_hunger_state: ["humanized_state_intensity"],
   enable_cycle_state: ["humanized_state_intensity"],
   enable_skill_growth_simulation: ["skill_growth_rate", "enable_skill_growth_passive_injection", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds", "text_message_debounce_max_wait_seconds", "message_debounce_max_merge_messages", "enable_smart_message_debounce", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds", "smart_message_debounce_examples_limit"],
@@ -1483,6 +1503,7 @@ const featureSettingGroups = {
     "max_group_recent_messages",
     "max_group_slang_terms",
     "enable_group_context_injection",
+    "enable_group_injection_guard",
     "enable_group_persona_denoise",
     "enable_group_scene_awareness",
     "group_scene_recent_limit",
@@ -1527,6 +1548,7 @@ const featureSettingGroups = {
     "enable_group_privacy_guard",
   ],
   enable_group_context_injection: ["max_group_recent_messages", "group_scene_recent_limit"],
+  enable_group_injection_guard: [],
   enable_group_persona_denoise: [],
   enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit"],
   enable_group_scene_awareness: ["group_scene_recent_limit", "enable_group_conversation_followup", "group_conversation_followup_seconds", "group_conversation_followup_max_turns"],
@@ -1544,7 +1566,7 @@ const featureSettingGroups = {
   enable_group_repeat_follow: ["group_repeat_trigger_threshold", "group_repeat_count_distinct_users_only", "group_repeat_follow_probability", "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step", "group_repeat_interrupt_text", "group_repeat_interrupt_image_path"],
   enable_group_interjection_feedback: ["group_interject_min_interval_minutes", "group_interject_max_daily"],
   enable_group_privacy_guard: [],
-  enable_worldbook_member_recognition: ["worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
+  enable_worldbook_member_recognition: ["worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
   enable_cross_user_memory_bridge: ["cross_user_memory_owner_only"],
   enable_atrelay_tools: ["atrelay_require_worldbook_first", "atrelay_member_cache_minutes", "atrelay_sensitive_confirm", "enable_atrelay_llm_rewrite", "atrelay_default_relay_style", "atrelay_multi_target_limit"],
   enable_livingmemory_integration: [],
@@ -1686,7 +1708,7 @@ const featureSettingSections = {
     {
       title: "基础群聊",
       note: "控制群聊消息量、黑话容量和基础上下文。",
-      keys: ["max_group_recent_messages", "max_group_slang_terms", "enable_group_context_injection", "enable_group_persona_denoise", "enable_group_privacy_guard"],
+      keys: ["max_group_recent_messages", "max_group_slang_terms", "enable_group_context_injection", "enable_group_injection_guard", "enable_group_persona_denoise", "enable_group_privacy_guard"],
     },
     {
       title: "场景与续接",
@@ -1911,7 +1933,7 @@ const featureSettingTypes = {
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   framework_session_lock_mode: { type: "select", options: [["auto", "自动（仅旧版兼容）"], ["off", "关闭（新版本推荐）"], ["always", "始终启用（旧版排障）"]] },
-  response_review_mode: { type: "select", options: [["severe_only", "主动高风险调用模型"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
+  response_review_mode: { type: "select", options: [["severe_only", "主动统一复核"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
   emotion_judgement_mode: { type: "select", options: [["suspicious", "仅复核可疑项"], ["always", "总是复核普通文本"], ["off", "关闭复核"]] },
   group_high_intensity_merge_scope: { type: "select", options: [["group", "全群连续叫 Bot 合并"], ["same_user", "只合并同一发送者补话"]] },
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
@@ -1941,6 +1963,7 @@ const featureSettingTypes = {
   recall_forbidden_scope: { type: "select", options: [["bot_and_group", "Bot 自己 + 群聊"], ["bot_only", "仅 Bot 自己"], ["group_only", "仅群聊"]] },
   atrelay_default_relay_style: { type: "select", options: [["persona", "语气转译"], ["soft", "委婉转述"], ["original", "原话模式"]] },
   worldbook_config_paths: { type: "textarea" },
+  worldbook_self_registration_block_words: { type: "textarea" },
   private_user_aliases: { type: "textarea" },
   tts_extra_prompt: { type: "textarea" },
   main_user_mention_voice_keywords: { type: "textarea" },
@@ -3795,7 +3818,7 @@ function groupTopicThreadsView(threads) {
 function renderFeatureMatrix() {
   const groups = [
     ["陪伴", ["enable_mai_style_integration", "enable_expression_learning", "enable_response_self_review", "enable_dialogue_episode_memory"]],
-    ["群聊", ["enable_group_companion", "enable_group_context_injection", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_relationship_graph"]],
+    ["群聊", ["enable_group_companion", "enable_group_context_injection", "enable_group_injection_guard", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_relationship_graph"]],
     ["记忆", ["enable_companion_memory", "enable_open_loop_tracking", "enable_livingmemory_integration"]],
     ["主动联动", ["enable_proactive_quote_trigger_message", "enable_unanswered_screen_peek_followup", "enable_bilibili_integration", "enable_bilibili_boredom_watch", "enable_news_integration", "enable_ai_daily_watch", "enable_private_reading_integration", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_creative_writing", "creative_hidden_mode"]],
   ];
@@ -5230,6 +5253,7 @@ function renderWorldbook() {
     worldbookStat("身份节点", worldbook.enabled_member_count || 0, `${worldbook.member_count || 0} 个关系节点`),
     worldbookStat("群资料", worldbook.group_count || 0, "可用于群聊上下文"),
     worldbookStat("待确认观察", worldbook.pending_observation_total || 0, "确认后才写入重要记忆"),
+    worldbookStat("自登记屏蔽", worldbook.self_registration_block_word_count || 0, worldbook.self_registration ? "命中后直接拒绝" : "自登记已关闭"),
     worldbookStat("识别方式", worldbook.enabled ? "QQ 精确" : "关闭", worldbook.match_aliases ? "称呼辅助开启" : "仅 QQ 确认"),
   ].join("");
   const clearPendingButton = $("#worldbookClearPendingBtn");
@@ -5241,6 +5265,8 @@ function renderWorldbook() {
   renderDl("#worldbookImportState", {
     last_import: worldbook.last_import || "未导入",
     auto_import: worldbook.auto_import ? "开启" : "关闭",
+    self_registration: worldbook.self_registration ? "开启" : "关闭",
+    self_registration_block_word_count: worldbook.self_registration_block_word_count || 0,
     inject_limit: worldbook.inject_limit || 0,
   });
   $("#worldbookMembers").innerHTML = filteredMembers.length
@@ -8083,6 +8109,7 @@ function renderModuleWorkbench(settings) {
       body: `${worldbook.enabled_member_count || 0}/${worldbook.member_count || 0} 个节点启用，用来稳定识别昵称、群名片和关系备注。`,
       meta: [
         toBool(settings.worldbook_self_registration) ? "允许群聊自登记" : "自登记关闭",
+        `自登记屏蔽词 ${worldbook.self_registration_block_word_count || 0} 条`,
         toBool(settings.enable_atrelay_tools) ? "跨群转述工具开启" : "跨群转述关闭",
       ],
       actions: [
@@ -9997,6 +10024,12 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     }
     return true;
   }
+  if (featureKey === "enable_worldbook_member_recognition") {
+    if (["worldbook_self_registration_block_words", "worldbook_self_registration_block_reply"].includes(settingKey)) {
+      return boolSetting("worldbook_self_registration");
+    }
+    return true;
+  }
   if (featureKey === "enable_message_debounce") {
     if (settingKey === "text_message_debounce_seconds" && boolSetting("enable_smart_message_debounce")) return false;
     return true;
@@ -10285,9 +10318,9 @@ const featureDetailGuides = {
     disabled: "不再注入本轮意图策略；情绪模拟和关系距离感仍可基于自身开关使用轻量状态。",
   },
   enable_response_self_review: {
-    summary: "主动消息发送前做轻量润色，重点避免主动开口写成“好呀/确实/刚看到你说”这类像在回复空气的话。",
+    summary: "主动消息发送前统一做价值复核和轻量润色，重点避免主动开口写成“好呀/确实/刚看到你说”这类像在回复空气的话。",
     trigger: "主动消息生成后、发送前；普通被动回复只保留防漏、防复读和突然换话题等本地保护，full 模式才会积极改写被动回复。",
-    enabled: "主动消息命中回复空气风险时会尝试模型重写；重写后仍不对就丢弃本轮主动，宁可不发。",
+    enabled: "主动消息会在发送前判断原样发送、轻改写、延后或取消；重写后仍不对就丢弃本轮主动，宁可不发。",
     disabled: "不再调用模型润色主动消息；本地仍会尽量丢弃明显错误的主动消息。",
   },
   enable_passive_topic_suppression: {
@@ -10337,6 +10370,18 @@ const featureDetailGuides = {
     trigger: "日程生成、状态刷新、主动消息和被动回复注入时。",
     enabled: "当前扮演状态会影响日程、主动行为和被动回复的语气、长短、节奏。",
     disabled: "状态退化为较平稳的基础信息，拟人生活感会明显减少。",
+  },
+  enable_health_state: {
+    summary: "控制健康、不舒服和恢复尾声这类身体余波是否参与当前扮演状态。",
+    trigger: "拟人身体状态刷新或手动增添状态时，且人格适合生物身体设定。",
+    enabled: "状态可能出现轻微不适、头疼、恢复期等健康底色，并影响精力、日程和语气。",
+    disabled: "不会新增健康异常状态；手动增添明显生病/不舒服状态也会被拦截。",
+  },
+  enable_hunger_state: {
+    summary: "控制饥饿、胃口和想吃东西这类身体余波是否参与当前扮演状态。",
+    trigger: "拟人身体状态刷新、饭点饥饿窗口或手动增添状态时，且人格适合进食设定。",
+    enabled: "状态可能出现饿、胃口不好、想吃甜的等底色，并可能产生吃什么类身体小需求。",
+    disabled: "不会新增饥饿/胃口状态；吃什么类身体小需求和手动饥饿状态会被拦截。",
   },
   enable_segmented_proactive_reply: {
     summary: "把纯文本回复按自然聊天节奏拆成短句，并合并过短片段，避免刷屏或突兀附和。",
@@ -10469,6 +10514,12 @@ const featureDetailGuides = {
     trigger: "Bot 准备在群聊回复时。",
     enabled: "Bot 更容易知道刚才在聊什么、提到的是谁。",
     disabled: "群回复主要依赖原始消息，上下文感会弱。",
+  },
+  enable_group_injection_guard: {
+    summary: "识别群里试图改称呼、改语气、改设定或改输出格式的注入话术，并阻断学习和后续再注入。",
+    trigger: "群聊消息进入观察写入和群聊回复前。",
+    enabled: "群内起哄或恶搞更难污染黑话、话题线、成员观察和后续 prompt。",
+    disabled: "群聊里的改设定话术可能继续沉淀成上下文，长期更容易把 Bot 带偏。",
   },
   enable_group_persona_denoise: {
     summary: "群聊回复时降低人格外溢，减少私聊腔、状态汇报和私聊关系直出。",
@@ -10751,7 +10802,7 @@ function featureImpactLines(key) {
   const lines = [];
   const group = featureGroupForKey(key);
   lines.push(["模块", group]);
-  if (["enable_humanized_states", "inject_passive_states", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
+  if (["enable_humanized_states", "inject_passive_states", "enable_health_state", "enable_hunger_state", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
     lines.push(["场景", "日程 / 状态 / 私聊 / 群聊"]);
   } else if (key === "enable_segmented_proactive_reply") {
     lines.push(["场景", "主动消息 / LLM 纯文本回复"]);
@@ -10981,6 +11032,13 @@ function bindFeatureDetailActions() {
         input.addEventListener("change", () => {
           state.overview.settings = state.overview.settings || {};
           state.overview.settings.emotion_judgement_mode = input.value || "suspicious";
+          renderFeatureSwitches();
+        });
+      }
+      if (state.selectedFeatureKey === "enable_response_self_review" && input.dataset.featureParam === "response_review_mode") {
+        input.addEventListener("change", () => {
+          state.overview.settings = state.overview.settings || {};
+          state.overview.settings.response_review_mode = input.value || "severe_only";
           renderFeatureSwitches();
         });
       }

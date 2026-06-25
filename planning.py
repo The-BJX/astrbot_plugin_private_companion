@@ -86,7 +86,22 @@ async def generate_detail_enhancement(
     normalized["today_events"] = filter_items_to_segment(plugin, normalized.get("today_events"), segment)
     normalized["proactive_events"] = filter_items_to_segment(plugin, normalized.get("proactive_events"), segment)
     normalized["summary"] = _single_line(payload.get("summary"), 160)
+    social_fact_sanitizer = getattr(plugin, "_sanitize_daily_plan_social_fact_text", None)
+    if callable(social_fact_sanitizer):
+        normalized["summary"] = social_fact_sanitizer(
+            normalized["summary"],
+            field="detail.summary",
+        )
     normalized["state_variables"] = normalize_state_variables(payload.get("state_variables"))
+    if callable(social_fact_sanitizer):
+        for index, item in enumerate(normalized["state_variables"]):
+            if not isinstance(item, dict):
+                continue
+            for key in ("value", "note"):
+                item[key] = social_fact_sanitizer(
+                    item.get(key),
+                    field=f"detail.state_variables.{index}.{key}",
+                )
     normalized["presence_status"] = normalize_presence_status(payload.get("presence_status"))
     return normalized
 
@@ -255,10 +270,20 @@ def normalize_story_plan(plugin, payload: dict[str, Any]) -> dict[str, Any]:
     summary = _single_line(payload.get("summary"), 160) or "这一段按原日程慢慢推进。"
     if callable(social_fact_sanitizer):
         summary = social_fact_sanitizer(summary, field="detail.summary")
+    state_variables = normalize_state_variables(payload.get("state_variables"))
+    if callable(social_fact_sanitizer):
+        for index, item in enumerate(state_variables):
+            if not isinstance(item, dict):
+                continue
+            for key in ("value", "note"):
+                item[key] = social_fact_sanitizer(
+                    item.get(key),
+                    field=f"detail.state_variables.{index}.{key}",
+                )
     return {
         "date": _today_key(),
         "summary": summary,
-        "state_variables": normalize_state_variables(payload.get("state_variables")),
+        "state_variables": state_variables,
         "presence_status": normalize_presence_status(payload.get("presence_status")),
         "today_events": today_events[:8],
         "proactive_events": normalized_proactive,
@@ -561,6 +586,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 7.0 如果“今日互动造成的日程偏移”不为空,要先判断它的强度和影响范围：强干涉会改变当前段、下一段甚至今日后续的节奏；中等干涉至少改变情绪、等待、分享欲、任务进度或主动策略；轻微回应也要留下短暂余味。不能只在 message_seed 里提一句就结束。
 7.1 如果昨日完整对话摘要里有饮食、作息、运动、天气暴露、情绪刺激、约定、礼物、争执、安慰、共同完成/未完成的事等线索,可以让它们以抽象后果影响今日：体力、胃口、身体小不适、心情余波、主动话题、出门意愿、梦境碎片或某个时段的小停顿。影响强度要跟摘要一致,可以很轻,也可以没有；不要为了戏剧性强行安排事故。
 7.1.1 如果昨日屏幕观察日记可用,只能把它当作用户昨日作息和活动类型的脱敏背景：例如昨天长时间编程、社交消息较多、视频放松、很晚仍在电脑前等。它可以影响今天的问候、体力判断、主动话题和是否显得担心,但不能直接引用窗口名、账号、具体聊天、页面标题,也不要说“我昨天看到你”。
+7.1.2 饮食、零食、物件和梦境意象有自然衰退：最近几天反复出现的具体菜名、气味、小物件或梗,只说明“近期聊过/需要避重”,不能每天复刻进日程。用户表达“不吃/不喜欢/不要/避开某食物”时,这只是避错规则,不能反向生成“今天给用户准备替代餐食/带饭/约饭”的任务。除非今天的输入明确要求,不要把同一道菜、同一种食物香气或同一个小物件连续安排成午饭、梦境、主动话题或带给用户的东西。
 7.2 必须主动避开最近日程骨架的重复：不要连续几天都写同一套“醒来/洗漱/整理/学习或做事/休息/收尾/睡前”。如果某类活动无法避免,要换具体场景、地点、对象、阻碍、小意外、关系伏笔或情绪走向,让今天读起来像新的一天。
 7.3 不要把“草稿纸上画圆圈/随手涂鸦/笔尖划来划去/盯着同一张纸发呆”当作通用生活感反复使用。除非输入材料明确提到这件事,否则优先换成更具体的当日物件、地点、声音、气味、人物互动或真实占用时间的事项。
 7.4 如果“技能成长对日程的能力边界影响”不为空,必须让相关能力表现和技能等级连续一致,不要二分处理。Lv.1 可被基础概念绊住；Lv.2 可照着例子慢慢做；Lv.3 能独立推进常规任务但效率一般；Lv.4 常规任务不应卡死,只会检查细节或换思路；Lv.5 普通相关任务应熟练、能优化或教别人；Lv.6 可创造新做法或在未知条件下表现出明显优势。这里的任务可以是题目、创作、料理、训练、战斗、交涉、研究、手工或任何符合人格的活动。它主要约束“能不能做、会不会卡、卡多久、如何解决”,不是强行增加训练频率。
@@ -707,10 +733,10 @@ def build_detail_enhancement_prompt(
 · 消极状态不能滚雪球式升级。最近日记和拟人状态只提供余波,当前段需要给出一点自然回稳、压下去、被接住或转移注意的可能。
 · 用第三人称旁观：today_events 和 why/scene 都像在看这个人过日子,不是角色自己写日记。
 · 主动意愿要真实——不是每段都要发消息,允许“想了想算了”。
-· 主动内容不要只围绕问候、天气和当前状态。先从“内容选择菜单”里选一个方向,再根据当前时间段、日程、人格和最近聊天生成新的具体内容。不要照抄菜单示例,不要把类别名写进输出。
-· 主动能力要先检索再使用：从“主动能力检索”里挑当前可用且贴合场景的 action；不要凭空造新 action,也不要为了触发而触发。这个检索过程只供内部规划,不得写进 today_events、why、topic、motive 或最终聊天内容。
+· 主动内容不要只围绕问候、天气和当前状态。先从“内容选择菜单”里单选一个正文锚点；当前时间段、日程、人格和最近聊天只用于筛选锚点和调整语气,不要各取一段拼成一条。不要照抄菜单示例,不要把类别名写进输出。
+· 主动 action 只使用“主动能力检索”清单里的名字；没有合适动作时就是 message。
 · 主动图片能力状态：{photo_action_hint}
-· 主动能力要融入当前情境。{photo_menu_hint}只有在独处、半独处、课间、路上、睡前、发呆、刚拿到手机等合适时机才触发。
+· 主动动作贴当前情境。{photo_menu_hint}图片动作常见于独处、半独处、课间、路上、睡前、发呆、刚拿到手机等时机。
 · 早安只适合作为当天早上的第一句主动消息；如果今天已经有别的主动、或者已经和对方有来回互动，就别再产出 morning_greeting，改成 check_in、activity_share 或 quiet_care。
 · {photo_instruction_hint}
 · {photo_detail_hint}
@@ -798,9 +824,6 @@ def build_detail_enhancement_prompt(
 
 【主动能力检索】
 {plugin._format_proactive_ability_search_hint()}
-
-【状态表现层】
-{plugin._format_presence_layer_hint()}
 
 【内容选择菜单】
 {plugin._format_content_choice_options_for_prompt()}

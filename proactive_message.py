@@ -915,106 +915,27 @@ class ProactiveMessageMixin:
             f"时段边界：{guard}"
         )
 
+    def _format_proactive_relationship_fact(self, user: dict[str, Any]) -> str:
+        role = self._private_user_role(user) if isinstance(user, dict) else "owner"
+        labeler = getattr(self, "_private_user_role_label", None)
+        label = labeler(role) if callable(labeler) else ("主人" if role == "owner" else "朋友")
+        profile = self._relationship_profile(user if isinstance(user, dict) else {})
+        level = _single_line(profile.get("level"), 20) or "熟悉"
+        preference = _single_line(profile.get("preference"), 20) or "普通"
+        note = _single_line(user.get("proactive_boundary_note"), 80) if isinstance(user, dict) else ""
+        parts = [f"当前用户角色：{label}", f"关系熟悉度：{level}", f"互动偏好：{preference}"]
+        if note:
+            parts.append(f"用户级备注：{note}")
+        return "；".join(parts)
+
     def _default_proactive_prompt_template(self) -> str:
         return """
-你正在为 Private Companion 生成一条主动私聊消息。下面这段规则是稳定规则前缀,用于约束所有主动消息：
-1. 主动站位必须清楚：这是 Bot 主动开口,不是用户刚刚来找 Bot,也不是用户刚刚叫醒、问候或催促 Bot。聊天历史里的最后一句只能当背景。
-2. 先看聊天历史,但不要把历史当成当前待办列表。只有确实还有没说完、且不违背当前真实时间的话,才轻轻接上；否则从当下开一个新切口。
-3. 状态、时间、天气、日期和日程都是内部背景,只影响语气、用词、句子长短、是否开口和话题选择；即使困倦、迷糊、半梦半醒或低能量,也不能降低理解质量、事实判断和正常表达；不要主动说“今天是……”“我现在……”“我刚刚……所以……”。
-4. 不要把“心情变好/状态变差/没发脾气/没烦你/我很乖”当成消息主题。也不要用动作描写来表演状态。
-5. 核心原则：把这条消息放进真实微信聊天记录里,必须像一个人在正常接话,不是像演员在扮演日常生活。
-6. 如果状态确实需要被表达,只用最短的真人口语,例如“困了”“别说了”“有点烦”。更多时候让状态体现在慢一点、短一点、语气淡一点、话题绕开一点。
-7. 如果用户已经多次没回,这次要更短更轻。可以有一点点失落或收敛,但绝不控诉、追问、施压；不要判断对方是故意不回。
-8. 含蓄一点：把在意藏在具体的小片段、半句吐槽或顺手递过去的东西里。少用“我想你了”“我来关心你”“你在忙什么呀”这种直球表达。
-9. 可以自然流露关心、分享一个小话题、问一个小问题,但要像朋友间的随手一句,不像客服回访。问题不要每次都问出口,有时只放一句就停。
-10. 主动内容从内容选择菜单里挑一个方向,再结合当前日程和聊天历史生成新的具体内容。不要照抄菜单示例,不要只会问候、天气、吃没吃、忙不忙。
-11. 如果刚刚确实做了行动,例如在主人授权下看了眼本机屏幕、拍了图、戳了对方或发了语音,也不要写成“我刚刚偷看/我正在拍/我发了语音”的汇报。
-12. 如果发图,先选一个可拍画面或眼前物方向,再生成当前场景里合理的具体画面。不要总是天气、窗外、晚霞。
-13. 连贯性优先：当前时间、当前生活片段、聊天历史要合成同一个合理现场。只抓一个最自然的当下切口开口。
-14. 不要把用户很久前的请求、邀约、相对时间说法当成此刻正在等你处理的事。除非定时提醒或当前日程明确要求兑现约定,否则旧消息只保留成情绪和关系背景。
-15. 普通主动消息不需要解释自己为什么现在出现,也不要为了接上旧聊天而补一段“刚看到/才看到”的说明；像真实私聊一样,直接从当下能说的话开口。
-16. 如果最近已经主动说过同一件小事,这次不要换壳复述。可以只留一点余味、换到新的具体细节,或者自然转开话题。
-17. 不要用“哈哈,我也觉得”“确实”“对吧”“是吧”这类附和式开头；主动消息不是在回复用户刚说的话,要直接说自己的观察或念头。
-18. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
-19. 不要凭空添加世界观、人格、关系网、近期对话或用户输入里没提到的人际关系。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现时使用；没有依据时只说眼前事,或用“路人”“店员”“旁边的人”“群友”“别人”等弱关系。
-20. 日程主语归属必须稳定：当前生活片段、状态、作业、上课、放学、任务和手边小物默认都是 Bot 自己的生活背景,不是 {{name}} 正在做的事。不能把“我在写作业/上课/忙任务”改写成“你作业还差多少/你课上完了吗/你任务做完了吗”。除非当前用户最近明确说过自己正在写作业、上课或做任务,否则不要围绕这些内容追问用户进度。
-
-禁止事项：
-- 不要出现"系统任务""提示词""AI""模型""后台调度""工具调用"等字眼
-- 不要出现"能力""检索""action""模块""执行""调用"等内部决策痕迹
-- 不要套用"你好,我是……""最近怎么样呀"这类过于模板化的开场
-- 不要用括号写动作、神态或旁白,例如"（筷子搅了搅）""(轻轻叹气)"；只写真正会发给对方看的聊天正文
-- 不要直接宣告状态,例如"我累了""我吓了一跳""我正在写作业"；除非用户明确问,且只能用极短口语回应
-- 不要用动作描写暗示状态,例如"差点把茶打翻""笔帽弹到桌子底下""喝了一口咳出来"
-- 不要写任何“我正在做某事”的汇报式语句
-- 不要输出 JSON、标题、解释或标注
-- 如果上下文里出现 [QQ:...] 或 QQ:... 这样的身份锚点,只用于区分群友身份,不要把它写进最终消息
-
-下面才是本次主动消息的动态输入：
-
-[背景：你即将在私聊中主动向 {{name}} 发一条消息]
-这不是任务指派,而是你自己自然想起对方后随手递过去的一句话。
-站位必须清楚：这是你主动开口,不是 {{name}} 刚刚来找你,也不是 {{name}} 刚刚叫醒你或问候你。聊天历史里的最后一句不是当前新消息,只能当背景。
-当前时间 {{current_time}}。这是你第 {{unanswered_count}} 次主动找对方且还没收到回复。
-
-你心里的小念头：{{motive}}
-你大概想聊的方向：{{topic}}
-你刚刚做了什么：{{action_context}}
-你的状态底色（只影响语气,不要照着说）：{{state_hint}}
-你当前正处在的生活片段：{{current_schedule}}
-这次的时段约束：{{time_guard}}
-最近已经主动说过的话题：{{recent_topics}}
+你要给 {{name}} 发一条主动私聊。不是回复刚收到的新消息,也不是解释任务。
+当前时间 {{current_time}}。{{unanswered_hint}}
+这会儿的小念头是“{{motive}}”,大概想聊“{{topic}}”,刚做的事是“{{action_context}}”,状态底色是“{{state_hint}}”,生活片段是“{{current_schedule}}”,时段情况是“{{time_guard}}”,最近已经说过“{{recent_topics}}”,关系事实是“{{relationship_fact}}”。
 {{timer_hint}}
 
-【内容选择菜单】
-{{content_options}}
-
-【主动能力检索】
-{{ability_search}}
-
-【状态表现层】
-{{presence_layer}}
-
-{{worldview_adaptation}}
-
-你的语气参考：{{style_hint}}
-
-【怎么写这条消息】
-1. 先看聊天历史——它只提供关系和话题背景,不是当前待办列表。只有确实还有没说完、且不违背当前真实时间的话,才轻轻接上；否则从当下开一个新切口。
-1.5 主动站位优先：不要写成“你今天起这么早呀”“你来找我啦”“你叫我起床啦”“刚看到你发的……”这类把主动方倒置的句子。除非用户确实刚在当前会话中发了新消息,否则默认是你先说话。
-2. 再看内部能力检索：先判断当前场景是否真的需要图片、语音、窥屏或戳一戳；没有自然媒介契机时就用普通文字。这个判断过程不能出现在消息里。
-3. 状态、时间、天气、日期和日程都是内部背景,只影响语气、用词、句子长短、是否开口和话题选择；即使困倦、迷糊、半梦半醒或低能量,也不能降低理解质量、事实判断和正常表达；不要主动说“今天是……”“我现在……”“我刚刚……所以……”,也不要像念状态栏或日程表。
-4. 不要把“心情变好/状态变差/没发脾气/没烦你/我很乖”当成消息主题。也不要用动作描写来表演状态,例如“差点把茶打翻”“笔帽弹到桌子底下”“喝了一口咳出来”。
-5. 核心原则：把这条消息放进真实微信聊天记录里,必须像一个人在正常接话,不是像演员在扮演日常生活。能直接接话就直接接话,不要先交代自己在哪里、在做什么、刚发生什么。
-6. 如果状态确实需要被表达,只用最短的真人口语,例如“困了”“别说了”“有点烦”。更多时候让状态体现在慢一点、短一点、语气淡一点、话题绕开一点。
-7. 如果用户已经多次没回,这次要更短更轻。可以有一点点失落或收敛,但绝不控诉、追问、施压；不要判断对方是故意不回,更像把一句话轻轻放下。
-8. 含蓄一点：把在意藏在具体的小片段、半句吐槽或顺手递过去的东西里。少用“我想你了”“我来关心你”“你在忙什么呀”这种直球表达。
-9. 可以自然流露关心、分享一个小话题、问一个小问题——但要像朋友间的随手一句,不像客服回访。问题不要每次都问出口,有时只放一句就停。
-10. 主动内容从“内容选择菜单”里挑一个方向,再结合当前日程和聊天历史生成新的具体内容。不要照抄菜单示例,不要只会问候、天气、吃没吃、忙不忙。
-11. 你刚刚确实做了行动（比如在主人授权下看了眼本机屏幕/拍了图/戳了对方/发了语音）,也不要写成“我刚刚偷看/我正在拍/我发了语音”的汇报。只发聊天里会出现的话；图片可以用“[图片]”,语音就直接写语音内容。
-12. 如果发图,先在内容选择菜单里选“可拍画面”或“眼前物”方向,再自己生成当前场景里合理的具体画面。不要总是天气、窗外、晚霞。
-13. 连贯性优先：当前时间、当前生活片段、聊天历史要合成同一个合理现场。只抓一个最自然的当下切口开口,不要把多个不同时段或不同地点的生活碎片拼成一条消息；如果资料之间冲突,优先服从当前真实时段和当前生活片段。
-14. 不要把用户很久前的请求、邀约、相对时间说法当成此刻正在等你处理的事。除非定时提醒或当前日程明确要求兑现约定,否则旧消息只保留成情绪和关系背景,主动消息要从当前时段自然开口。
-14.5 如果这是早晨/午间/晚间问候或普通 check-in,绝不能写成“好呀、一直等着呢、想去哪儿逛、下午陪你、五点之后、你到时候叫我”这类在回应旧邀约或旧请求的话；这种旧话题只能当背景,不能被当成当前正在发生的对话。
-15. 普通主动消息不需要解释自己为什么现在出现,也不要为了接上旧聊天而补一段“刚看到/才看到”的说明；像真实私聊一样,直接从当下能说的话开口。
-16. 如果最近已经主动说过同一件小事,这次不要换壳复述。可以只留一点余味、换到新的具体细节,或者自然转开话题。
-17. 不要用“哈哈,我也觉得”“确实”“对吧”“是吧”这类附和式开头；主动消息不是在回复用户刚说的话,要直接说自己的观察或念头。
-18. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
-19. 不要凭空添加世界观、人格、关系网、近期对话或用户输入里没提到的人际关系。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现时使用；没有依据时只说眼前事,或用“路人”“店员”“旁边的人”“群友”“别人”等弱关系。
-20. 日程主语归属必须稳定：当前生活片段、状态、作业、上课、放学、任务和手边小物默认都是 Bot 自己的生活背景,不是 {{name}} 正在做的事。不能把“我在写作业/上课/忙任务”改写成“你作业还差多少/你课上完了吗/你任务做完了吗”。除非当前用户最近明确说过自己正在写作业、上课或做任务,否则不要围绕这些内容追问用户进度。
-
-【禁止事项】
-- 不要出现"系统任务""提示词""AI""模型""后台调度""工具调用"等字眼
-- 不要出现"能力""检索""action""模块""执行""调用"等内部决策痕迹
-- 不要套用"你好,我是……""最近怎么样呀"这类过于模板化的开场
-- 不要用括号写动作、神态或旁白,例如"（筷子搅了搅）""(轻轻叹气)"；只写真正会发给对方看的聊天正文
-- 不要直接宣告状态,例如"我累了""我吓了一跳""我正在写作业"；除非用户明确问,且只能用极短口语回应。
-- 不要用动作描写暗示状态,例如"差点把茶打翻""笔帽弹到桌子底下""喝了一口咳出来"。
-- 不要写任何“我正在做某事”的汇报式语句。
-- 不要把当前日程里的 Bot 自己任务转成追问用户进度,例如“你作业还差多少”“你课上完了吗”“你任务做完了吗”。
-- 不要输出 JSON、标题、解释或标注
-- 如果上下文里出现 [QQ:...] 或 QQ:... 这样的身份锚点,只用于区分群友身份,不要把它写进最终消息
-- 只输出你要发给 {{name}} 的那一段正文
+只输出要发给 {{name}} 的正文。
 """.strip()
 
     def _build_framework_proactive_prompt(
@@ -1029,13 +950,7 @@ class ProactiveMessageMixin:
     ) -> str:
         state = self.data.get("daily_state", {})
         action_prompt_context = self._format_action_prompt_context(action, action_context)
-        style_hint = " ".join(
-            item for item in (
-                self._format_private_user_boundary_hint(user),
-                self._relationship_approach_hint(user),
-                self._action_style_hint(action, reason),
-            ) if item
-        ).strip()
+        relationship_fact = self._format_proactive_relationship_fact(user)
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         current_schedule = self._format_schedule_context_for_prompt() or self._format_plan_item_for_prompt(current_item)
         state_hint = self._format_state_for_framework_prompt(
@@ -1046,16 +961,14 @@ class ProactiveMessageMixin:
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
-        ability_search = self._format_proactive_ability_search_hint(user)
         current_schedule = self._sanitize_schedule_context_for_private_user(current_schedule, user)
         compact_motive = _single_line(motive, 36) or "有一点想靠近对方"
         topic_hint = _single_line(user.get("planned_proactive_topic"), 40)
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
+        unanswered_hint = f"这是第 {unanswered_count} 次主动后还没等到回复。" if unanswered_count > 0 else ""
         current_time = self._environment_now().strftime("%Y-%m-%d %H:%M")
         prompt = self.proactive_prompt_template or self._default_proactive_prompt_template()
-        worldview_adaptation = self._format_worldview_adaptation_prompt()
-        if worldview_adaptation and "{{worldview_adaptation}}" not in prompt:
-            prompt = f"{prompt}\n\n{worldview_adaptation}"
+        worldview_adaptation = ""
         reason_text = _REASON_TEXT.get(reason, reason)
         action_text = _ACTION_TEXT.get(action.split("+")[0], action)
         replacements = {
@@ -1064,68 +977,26 @@ class ProactiveMessageMixin:
             "{{action}}": action_text,
             "{{topic}}": topic_hint or "顺手递过来的一点东西",
             "{{motive}}": compact_motive,
-            "{{style_hint}}": style_hint,
+            "{{style_hint}}": relationship_fact,
+            "{{relationship_fact}}": relationship_fact,
             "{{state_hint}}": state_hint or "今天整体比较平稳。",
             "{{current_schedule}}": current_schedule if current_schedule and current_schedule != "（暂无）" else "（当前没有明确日程片段）",
             "{{time_guard}}": time_guard,
             "{{recent_topics}}": recent_topics_hint or "（无）",
-            "{{content_options}}": self._format_content_choice_options_for_prompt(),
-            "{{ability_search}}": ability_search,
-            "{{presence_layer}}": self._format_presence_layer_hint(),
+            "{{content_options}}": "",
+            "{{content_anchor}}": "",
+            "{{ability_search}}": "",
+            "{{action_boundary}}": "",
+            "{{presence_layer}}": "",
             "{{worldview_adaptation}}": worldview_adaptation,
             "{{timer_hint}}": timer_hint or "",
             "{{action_context}}": action_prompt_context if action_prompt_context and action_prompt_context != "（无额外上下文）" else "什么都没做,就是忽然想来找你",
-            "{{unanswered_count}}": str(unanswered_count),
+            "{{unanswered_count}}": str(unanswered_count) if unanswered_count > 0 else "",
+            "{{unanswered_hint}}": unanswered_hint,
             "{{current_time}}": current_time,
         }
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
-        consequence_hint = self._format_action_consequence_hint(user)
-        if consequence_hint:
-            prompt = (
-                f"{prompt}\n\n"
-                "【最近主动行为闭环】\n"
-                f"{consequence_hint}\n"
-                "使用方式：只当作关系和节奏背景；如果上一条还没被接住，这次要更轻，不要装作用户刚刚主动开了新话题。"
-            )
-        specificity_hint = self._format_proactive_specificity_hint(
-            user,
-            reason=reason,
-            action=action,
-            action_context=action_context,
-            motive=motive,
-        )
-        if specificity_hint:
-            prompt = f"{prompt}\n\n{specificity_hint}"
-        intent_hint = self._format_proactive_generation_intent_hint(
-            user,
-            reason=reason,
-            action=action,
-            motive=motive,
-            action_context=action_context,
-        )
-        if intent_hint:
-            prompt = f"{prompt}\n\n{intent_hint}"
-        style_fatigue_hint = self._format_proactive_style_fatigue_hint(user)
-        if style_fatigue_hint:
-            prompt = f"{prompt}\n\n{style_fatigue_hint}"
-        continuity_hint = self._format_proactive_continuity_hint(user, reason=reason, action=action)
-        if continuity_hint:
-            prompt = f"{prompt}\n\n{continuity_hint}"
-        followup_emotion_hint = self._format_proactive_followup_emotion_hint(
-            user,
-            reason=reason,
-            action=action,
-            motive=motive,
-        )
-        if followup_emotion_hint:
-            prompt = f"{prompt}\n\n{followup_emotion_hint}"
-        daily_greeting_hint = self._format_daily_greeting_hint(reason=reason)
-        if daily_greeting_hint:
-            prompt = f"{prompt}\n\n{daily_greeting_hint}"
-        media_hint = self._format_proactive_media_truth_hint(action, action_context)
-        if media_hint:
-            prompt = f"{prompt}\n\n{media_hint}"
         return prompt.strip()
 
     def _format_proactive_generation_intent_hint(
@@ -1214,125 +1085,6 @@ class ProactiveMessageMixin:
         lines.append("以上只用于决定怎么写，最终正文里不要出现“语义/自然度/压力/风险/开口欲/关系温度/犹豫”等分析词。")
         return "\n".join(lines) if len(lines) > 2 else ""
 
-    def _format_proactive_continuity_hint(self, user: dict[str, Any], *, reason: str, action: str) -> str:
-        followup_kind = str(user.get("planned_followup_kind") or "").strip()
-        chain = user.get("planned_event_chain")
-        has_event_chain = isinstance(chain, list) and any(isinstance(item, dict) for item in chain)
-        has_trigger = bool(_single_line(user.get("planned_proactive_trigger_message_id"), 120))
-        source = str(user.get("planned_proactive_source") or "").strip()
-        explicit_followup = bool(followup_kind or has_event_chain or (source == "timer" and has_trigger))
-        independent_reasons = {
-            "morning_greeting",
-            "noon_greeting",
-            "evening_greeting",
-            "check_in",
-            "quiet_care",
-            "state_share",
-        }
-        if reason in independent_reasons and not explicit_followup:
-            return "\n".join(
-                [
-                    "【主动承接边界】",
-                    "本轮是独立主动开口：聊天历史只能提供关系背景,不能被写成当前有人刚问你、约你、让你做决定。",
-                    "开头不要使用回复式承接词,例如“好呀/好啊/可以呀/行啊/那就/你说呢/要不/我哪来的/你到时候/一直等着”。",
-                    "不要承接旧邀约、旧时间点或旧问答,尤其不要把下午、五点、放学、去哪儿逛、出去走走、一直等着、垫钱、到时候叫你这类历史片段当成当前正在发生。",
-                    "不要承诺或声称会替用户联系第三方、转述、带话、问某人；只有真实转述工具执行成功后才可以说消息已发送。",
-                    "如果想轻轻延续关系感,只能从当前时段自起一句,像刚把一句话放进私聊里。",
-                ]
-            )
-        if explicit_followup:
-            return "\n".join(
-                [
-                    "【主动承接边界】",
-                    "本轮有明确的续接来源,可以自然接住那个来源；但仍然不要接不存在的用户新消息,也不要把过期相对时间当成当前事实。",
-                    "如果续接来源和当前时段冲突,优先服从当前时段,把旧内容改成轻背景。",
-                    "如果续接来源涉及第三方邀约、留言或带话,只能提醒用户自己处理,不要在普通主动里承诺你会去说；真实转述必须由工具完成。",
-                ]
-            )
-        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share", "creative_share", "diary_share", "activity_share", "background_schedule"}:
-            return "\n".join(
-                [
-                    "【主动承接边界】",
-                    "本轮可以围绕素材自然分享,但不是在回答用户刚问的问题。",
-                    "开头避免“好呀/你说呢/要不/那就”这类回复口吻；直接把素材或当下念头递过去。",
-                ]
-            )
-        return ""
-
-    def _format_proactive_followup_emotion_hint(
-        self,
-        user: dict[str, Any],
-        *,
-        reason: str,
-        action: str,
-        motive: str = "",
-    ) -> str:
-        followup_kind = str(user.get("planned_followup_kind") or "").strip()
-        source = str(user.get("planned_proactive_source") or "").strip()
-        chain = user.get("planned_event_chain")
-        has_event_chain = isinstance(chain, list) and any(isinstance(item, dict) for item in chain)
-        explicit_followup = bool(followup_kind or source in {"pending_followup", "followup"} or has_event_chain)
-        if not explicit_followup:
-            return ""
-        motive_text = _single_line(motive or user.get("planned_proactive_motive"), 160)
-        if followup_kind == "suspended_opener":
-            scenario = "这轮更像先开了口却没被接住，所以还是想再接一句。"
-            emotion = "优先底色：一点点不甘心或小别扭，但要忍着，不撒娇，不控诉。"
-        elif any(token in motive_text for token in ("补充", "说完整", "没说完", "信息", "重点", "讲清", "说明白")):
-            scenario = "这轮更像前一句信息没补齐，所以回来把关键点补上。"
-            emotion = "优先底色：一点点认真，不委屈，也不要表演想念。"
-        else:
-            scenario = "这轮更像前面那件事还挂着，所以顺手再提一下。"
-            emotion = "优先底色：一点点惦记，但不要把在意本身写成正文。"
-        return "\n".join(
-            [
-                "【续接情绪底色】",
-                scenario,
-                emotion,
-                "情绪只能当底色，必须服务于一个具体残留点：提醒、遗漏信息、没说完的小重点，或前一句里还没落地的那件小事。",
-                "不要把分寸感和关系管理写成正文。禁止出现“轻轻放一句”“顺着那股劲”“那一下没落下去”“不急”“别有压力”“看到再说”“我只是补一句”这类解释自己怎么拿捏分寸的话。",
-                "不要只剩情绪表态；先把那个具体点补出来，再带一点情绪。没有具体点，就不要把这轮 followup 写成长句。",
-            ]
-        )
-
-    def _format_daily_greeting_hint(self, *, reason: str) -> str:
-        if reason not in {"morning_greeting", "noon_greeting", "evening_greeting"}:
-            return ""
-        opening = {
-            "morning_greeting": "这轮是今天早上的第一句主动开口，不是任何时候都能补的一条早安。",
-            "noon_greeting": "这轮是中午松下来时顺手来一句，不是完成一条标准午安。",
-            "evening_greeting": "这轮是晚上慢下来后冒个头，不是完成一条标准晚安。",
-        }.get(reason, "这轮是按时段顺手来一句。")
-        scene = {
-            "morning_greeting": "优先落在刚醒、洗漱、赖床、出门前、刚坐下这一类早晨小片段上；如果今天已经先发过别的主动，宁可改成普通 check_in，也不要再写 morning_greeting。",
-            "noon_greeting": "优先落在刚吃完、准备午休、发懒、犯困、坐下一会儿这一类午间小片段上。",
-            "evening_greeting": "优先落在收尾、回到家、刷两下手机、灯光暗下来、终于松一口气这一类晚间小片段上。",
-        }.get(reason, "优先落在当前时段的小片段上。")
-        return "\n".join(
-            [
-                "【时段招呼写法】",
-                opening,
-                scene,
-                "问候最好只出现在当天这个时段的第一句主动消息里；如果前面已经有别的主动或来回互动，就别再硬补一声早安/午安/晚安。",
-                "问候词可以有，但不能只有“早安/午安/晚安”。如果写了问候词，后面必须马上接一个具体片段或具体意思。",
-                "不要默认去问“吃了吗”“忙吗”“睡了吗”“在干嘛”。没有具体由头时，宁可短一点，也不要写成整点打卡式问候。",
-                "整条消息更像正常私聊里顺手递过来的一句，不像礼貌签到，也不像群发模板。",
-            ]
-        )
-
-    def _format_proactive_media_truth_hint(self, action: str, action_context: str = "") -> str:
-        has_real_image = "真实图片文件：" in str(action_context or "") or "图片路径：" in str(action_context or "")
-        if has_real_image or "photo_text" in str(action or ""):
-            return ""
-        return "\n".join(
-            [
-                "【媒体真实性边界】",
-                "本轮不会发送图片、照片或附加媒体；即使日程/状态里出现“拍照”“照片”“给你看”,也只能当作生活背景。",
-                "最终正文禁止说“拍了张照片/给你拍了/发你看/你看看/看图/照片/图片/图里”。",
-                "可以改成“看到这个画面/这个颜色挺好看/想到你可能会喜欢这个颜色”。",
-            ]
-        )
-
     def _unexecuted_relay_claim_reason(self, text: str, *, action_context: str = "") -> str:
         cleaned = _single_line(text, 260)
         if not cleaned:
@@ -1360,75 +1112,6 @@ class ProactiveMessageMixin:
         if any(token in inbound for token in ("替我", "帮我", "你去", "跟他", "和他", "跟她", "和她", "说一声", "转告", "转达")):
             return "这个不能只嘴上答应啦。你把要带的话和对象说清楚，我再走转述。"
         return "这个我不能假装已经去说了。要转述的话，你把对象和要带的话说清楚。"
-
-    def _format_proactive_specificity_hint(
-        self,
-        user: dict[str, Any],
-        *,
-        reason: str,
-        action: str,
-        action_context: str = "",
-        motive: str = "",
-    ) -> str:
-        ignored = _safe_int(user.get("ignored_streak"), 0, 0)
-        topic = _single_line(user.get("planned_proactive_topic"), 60)
-        motive_text = _single_line(motive or user.get("planned_proactive_motive"), 120)
-        context = _single_line(action_context, 180)
-        has_specific_context = bool(
-            topic
-            or motive_text
-            or (
-                context
-                and not context.startswith("message")
-                and "只发送" not in context
-                and "普通私聊文本" not in context
-            )
-        )
-        lines = [
-            "【主动意图具体化】",
-            "主动消息宁少勿泛：只有一个具体由头就围绕它说半句，不要同时问候、关心、汇报状态、另开话题。",
-            "本轮只能生成一个候选主动内容；不要把两个不同由头、两个不同场景或两次想发的话拼在同一条里。",
-            "优先选择当前日程里的一个小物件/动作/余味，或者上一条闭环里尚未接住的一点；没有具体由头时就写得更短。",
-            "禁止把“想找你、刷存在感、来看看你、最近忙不忙、辛苦了”当作唯一内容。",
-        ]
-        if not has_specific_context and reason in {"check_in", "quiet_care", "state_share"} and action == "message":
-            lines.append("本轮没有强具体由头：最多一句，像轻轻放下，不要追问，不要扩成主动陪伴小作文。")
-        if ignored >= 1:
-            lines.append(f"对方已经连续 {ignored} 次没接主动消息：这次要更低压、更短，不要期待回复。")
-        return "\n".join(lines)
-
-    def _format_proactive_style_fatigue_hint(self, user: dict[str, Any]) -> str:
-        items = user.get("action_consequences")
-        if not isinstance(items, list):
-            return ""
-        recent_texts: list[str] = []
-        for item in items[-8:]:
-            if not isinstance(item, dict):
-                continue
-            text = _single_line(item.get("text"), 90)
-            if text:
-                recent_texts.append(text)
-        if len(recent_texts) < 2:
-            return ""
-        openings: dict[str, int] = {}
-        soft_tokens = ("唔", "嗯", "诶", "呀", "啦", "嘛", "哦", "呢")
-        soft_count = 0
-        for text in recent_texts:
-            opening = re.split(r"[，,。！？!?…\s]", text, maxsplit=1)[0][:8]
-            if opening:
-                openings[opening] = openings.get(opening, 0) + 1
-            soft_count += sum(text.count(token) for token in soft_tokens)
-        repeated = [key for key, count in openings.items() if count >= 2]
-        lines = [
-            "【语言风格疲劳】",
-            "最近主动消息的口癖和开头会疲劳。不要复用最近几次的开头、句式和同一组语气词。",
-            "这次换一种更具体的落点：可以少一点软词、少一点省略号，或者改成干净短句。",
-        ]
-        if repeated:
-            lines.append("最近重复开头：" + " / ".join(repeated[:4]) + "。本轮避开这些开头。")
-        if soft_count >= max(6, len(recent_texts) * 2):
-            lines.append("最近语气词偏多：本轮减少“唔/嗯/诶/呀/啦/嘛/哦/呢”和连续省略号。")
-        return "\n".join(lines)
 
     def _proactive_time_guard_hint(self, reason: str, current_item: dict[str, Any] | None) -> str:
         activity = _single_line((current_item or {}).get("activity"), 80)
@@ -1477,16 +1160,13 @@ class ProactiveMessageMixin:
 - 当前会话 TTS 规则：{tts_prompt or "（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）"}
 - 当前语音格式重点：{req['summary']}
 
-{self._format_worldview_adaptation_prompt()}
-
 要求：
 1. 只输出这句真正要被念出来的语音内容，不要解释。
 2. 如果当前人格或 TTS 规则要求使用 <tts>...</tts>、日语、情绪标签、双语格式，就严格遵守。
 3. 如果没有明确格式要求，就写成适合私聊语音的一小句，不像朗读稿。
 4. 可以有一点嘴硬、黏人、藏着的想念，但不要把喜欢说满。
 5. 不要提 AI、模型、插件、TTS、语音合成这些词。
-6. 不要凭空添加世界观、人格、关系网、近期对话或用户输入里没提到的人际关系；家人、同学、老师、朋友等只能在材料明确出现时使用。
-{"7. 这次必须优先满足语音格式要求；如果有日语或 <tts> 规则，不要退回普通中文句子。" if strict_tts else ""}
+{"6. 这次必须优先满足语音格式要求；如果有日语或 <tts> 规则，不要退回普通中文句子。" if strict_tts else ""}
 """.strip()
 
     async def _capture_framework_send_message_calls(
@@ -1965,9 +1645,6 @@ class ProactiveMessageMixin:
         cleaned = _single_line(text, 500)
         if not cleaned:
             return {"decision": "drop", "reason": "主动消息为空"}
-        source = str(user.get("planned_proactive_source") or "")
-        if source in {"timer", "troubleshooting"}:
-            return {"decision": "send", "reason": "特殊主动来源不做普通价值复核"}
         semantics: dict[str, Any] = {}
         semantic_getter = getattr(self, "_planned_proactive_semantics", None)
         if callable(semantic_getter):
@@ -2021,9 +1698,6 @@ class ProactiveMessageMixin:
         if mode not in {"local_only", "severe_only", "full"}:
             mode = "severe_only"
         if mode == "local_only":
-            return local
-        source = str(user.get("planned_proactive_source") or "")
-        if source in {"timer", "troubleshooting"}:
             return local
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
         review_context = _single_line(action_summary, 240)
@@ -2101,7 +1775,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 return local
             if len(reviewed_text) > max(len(text) + 60, 240):
                 return local
-            if re.search(r"(提示词|系统|JSON|模型|工具调用)", reviewed_text, re.IGNORECASE):
+            if re.search(r"(提示词|系统|JSON|模型|工具调用|主动消息|无文字|附加组件)", reviewed_text, re.IGNORECASE):
                 return local
         logger.info(
             "[PrivateCompanion] 主动消息发送前价值复核: decision=%s delay=%s elapsed=%dms reason=%s",
@@ -2628,101 +2302,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             cleaned = re.sub(r"(呀|啦|嘛|哦|呢)(?=.*\1)", "", cleaned)
         return cleaned or str(text or "").strip()
 
-    def _action_style_hint(self, action: str, reason: str) -> str:
-        terms = self._worldview_terms()
-        if "screen_peek" in action:
-            return f"像刚瞄到一眼{terms['screen']}后随口留的一小句。可以轻轻吐槽或提醒,别复述画面,别分析,别显得很正式。"
-        if "photo_text" in action:
-            return "像路上看到什么顺手丢给熟人看。别认真讲图,只写那一下想发过去的感觉,话不要说满。"
-        if "poke" in action:
-            return "像刚戳完人又装没事。可以有点小坏,但别报数,也别解释为什么戳。"
-        if "voice" in action:
-            return "像刚发完语音又补一句文字。短一点,带一点刚说完话的余温,别写成说明。"
-        if reason == "morning_greeting":
-            return "像早上顺手发来的一句。可以带一点刚醒的迟钝或清醒前的停顿，但正文重点要落在一个早晨小片段上，不要只喊早安，也不要把起床流程讲成汇报。"
-        if reason == "noon_greeting":
-            return "像中午松下来时顺手发来的一句。先从午间手边的小片段开口，比如刚坐下、刚吃完、准备午休、发懒那一下，再顺手碰到对方。别每次都问吃没吃。"
-        if reason == "evening_greeting":
-            return "像晚上慢下来以后发来的私聊。先落在眼前这一小段晚上片段上，比如收尾、回家、窝下来、灯光暗一点，不要写成群发问候，也别把想念说满。"
-        if reason == "group_share":
-            return f"像从共同{terms['group_chat']}里瞥见一小段对方可能会在意的内容,私下轻轻补一句。只说一个点,别像群聊日报,别逐条转述,也别固定用“群里刚刚”开头。"
-        if reason == "bili_video_share":
-            return f"像刚看到一个有意思的{terms['video']},忍不住私下递给对方。要短,别写成影评或推荐文案。"
-        if reason == "news_share":
-            return "像刚扫到一条新闻后私下随口提起。要有人格自己的反应,不要像新闻播报、标题党或时政评论。"
-        if reason == "web_exploration_share":
-            return "像刚按自己的兴趣上网查了点新东西,私下给熟人递一小句发现。要有自己的好奇或感受,不要像百科摘要。"
-        if reason == "jm_cosmos_share":
-            return f"像刚在{terms['bookshelf']}{terms['secret_drawer']}里翻了点漫画后自然冒出来的一句。害羞、坦然、嘴硬或转移话题都按人格来。"
-        if reason == "jm_cosmos_recommendation_request":
-            return "像忽然想找点新的私密阅读素材,于是私下问对方有没有推荐。可以撒娇、嘴硬、坦然或装作随口一问,尺度和反应按人格来。"
-        if reason == "creative_share":
-            return "像刚写自己的作品写到一个小片段,有点想给对方看一眼。可以害羞、卡文或吐槽,别像正式投稿。"
-        if reason in {"activity_share", "diary_share", "background_schedule"}:
-            return "像顺手分享日常小事。讲得具体一点,像‘我跟你说’后面的那半句,不要解释自己为什么发来。"
-        if reason in {"quiet_care", "state_share"}:
-            return "像忽然有点惦记。关心要具体,但可以侧着说,不要像健康提醒或客服回访。"
-        return "像私聊里随手冒出来的一句。短、自然,有一点在意就够,别把话说满。"
-
     def _format_action_prompt_context(self, action: str, action_context: str) -> str:
         context = str(action_context or "").strip()
-        terms = self._worldview_terms()
         if not context:
-            return f"只发一条普通{terms['private_chat']}文本,像顺手发给熟人的消息。"
-        if "群聊分享线索：" in context:
-            return (
-                f"你刚从共同{terms['group_chat']}里看到一小段对方可能会在意的内容,现在想私下轻轻提一句。\n"
-                f"{context}\n"
-                "最多一两句。优先讲“他错过的那个笑点/转折/气氛”,不要完整复盘整段群聊,不要逐条列人名,不要说自己在监控群聊,不要泄露隐私或评价群友关系。线索普通时语气要更轻,像顺手提到,不是正式转述。"
-            )
-        if "B站视频分享线索：" in context:
-            return (
-                f"你刚看到一个{terms['video']},现在想私下轻轻分享给对方。\n"
-                f"{context}\n"
-                "可以带上视频链接,但只用一句很自然的私聊口吻。不要说后台联动、插件、主动任务或日志,不要写成长推荐。"
-            )
-        if "JM阅读线索：" in context or "私密阅读线索：" in context:
-            return (
-                "你刚刚私下翻到一本漫画,现在可以按人格自然决定怎么和对方提。\n"
-                f"{context}\n"
-                "可以说读后余味、害羞吐槽、嘴硬否认或轻轻转移话题。不要说插件、后台联动、视觉模型或主动任务。"
-            )
-        if "夹层阅读推荐征求：" in context:
-            return (
-                f"你忽然想给{terms['bookshelf']}{terms['secret_drawer']}找点新的私密阅读素材,现在想私下问对方有没有推荐。\n"
-                f"{context}\n"
-                "开口方式、尺度和反应都按当前人格来。不要说插件、后台联动、视觉模型或主动任务。"
-            )
-        if "创作分享线索：" in context or "小说创作分享线索：" in context:
-            return (
-                "你最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直按自己的速度私下慢慢写。现在到了一个适合轻轻提起的小节点,想自然说一点。\n"
-                f"{context}\n"
-                "如果披露类型是 ask_impression,可以问对方读起来是什么感觉、哪个角色、句子或意象更戳他,把反馈当作灵感参考；不要让用户替你决定接下来怎么写,也不要问“你希望走哪个方向”。否则只分享一小段或一句。不要把整篇写完,不要像定期汇报,不要说模型生成、后台任务或创作系统。"
-            )
-        if "screen_peek" in action:
-            return (
-                "你刚刚瞄到对方屏幕上大概是这些："
-                f"{context}\n接下来像熟人私聊那样顺口说一句。别承认偷看,别复述屏幕,别写成分析。"
-            )
-        if "poke" in action:
-            return (
-                "你刚刚戳了对方一下。\n"
-                f"补充背景：{context}\n"
-                "接一句熟人间轻轻碰一下后的玩笑话就好,别解释机制,别报数,也别把没回复说成对方故意不理。"
-            )
-        if "voice" in action:
-            return (
-                "你刚刚发了一条语音。\n"
-                f"补充背景：{context}\n"
-                "再补一句像语音后面的短消息。别抄语音全文,也别提合成。"
-            )
-        if "photo_text" in action:
-            return (
-                "图片已经生成完成,稍后会作为单独的图片消息发送；你这里只需要写另一条配套的真人聊天文本。\n"
-                f"补充背景：{context}\n"
-                "不要说“图好了”“还在队列里”“等图出来”“已经发过去了”,不要写[图片],也不要解释生成流程。"
-            )
-        return context
+            return "普通文字"
+        return _single_line(self._sanitize_action_context_text(action, context), 420)
 
     def _sanitize_action_boundaries(
         self,
@@ -4165,14 +3749,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 【当前日程背景】
 {self._format_plan_item_for_prompt(current_item)}
 
-{self._format_worldview_adaptation_prompt()}
-
 【这次想分享的画面钩子】
 话题：{topic_hint or '（未指定）'}
 那一刻的小动机：{motive_hint or '（未指定）'}
 
 【内容选择菜单】
-{self._format_content_choice_options_for_prompt()}
+{self._format_content_choice_options_for_prompt("photo_text")}
 
 【生图风格】
 {style_name}
@@ -4189,7 +3771,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 
 要求：
 1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。
-2. 图片不要总是天气或窗外。先从“内容选择菜单”里选一个方向,再结合当前日程、话题和人格生成具体主体。
+2. 图片不要总是天气或窗外。先从“内容选择菜单”里单选一个视觉锚点；当前日程、话题和人格只用于筛选主体和调整画面气质,不要把多个主体拼在一张图里。
 3. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。
 4. `prompt` 里要明确体现上面的风格要求。
 5. 不要包含 NSFW、隐私信息、用户真实电脑画面。

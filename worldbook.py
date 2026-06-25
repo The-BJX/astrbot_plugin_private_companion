@@ -783,6 +783,34 @@ class WorldbookMixin:
             "recent": [dict(item) for item in recent[-6:] if isinstance(item, dict)],
         }
 
+    def _worldbook_self_registration_block_word_hit(self, *texts: Any) -> str:
+        raw_words = getattr(self, "worldbook_self_registration_block_words", [])
+        if not isinstance(raw_words, list) or not raw_words:
+            return ""
+        haystacks = []
+        for text in texts:
+            normalized = _single_line(text, 80)
+            if not normalized:
+                continue
+            haystacks.append(normalized.lower())
+            haystacks.append(re.sub(r"\s+", "", normalized).lower())
+        for raw_word in raw_words:
+            word = _single_line(raw_word, 40)
+            if not word:
+                continue
+            lowered = word.lower()
+            compact = re.sub(r"\s+", "", lowered)
+            for haystack in haystacks:
+                if lowered and lowered in haystack:
+                    return word
+                if compact and compact in haystack:
+                    return word
+        return ""
+
+    def _worldbook_self_registration_block_reply_text(self) -> str:
+        reply = _single_line(getattr(self, "worldbook_self_registration_block_reply", ""), 80)
+        return reply or "这个称呼我先不记。"
+
     def _extract_worldbook_self_intro(self, text: str) -> dict[str, Any] | None:
         cleaned = str(text or "")
         cleaned = re.sub(r"\[CQ:at,[^\]]+\]", " ", cleaned)
@@ -850,6 +878,21 @@ class WorldbookMixin:
                     for item in (pending_item.get("aliases") if isinstance(pending_item.get("aliases"), list) else [])
                     if _single_line(item, 40) and _single_line(item, 40) != sender_id
                 ]
+                block_word = self._worldbook_self_registration_block_word_hit(
+                    name,
+                    *aliases,
+                    pending_item.get("text"),
+                )
+                if block_word:
+                    pending.pop(sender_id, None)
+                    logger.info(
+                        "[PrivateCompanion] 群聊关系网自登记确认时拒绝: group=%s user=%s name=%s reason=命中自登记屏蔽词 %s",
+                        group_id or "-",
+                        sender_id,
+                        name,
+                        block_word,
+                    )
+                    return {"blocked_reply": self._worldbook_self_registration_block_reply_text()}
                 conflict = self._worldbook_self_registration_conflict(sender_id, [name, *aliases])
                 if conflict:
                     pending.pop(sender_id, None)
@@ -894,6 +937,16 @@ class WorldbookMixin:
             for item in (intro.get("aliases") if isinstance(intro.get("aliases"), list) else [])
             if _single_line(item, 40) and _single_line(item, 40) != sender_id
         ]
+        block_word = self._worldbook_self_registration_block_word_hit(name, *aliases, text)
+        if block_word:
+            logger.info(
+                "[PrivateCompanion] 群聊关系网自登记已拒绝: group=%s user=%s name=%s reason=命中自登记屏蔽词 %s",
+                group_id or "-",
+                sender_id,
+                name,
+                block_word,
+            )
+            return {"blocked_reply": self._worldbook_self_registration_block_reply_text()}
         conflict = self._worldbook_self_registration_conflict(sender_id, [name, *aliases])
         if conflict:
             logger.info(

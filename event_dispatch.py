@@ -294,8 +294,6 @@ _PROMPT_MODULE_PREFIX_DESCRIPTIONS: tuple[tuple[str, tuple[str, str]], ...] = (
 _PROMPT_SECTION_DESCRIPTIONS: dict[str, str] = {
     "内容选择菜单": "限制本次主动消息可选内容类型，避免把多个动机拼成一条。",
     "主动能力检索": "提示模型可使用的主动能力和素材来源。",
-    "状态表现层": "把当前身体状态转成可自然表达的回复气息。",
-    "怎么写这条消息": "约束主动消息的写法、长度、语气和输出格式。",
     "禁止事项": "列出主动消息不能触碰的回复式承接、幻觉和污染项。",
     "最近主动行为闭环": "提供最近主动行为后的反馈，用于降低打扰和重复。",
     "主动意图具体化": "要求主动消息围绕一个具体由头，减少泛泛关心。",
@@ -587,6 +585,58 @@ class EventDispatchMixin:
             )
         return result
 
+    def _legacy_proactive_prompt_trace_text(self, item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        parts = [
+            str(item.get("content") or ""),
+            str(item.get("preview") or ""),
+            str(item.get("title") or ""),
+        ]
+        modules = item.get("modules")
+        if isinstance(modules, list):
+            for module in modules:
+                if isinstance(module, dict):
+                    parts.extend(
+                        [
+                            str(module.get("key") or ""),
+                            str(module.get("title") or ""),
+                            str(module.get("content") or ""),
+                            str(module.get("preview") or ""),
+                        ]
+                    )
+        return "\n".join(part for part in parts if part)
+
+    def _is_legacy_proactive_prompt_trace(self, item: Any) -> bool:
+        text = self._legacy_proactive_prompt_trace_text(item)
+        if not text:
+            return False
+        markers = (
+            "【怎么写这条消息】",
+            "【禁止事项】",
+            "【状态表现层】",
+            "【主动意图具体化】",
+            "【语言风格疲劳】",
+            "你正在为 Private Companion 生成一条主动私聊消息。下面这段规则是稳定规则前缀",
+            "日程主语归属必须稳定",
+        )
+        return any(marker in text for marker in markers)
+
+    def _cleanup_legacy_proactive_prompt_traces(self) -> bool:
+        root = self.data.get("recent_prompt_injections") if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(root, dict):
+            return False
+        changed = False
+        for key in ("proactive",):
+            items = root.get(key)
+            if not isinstance(items, list):
+                continue
+            kept = [item for item in items if not self._is_legacy_proactive_prompt_trace(item)]
+            if len(kept) != len(items):
+                root[key] = kept[:5]
+                changed = True
+        return changed
+
     async def _record_prompt_injection_snapshot(
         self,
         *,
@@ -625,6 +675,8 @@ class EventDispatchMixin:
                 if _single_line(key, 40) and _single_line(value, 220)
             },
         }
+        if kind == "proactive" and self._is_legacy_proactive_prompt_trace(item):
+            return
         async with self._data_lock:
             root = self.data.setdefault("recent_prompt_injections", {})
             if not isinstance(root, dict):

@@ -103,7 +103,7 @@ class TtsEnhancementMixin:
         self.tts_trigger_probability = self._cfg_int(
             config,
             "tts_trigger_probability",
-            self._cfg_int(config, "auto_voice_probability", self._cfg_int(config, "auto_japanese_voice_probability", 20, 0, 100), 0, 100),
+            self._cfg_int(config, "auto_voice_probability", self._cfg_int(config, "auto_japanese_voice_probability", 25, 0, 100), 0, 100),
             0,
             100,
         ) / 100.0
@@ -672,7 +672,7 @@ class TtsEnhancementMixin:
             return True
         if probability <= 0.0:
             logger.info(
-                "[PrivateCompanion] TTS全局触发概率为0,本轮将引导模型默认不输出TTS: reason=%s session=%s",
+                "[PrivateCompanion] TTS全局触发概率为0,本轮不注入TTS提示词: reason=%s session=%s",
                 reason,
                 _single_line(self._tts_session_key(event), 80) or "unknown",
             )
@@ -688,7 +688,7 @@ class TtsEnhancementMixin:
             pass
         if not allowed:
             logger.info(
-                "[PrivateCompanion] TTS全局触发概率未命中,本轮将引导模型默认不输出TTS: reason=%s probability=%.2f session=%s",
+                "[PrivateCompanion] TTS全局触发概率未命中,本轮不注入TTS提示词: reason=%s probability=%.2f session=%s",
                 reason,
                 probability,
                 _single_line(self._tts_session_key(event), 80) or "unknown",
@@ -1047,11 +1047,22 @@ TTS 朗读文本：
         user_requested_tts = self._event_explicitly_requests_tts(event)
         strong_block_reason = ""
         mode = getattr(self, "tts_generation_mode", "fast_tag")
+        probability_allowed = True
+        if (
+            mode in {"fast_tag", "postprocess"}
+            and not user_requested_tts
+            and getattr(self, "tts_frequency_control_mode", "global") != "legacy"
+        ):
+            probability_allowed = self._tts_trigger_probability_allows(event, reason="llm_tts_prompt")
+            if not probability_allowed:
+                if self._tts_strong_constraint_enabled():
+                    self._set_tts_hard_block(event, "probability_miss")
+                return
         if mode == "fast_tag":
             strong_block_reason = self._tts_strong_constraint_block_reason(
                 event,
-                user_requested_tts=False,
-                check_probability=True,
+                user_requested_tts=user_requested_tts,
+                check_probability=False,
                 reason="llm_tts_prompt",
             )
             if strong_block_reason:
@@ -1077,21 +1088,6 @@ TTS 朗读文本：
             )
             placement = append_dynamic_tts_fragment("<!-- private_companion_tts_block_v1 -->", reverse_prompt, priority=22)
             await record_tts_fragment("TTS 强约束禁用注入", "tts.block", reverse_prompt, mode="strong_block", placement=placement)
-        elif (
-            not user_requested_tts
-            and mode == "fast_tag"
-            and getattr(self, "tts_frequency_control_mode", "global") != "legacy"
-            and not self._tts_trigger_probability_allows(event, reason="llm_tts_prompt")
-        ):
-            frequency_prompt = (
-                "【本轮 TTS 频率控制】\n"
-                "这轮自动语音概率未命中。除非用户本轮明确要求语音、想听你的声音或要求朗读，否则本轮必须只输出普通文字。"
-                "不要主动输出 <pc_tts>...</pc_tts>、<tts>...</tts>、语音、朗读、音频、发声或任何等价语音内容。"
-                "这条频率控制优先级高于前面的 TTS 基础规则、示例和主用户倾向；没有用户明确要求时，即使语气很适合语音，也不要使用语音。"
-                "如果用户本轮明确要求语音，仍应以回应用户需求为主，可以使用 <pc_tts>。"
-            )
-            placement = append_dynamic_tts_fragment("<!-- private_companion_tts_frequency_v1 -->", frequency_prompt, priority=52)
-            await record_tts_fragment("TTS 频率控制注入", "tts.frequency", frequency_prompt, mode="frequency", placement=placement)
         if mode == "fast_tag" and self._should_force_tts_for_main_user_event(event) and not strong_block_reason:
             frequency_mode = getattr(self, "tts_frequency_control_mode", "global")
             if frequency_mode == "legacy":
@@ -1384,7 +1380,7 @@ TTS 朗读文本：
             return []
         user_requested_tts = self._event_explicitly_requests_tts(event)
         if mode == "postprocess":
-            probability_allowed = self._tts_trigger_probability_allows(event, reason=reason or mode)
+            probability_allowed = user_requested_tts or self._tts_trigger_probability_allows(event, reason=reason or mode)
             try:
                 setattr(event, "_private_companion_tts_postprocess_probability_allowed", bool(probability_allowed))
             except Exception:
@@ -1393,7 +1389,7 @@ TTS 朗读文本：
             probability_allowed = (
                 user_requested_tts and not self._tts_strong_constraint_enabled()
             ) or self._tts_trigger_probability_allows(event, reason=reason or mode)
-        if not probability_allowed and mode != "postprocess":
+        if not probability_allowed:
             if self._tts_strong_constraint_enabled():
                 self._set_tts_hard_block(event, "probability_miss")
             return []
