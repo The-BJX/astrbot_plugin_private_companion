@@ -1729,9 +1729,10 @@ class ProactiveMessageMixin:
         reason: str,
         action: str,
     ) -> dict[str, Any]:
+        strength = self._proactive_review_strength()
         cleaned = _single_line(text, 500)
         if not cleaned:
-            return {"decision": "drop", "reason": "主动消息为空"}
+            return {"decision": "drop", "reason": "主动消息为空", "hard": True}
         semantics: dict[str, Any] = {}
         semantic_getter = getattr(self, "_planned_proactive_semantics", None)
         if callable(semantic_getter):
@@ -1743,26 +1744,78 @@ class ProactiveMessageMixin:
         semantic_score = _safe_float(semantics.get("score"), 0.5)
         semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
         semantic_risk = _safe_float(semantics.get("risk"), 0.0)
-        if semantic_risk >= 0.45:
-            return {"decision": "drop", "reason": "候选语义风险偏高"}
-        if semantic_score < 0.34 and semantic_pressure >= 0.55:
+        default_hard_risk = 0.70 if strength == "lenient" else 0.45
+        hard_risk_threshold = max(
+            0.0,
+            min(1.0, _safe_float(getattr(self, "proactive_review_hard_risk_threshold", default_hard_risk), default_hard_risk)),
+        )
+        low_score_threshold = max(
+            0.0,
+            min(1.0, _safe_float(getattr(self, "proactive_review_low_score_threshold", 0.34), 0.34)),
+        )
+        pressure_threshold = max(
+            0.0,
+            min(1.0, _safe_float(getattr(self, "proactive_review_pressure_threshold", 0.55), 0.55)),
+        )
+        if semantic_risk >= hard_risk_threshold:
+            return {
+                "decision": "drop",
+                "reason": f"候选语义风险偏高 risk={semantic_risk:.2f}/{hard_risk_threshold:.2f}",
+                "hard": True,
+            }
+        if strength != "lenient" and semantic_score < low_score_threshold and semantic_pressure >= pressure_threshold:
             return {"decision": "defer", "reason": "候选由头偏虚且打扰压力高", "delay_minutes": 75}
         reply_like_openers = (
             "好呀", "好啊", "可以呀", "行啊", "那就", "你说呢", "要不", "刚看到", "才看到",
             "你来了", "你叫我", "你问", "我帮你查", "我去问", "我去说",
         )
         if any(cleaned.startswith(token) for token in reply_like_openers):
+            if strength != "strict":
+                rewritten = re.sub(
+                    r"^(?:好呀|好啊|可以呀|行啊|那就|你说呢|要不|刚看到|才看到|你来了|你叫我|你问|我帮你查|我去问|我去说)[，,。！!？?\s]*",
+                    "",
+                    cleaned,
+                    count=1,
+                ).strip()
+                if rewritten and len(rewritten) >= 4:
+                    return {"decision": "rewrite", "reason": "去掉回复式开头", "text": rewritten}
             return {"decision": "drop", "reason": "像是在回复刚发来的消息"}
         vague = ("想你了", "来看看你", "你在忙什么", "最近怎么样", "吃了吗", "辛苦了", "在吗", "忙不忙")
-        if reason in {"check_in", "quiet_care", "state_share"} and any(token in cleaned for token in vague):
+        if strength != "lenient" and reason in {"check_in", "quiet_care", "state_share"} and any(token in cleaned for token in vague):
             return {"decision": "defer", "reason": "普通主动过于泛泛", "delay_minutes": 60}
-        if semantic_kind in {"self_share", "external_share", "observation"} and any(token in cleaned for token in vague):
+        if strength != "lenient" and semantic_kind in {"self_share", "external_share", "observation"} and any(token in cleaned for token in vague):
             return {"decision": "defer", "reason": "生成结果偏离分享型由头", "delay_minutes": 60}
+        role = self._private_user_role(user) if isinstance(user, dict) else "friend"
+        if role == "owner":
+            social_checker = getattr(self, "_daily_plan_clause_has_named_message_interaction", None)
+            has_cross_private_interaction = False
+            if callable(social_checker):
+                try:
+                    has_cross_private_interaction = bool(social_checker(cleaned))
+                except Exception:
+                    has_cross_private_interaction = False
+            if has_cross_private_interaction or any(token in cleaned for token in ("朋友那边", "朋友用户", "朋友私聊")):
+                return {"decision": "drop", "reason": "疑似混入其他私聊互动", "hard": True}
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 1 and cleaned.count("？") + cleaned.count("?") >= 2:
             return {"decision": "rewrite", "reason": "未回应状态下问题太多", "text": re.split(r"[？?]", cleaned, maxsplit=1)[0].rstrip("，,。") + "。"}
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 2 and len(cleaned) > 36:
             return {"decision": "rewrite", "reason": "连续未回应时主动偏长", "text": cleaned[:36].rstrip("，,。") + "。"}
         return {"decision": "send", "reason": "本地检查通过"}
+
+    def _proactive_review_strength(self) -> str:
+        strength = str(getattr(self, "proactive_review_strength", "lenient") or "lenient").strip().lower()
+        return strength if strength in {"lenient", "balanced", "strict"} else "lenient"
+
+    @staticmethod
+    def _proactive_review_hard_block_reason(reason: str) -> bool:
+        text = str(reason or "")
+        if not text:
+            return False
+        markers = (
+            "隐私", "泄露", "越界", "风险", "危险", "敏感", "违规", "骚扰", "威胁",
+            "其他私聊", "朋友私聊", "混入", "承诺工具", "承诺发图", "承诺语音", "承诺查询",
+        )
+        return any(marker in text for marker in markers)
 
     async def _review_proactive_message_send_decision(
         self,
@@ -1776,8 +1829,9 @@ class ProactiveMessageMixin:
         action_summary: str = "",
         image_path: str = "",
     ) -> dict[str, Any]:
+        strength = self._proactive_review_strength()
         local = self._local_proactive_send_decision(user, text, reason=reason, action=action)
-        if local.get("decision") in {"drop", "defer"}:
+        if local.get("decision") in {"drop", "defer"} and (strength != "lenient" or bool(local.get("hard"))):
             return local
         if not bool(getattr(self, "enable_response_self_review", True)):
             return local
@@ -1847,6 +1901,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         reviewed_text = str(payload.get("text") or "").strip()
         delay_minutes = _safe_int(payload.get("delay_minutes"), 45, 30, 90)
         note = _single_line(payload.get("reason"), 120)
+        original_decision = decision
         if decision == "rewrite":
             if not reviewed_text:
                 return local
@@ -1864,9 +1919,30 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 return local
             if re.search(r"(提示词|系统|JSON|模型|工具调用|主动消息|无文字|附加组件)", reviewed_text, re.IGNORECASE):
                 return local
+        if decision in {"defer", "drop"} and strength != "strict":
+            hard_block = self._proactive_review_hard_block_reason(note)
+            if decision == "drop" and strength == "balanced" and not hard_block:
+                decision = "defer"
+                delay_minutes = max(45, delay_minutes)
+                note = _single_line(f"{note or '复核偏保守'}；已按标准强度降级为延后", 120)
+            elif strength == "lenient" and not hard_block:
+                if reviewed_text:
+                    decision = "rewrite"
+                else:
+                    decision = "send"
+                note = _single_line(f"{note or '复核偏保守'}；已按宽松强度放行", 120)
+            elif decision == "drop" and not hard_block:
+                decision = "defer"
+                note = _single_line(f"{note or '复核偏保守'}；已降级为延后", 120)
+        if decision == "send" and str(local.get("decision") or "") == "rewrite" and str(local.get("text") or "").strip():
+            reviewed_text = str(local.get("text") or "").strip()
+            decision = "rewrite"
+            note = _single_line(note or local.get("reason") or "本地轻改写后放行", 120)
         logger.info(
-            "[PrivateCompanion] 主动消息发送前价值复核: decision=%s delay=%s elapsed=%dms reason=%s",
+            "[PrivateCompanion] 主动消息发送前价值复核: decision=%s raw=%s strength=%s delay=%s elapsed=%dms reason=%s",
             decision,
+            original_decision,
+            strength,
             delay_minutes if decision == "defer" else "-",
             int((time.perf_counter() - started) * 1000),
             note or "无",
@@ -4342,6 +4418,25 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         processed_chain = list(processed or []) if processed is not None else chain
         return self._filter_decorated_proactive_chain(chain, processed_chain)
 
+    def _proactive_plain_segment_component(
+        self,
+        text: str,
+        *,
+        full_text: str = "",
+        index: int = 0,
+        count: int = 1,
+    ) -> Plain:
+        comp = Plain(text)
+        clean_full = _single_line(full_text, 1200)
+        if clean_full:
+            try:
+                setattr(comp, "_private_companion_proactive_full_text", clean_full)
+                setattr(comp, "_private_companion_proactive_segment_index", max(0, int(index)))
+                setattr(comp, "_private_companion_proactive_segment_count", max(1, int(count)))
+            except Exception:
+                pass
+        return comp
+
     def _filter_decorated_proactive_chain(self, original_chain: list[Any], processed_chain: list[Any]) -> list[Any]:
         if not processed_chain:
             return original_chain
@@ -4803,7 +4898,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 if recalled_message_id:
                     logger.info("[PrivateCompanion] 触发消息已撤回，取消主动文本发送: umo=%s message_id=%s", umo, recalled_message_id)
                     return
-                await self._send_chain_components(umo, self._with_optional_reply([Plain(outbound_text)], quote_message_id))
+                await self._send_chain_components(
+                    umo,
+                    self._with_optional_reply(
+                        [self._proactive_plain_segment_component(outbound_text, full_text=text, index=0, count=1)],
+                        quote_message_id,
+                    ),
+                )
                 quote_message_id = ""
         else:
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
@@ -4820,7 +4921,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                     if recalled_message_id:
                         logger.info("[PrivateCompanion] 触发消息已撤回，停止主动分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
                         return
-                    chain = self._with_optional_reply([Plain(segment)], quote_message_id) if index == 0 else [Plain(segment)]
+                    segment_comp = self._proactive_plain_segment_component(segment, full_text=text, index=index, count=len(segments))
+                    chain = self._with_optional_reply([segment_comp], quote_message_id) if index == 0 else [segment_comp]
                     await self._send_chain_components(umo, chain)
                     quote_message_id = ""
                     if index < len(segments) - 1:
@@ -4892,7 +4994,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             await self._send_chain_components(
                 umo,
                 self._with_optional_reply(
-                    self._build_outbound_chain(outbound_text, image_path, extra_components=extra_components),
+                    [
+                        self._proactive_plain_segment_component(outbound_text, full_text=text, index=0, count=1)
+                    ],
                     quote_message_id,
                 ),
             )
@@ -4910,7 +5014,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，停止主动消息分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
                 return
-            chain = self._with_optional_reply([Plain(segment)], quote_message_id) if index == 0 else [Plain(segment)]
+            segment_comp = self._proactive_plain_segment_component(segment, full_text=text, index=index, count=len(segments))
+            chain = self._with_optional_reply([segment_comp], quote_message_id) if index == 0 else [segment_comp]
             await self._send_chain_components(umo, chain)
             quote_message_id = ""
             if index < len(segments) - 1:

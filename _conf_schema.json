@@ -1094,6 +1094,30 @@
     "default": "severe_only",
     "invisible": true
   },
+  "proactive_review_strength": {
+    "description": "Legacy flat config: 主动发送前复核强度",
+    "type": "string",
+    "default": "lenient",
+    "invisible": true
+  },
+  "proactive_review_hard_risk_threshold": {
+    "description": "Legacy flat config: 主动复核硬拦截风险阈值",
+    "type": "float",
+    "default": 0.7,
+    "invisible": true
+  },
+  "proactive_review_low_score_threshold": {
+    "description": "Legacy flat config: 主动复核低价值分数阈值",
+    "type": "float",
+    "default": 0.34,
+    "invisible": true
+  },
+  "proactive_review_pressure_threshold": {
+    "description": "Legacy flat config: 主动复核打扰压力阈值",
+    "type": "float",
+    "default": 0.55,
+    "invisible": true
+  },
   "response_review_max_chars": {
     "description": "Legacy flat config: 被动 full 模式长度阈值",
     "type": "int",
@@ -1380,6 +1404,30 @@
     "description": "Legacy flat config: 主动说说带图概率",
     "type": "float",
     "default": 0.25,
+    "invisible": true
+  },
+  "enable_qzone_comment_inbox": {
+    "description": "Legacy flat config: QQ 空间评论收件箱",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "qzone_comment_inbox_interval_minutes": {
+    "description": "Legacy flat config: 评论收件箱检查间隔（分钟）",
+    "type": "int",
+    "default": 60,
+    "invisible": true
+  },
+  "qzone_comment_inbox_recent_posts": {
+    "description": "Legacy flat config: 评论收件箱扫描最近说说数",
+    "type": "int",
+    "default": 5,
+    "invisible": true
+  },
+  "qzone_comment_inbox_max_replies_per_tick": {
+    "description": "Legacy flat config: 评论收件箱每轮最多回复数",
+    "type": "int",
+    "default": 1,
     "invisible": true
   },
   "enable_private_reading_integration": {
@@ -2163,6 +2211,18 @@
     "description": "Legacy flat config: 模型醒来阈值",
     "type": "int",
     "default": 65,
+    "invisible": true
+  },
+  "rest_reply_active_windows": {
+    "description": "Legacy flat config: 休息闸门生效时段",
+    "type": "string",
+    "default": "23:00-08:30,12:20-13:40",
+    "invisible": true
+  },
+  "rest_reply_awake_grace_minutes": {
+    "description": "Legacy flat config: 被叫醒后的免重判分钟数",
+    "type": "int",
+    "default": 30,
     "invisible": true
   },
   "enable_rest_backlog_reply": {
@@ -4176,6 +4236,62 @@
           "enable_response_self_review": true
         }
       },
+      "proactive_review_strength": {
+        "description": "主动复核强度",
+        "type": "string",
+        "hint": "lenient 默认宽松，只硬拦截隐私泄露、串台和高风险候选，模型的普通延后/取消会尽量降级为发送或改写；balanced 会保留延后但减少直接取消；strict 会按复核模型原判拦截。",
+        "default": "lenient",
+        "options": [
+          "lenient",
+          "balanced",
+          "strict"
+        ],
+        "condition": {
+          "enable_response_self_review": true
+        }
+      },
+      "proactive_review_hard_risk_threshold": {
+        "description": "硬拦截风险阈值",
+        "type": "float",
+        "hint": "本地语义风险达到该值时，即使宽松模式也会直接取消主动候选。值越高越少拦截；默认 0.70。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "default": 0.7,
+        "condition": {
+          "enable_response_self_review": true
+        }
+      },
+      "proactive_review_low_score_threshold": {
+        "description": "低价值分数阈值",
+        "type": "float",
+        "hint": "标准/严格强度下，主动候选自然度/价值分低于该值且打扰压力较高时会延后。值越低越少延后；默认 0.34。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "default": 0.34,
+        "condition": {
+          "enable_response_self_review": true
+        }
+      },
+      "proactive_review_pressure_threshold": {
+        "description": "打扰压力阈值",
+        "type": "float",
+        "hint": "标准/严格强度下，打扰压力达到该值且候选分数偏低时会延后。值越高越少延后；默认 0.55。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "default": 0.55,
+        "condition": {
+          "enable_response_self_review": true
+        }
+      },
       "response_review_max_chars": {
         "description": "被动 full 模式长度阈值",
         "type": "int",
@@ -4745,6 +4861,57 @@
         "default": 0.25,
         "condition": {
           "enable_qzone_generated_image_publish": true
+        }
+      },
+      "enable_qzone_comment_inbox": {
+        "description": "空间评论收件箱",
+        "type": "bool",
+        "hint": "默认关闭。开启后会低频拉取自己最近说说详情，记录已见评论，并由模型判断是否需要用追加评论方式公开回复新评论。首次开启只记录现有评论，不回复旧积压。",
+        "default": false,
+        "condition": {
+          "enable_qzone_integration": true
+        }
+      },
+      "qzone_comment_inbox_interval_minutes": {
+        "description": "评论检查间隔（分钟）",
+        "type": "int",
+        "hint": "两次自动检查自己说说评论之间的最小间隔。",
+        "slider": {
+          "min": 5,
+          "max": 1440,
+          "step": 5
+        },
+        "default": 60,
+        "condition": {
+          "enable_qzone_comment_inbox": true
+        }
+      },
+      "qzone_comment_inbox_recent_posts": {
+        "description": "扫描最近说说数",
+        "type": "int",
+        "hint": "每次检查向前拉取多少条自己的最近说说详情来解析评论。",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
+        "default": 5,
+        "condition": {
+          "enable_qzone_comment_inbox": true
+        }
+      },
+      "qzone_comment_inbox_max_replies_per_tick": {
+        "description": "每轮最多回复数",
+        "type": "int",
+        "hint": "每次后台检查最多公开回复多少条新评论。建议保持 1，避免评论区刷屏。",
+        "slider": {
+          "min": 1,
+          "max": 5,
+          "step": 1
+        },
+        "default": 1,
+        "condition": {
+          "enable_qzone_comment_inbox": true
         }
       }
     },
@@ -6187,7 +6354,7 @@
       "enable_health_state": {
         "description": "启用健康/不适状态",
         "type": "bool",
-        "hint": "开启后，且人格适合生物身体设定时，当前扮演状态才可能出现生病、头疼、身体不舒服或恢复尾声等健康余波；关闭后自动生成和手动增添都会跳过这类状态。",
+        "hint": "开启后，健康/不适状态视为可用，当前扮演状态可能出现生病、头疼、身体不舒服或恢复尾声等健康余波；关闭后自动生成和手动增添都会跳过这类状态。",
         "default": true,
         "condition": {
           "enable_humanized_states": true
@@ -6196,7 +6363,7 @@
       "enable_hunger_state": {
         "description": "启用饥饿/胃口状态",
         "type": "bool",
-        "hint": "开启后，且人格适合进食设定时，当前扮演状态才可能出现饿、胃口不好、想吃东西或想吃甜的等余波；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
+        "hint": "开启后，饥饿/胃口状态视为可用，当前扮演状态可能出现饿、胃口不好、想吃东西或想吃甜的等余波；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
         "default": true,
         "condition": {
           "enable_humanized_states": true
@@ -6328,6 +6495,29 @@
           "step": 1
         },
         "default": 65,
+        "condition": {
+          "enable_rest_reply_simulation": true
+        }
+      },
+      "rest_reply_active_windows": {
+        "description": "休息闸门生效时段",
+        "type": "string",
+        "hint": "只有当前时间落入这些时段时，日程里的睡眠/午休/休息才会触发休息回复闸门。多个时段用逗号分隔，支持跨午夜，例如 23:00-08:30,12:20-13:40。留空则恢复旧行为：全天按日程休息词触发。",
+        "default": "23:00-08:30,12:20-13:40",
+        "condition": {
+          "enable_rest_reply_simulation": true
+        }
+      },
+      "rest_reply_awake_grace_minutes": {
+        "description": "醒后免重判分钟数",
+        "type": "int",
+        "hint": "Bot 在休息中被明确叫醒、模型放行或概率命中并回复后，这段时间内不再对紧接着的每条消息重复判定“是否被吵醒”。设为 0 表示不保留醒后缓冲。",
+        "slider": {
+          "min": 0,
+          "max": 240,
+          "step": 5
+        },
+        "default": 30,
         "condition": {
           "enable_rest_reply_simulation": true
         }

@@ -1200,7 +1200,7 @@ QQ空间 = 公开札记
             <div class="migration-head">
               <div>
                 <h2>配置迁移</h2>
-                <p>导出可迁移配置与关系、群聊、候选菜单等资料；缓存、Token、最近消息和运行日志不会写入备份。</p>
+                  <p>导出或导入可迁移配置与关系、群聊、候选菜单等资料；也兼容旧版快照文件。缓存、Token、最近消息和运行日志不会写入备份。</p>
               </div>
               <div class="migration-actions">
                 <button id="exportConfigBtn" type="button">导出配置备份</button>
@@ -1237,9 +1237,9 @@ QQ空间 = 公开札记
               <button id="previewConfigImportBtn" type="button" disabled>预览导入</button>
               <button id="applyConfigImportBtn" type="button" disabled>确认导入</button>
             </div>
-            <div id="configMigrationPreview" class="migration-preview">
-              还没有选择备份文件。
-            </div>
+              <div id="configMigrationPreview" class="migration-preview">
+                还没有选择备份或快照文件。
+              </div>
             <div class="migration-aftercare">
               <div>
                 <h3>最近自动备份</h3>

@@ -57,6 +57,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         "qzone_life_publish_probability",
         "qzone_generated_image_probability",
         "qzone_emotional_vent_probability",
+        "proactive_review_hard_risk_threshold",
+        "proactive_review_low_score_threshold",
+        "proactive_review_pressure_threshold",
         "private_reading_share_probability",
         "private_reading_ask_probability",
         "creative_inspiration_probability",
@@ -78,6 +81,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/groups", self.list_groups, ["GET"], "Private Companion Page groups"),
             ("/group", self.get_group, ["GET"], "Private Companion Page group detail"),
             ("/group/update", self.update_group, ["POST"], "Private Companion Page update group"),
+            ("/group/delete", self.delete_group, ["POST"], "Private Companion Page delete group"),
             ("/group/slang/update", self.update_group_slang, ["POST"], "Private Companion Page update group slang"),
             ("/settings/update", self.update_settings, ["POST"], "Private Companion Page update settings"),
             ("/config/export", self.export_migration_config, ["GET"], "Private Companion Page export migration config"),
@@ -565,6 +569,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             if conflict not in {"use_backup", "keep_current", "fill_empty"}:
                 conflict = "use_backup"
             normalized = self._normalize_migration_package(package)
+            if normalized.get("legacy_snapshot") and mode == "replace":
+                mode = "merge"
             return await self._apply_migration_normalized(normalized, mode=mode, conflict=conflict)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 应用配置导入失败: {exc}", exc_info=True)
@@ -4520,6 +4526,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_intent_emotion_analysis",
             "enable_response_self_review",
             "enable_llm_timer_scheduling",
+            "enable_llm_proactive_message",
+            "enable_llm_proactive_persona_judge",
             "enable_passive_topic_suppression",
             "enable_relationship_state_machine",
             "enable_emotion_simulation",
@@ -4599,6 +4607,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_qzone_integration",
             "enable_qzone_life_publish",
             "enable_qzone_generated_image_publish",
+            "enable_qzone_comment_inbox",
             "enable_qzone_emotional_vent_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
@@ -4640,6 +4649,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             qzone_available
             and getattr(self.plugin, "enable_qzone_generated_image_publish", False)
         )
+        values["enable_qzone_comment_inbox"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_comment_inbox", False))
         values["enable_qzone_emotional_vent_publish"] = bool(
             qzone_available
             and getattr(self.plugin, "enable_emotion_simulation", False)
@@ -4973,11 +4983,65 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         if not isinstance(package, dict):
             raise ValueError("没有读取到可导入的配置备份")
         if package.get("kind") != "private_companion_config_backup" or package.get("plugin") != PLUGIN_NAME:
-            raise ValueError("这不是 Private Companion 的配置备份")
+            legacy = self._legacy_snapshot_to_migration_package(package)
+            if legacy is None:
+                raise ValueError("这不是 Private Companion 的配置备份")
+            return legacy
         checksum = str(package.get("checksum") or "").strip()
         if checksum and checksum != self._migration_checksum(package):
             raise ValueError("备份校验失败：文件可能被截断或手动修改过")
         return package
+
+    def _legacy_snapshot_to_migration_package(self, package: dict[str, Any]) -> dict[str, Any] | None:
+        overview = package.get("overview") if isinstance(package.get("overview"), dict) else {}
+        has_snapshot_shape = bool(overview) and ("users" in package or "groups" in package)
+        if not has_snapshot_shape:
+            return None
+
+        settings: dict[str, Any] = {}
+        raw_settings = overview.get("settings") if isinstance(overview.get("settings"), dict) else {}
+        for key, value in raw_settings.items():
+            if key in self._allowed_setting_keys():
+                settings[key] = deepcopy(value)
+        group_overview = overview.get("group") if isinstance(overview.get("group"), dict) else {}
+        if group_overview:
+            settings["group_access_mode"] = str(group_overview.get("access_mode") or "whitelist")
+            settings["group_whitelist_ids"] = self._normalize_id_list(group_overview.get("whitelist"))
+            settings["group_blacklist_ids"] = self._normalize_id_list(group_overview.get("blacklist"))
+
+        features: dict[str, bool] = {}
+        raw_features = overview.get("features") if isinstance(overview.get("features"), dict) else {}
+        for key, value in raw_features.items():
+            if key in self._allowed_feature_keys():
+                features[key] = self._normalize_bool_value(value)
+
+        providers: dict[str, str] = {}
+        raw_providers = overview.get("providers") if isinstance(overview.get("providers"), dict) else {}
+        for key, value in raw_providers.items():
+            if key in self._allowed_provider_keys():
+                providers[key] = self._single_line(value, 160)
+
+        converted = {
+            "kind": "private_companion_config_backup",
+            "plugin": PLUGIN_NAME,
+            "schema": 1,
+            "version": str(package.get("version") or overview.get("plugin", {}).get("version") or self._plugin_version()),
+            "exported_at": int(time.time()),
+            "included_sections": ["basic", "relations"],
+            "settings": settings,
+            "features": features,
+            "providers": providers,
+            "data": {},
+            "legacy_snapshot": True,
+            "excluded": [
+                "由旧版页面快照转换；仅导入快照中可识别的配置、名单、开关和模型指向",
+                "旧版页面快照中的私聊/群聊列表是展示摘要，不会写回数据文件",
+                "最近消息、缓存、Token、运行日志和临时队列不会导入",
+            ],
+        }
+        converted["checksum"] = self._migration_checksum(converted)
+        converted["checksum_algorithm"] = "sha256"
+        return converted
 
     def _normalize_migration_package(self, package: dict[str, Any]) -> dict[str, Any]:
         settings: dict[str, Any] = {}
@@ -5033,6 +5097,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "included_sections": [str(item) for item in package.get("included_sections", []) if str(item).strip()],
             "checksum": str(package.get("checksum") or ""),
             "checksum_ok": bool(package.get("checksum")) and str(package.get("checksum") or "") == self._migration_checksum(package),
+            "legacy_snapshot": bool(package.get("legacy_snapshot")),
             "settings": settings,
             "features": features,
             "providers": providers,
@@ -5067,6 +5132,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "included_sections": normalized.get("included_sections", []),
             "checksum": normalized.get("checksum") or "",
             "checksum_ok": bool(normalized.get("checksum_ok")),
+            "legacy_snapshot": bool(normalized.get("legacy_snapshot")),
             "config_count": config_count,
             "config_diff": config_diff,
             "settings_count": len(normalized.get("settings", {})),
@@ -5477,6 +5543,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "default_nickname",
             "default_style",
             "enable_llm_timer_scheduling",
+            "proactive_prompt_template",
+            "proactive_persona_judge_send_threshold",
+            "proactive_persona_judge_cache_minutes",
             "schedule_persona_prompt",
             "schedule_worldview_prompt",
             "roleplay_user_profile_prompt",
@@ -5487,6 +5556,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "passive_injection_position",
             "framework_session_lock_mode",
             "response_review_mode",
+            "proactive_review_strength",
+            "proactive_review_hard_risk_threshold",
+            "proactive_review_low_score_threshold",
+            "proactive_review_pressure_threshold",
             "response_review_max_chars",
             "passive_topic_memory_hours",
             "tts_generation_mode",
@@ -5526,6 +5599,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "rest_reply_mode",
             "rest_reply_probability",
             "rest_reply_llm_threshold",
+            "rest_reply_active_windows",
+            "rest_reply_awake_grace_minutes",
             "enable_rest_backlog_reply",
             "rest_backlog_max_messages",
             "REST_WAKEUP_PROVIDER_ID",
@@ -5536,6 +5611,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "proactive_unanswered_max_interval_multiplier",
             "friend_unanswered_max_cooldown_hours",
             "max_daily_messages",
+            "proactive_photo_text_probability",
             "inbound_message_debounce_seconds",
             "enable_message_debounce",
             "enable_smart_message_debounce",
@@ -5718,6 +5794,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "qzone_life_publish_probability",
             "enable_qzone_generated_image_publish",
             "qzone_generated_image_probability",
+            "enable_qzone_comment_inbox",
+            "qzone_comment_inbox_interval_minutes",
+            "qzone_comment_inbox_recent_posts",
+            "qzone_comment_inbox_max_replies_per_tick",
             "enable_qzone_emotional_vent_publish",
             "qzone_emotional_vent_threshold",
             "qzone_emotional_vent_cooldown_hours",
@@ -6461,6 +6541,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_intent_emotion_analysis",
             "enable_response_self_review",
             "enable_llm_timer_scheduling",
+            "enable_llm_proactive_message",
+            "enable_llm_proactive_persona_judge",
             "enable_passive_topic_suppression",
             "enable_relationship_state_machine",
             "enable_emotion_simulation",
@@ -6478,6 +6560,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_quote_private_proactive",
             "enable_photo_text_action",
             "inject_passive_states",
+            "enable_passive_state_delta_injection",
             "enable_cycle_state",
             "enable_skill_growth_simulation",
             "enable_skill_growth_passive_injection",
@@ -6540,6 +6623,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_qzone_integration",
             "enable_qzone_life_publish",
             "enable_qzone_generated_image_publish",
+            "enable_qzone_comment_inbox",
             "enable_qzone_emotional_vent_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
@@ -6566,6 +6650,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "NARRATION_PROVIDER_ID",
             "HISTORY_SUMMARY_PROVIDER_ID",
             "RESPONSE_REVIEW_PROVIDER_ID",
+            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
             "TROUBLESHOOTING_PROVIDER_ID",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
             "REST_WAKEUP_PROVIDER_ID",
@@ -6607,6 +6692,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "default_nickname",
             "default_style",
             "response_review_mode",
+            "proactive_review_strength",
+            "proactive_review_hard_risk_threshold",
+            "proactive_review_low_score_threshold",
+            "proactive_review_pressure_threshold",
             "response_review_max_chars",
             "enable_llm_emotion_judgement",
             "emotion_judgement_mode",
@@ -6618,6 +6707,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "worldview_adaptation_prompt",
             "quiet_hours",
             "framework_session_lock_mode",
+            "proactive_prompt_template",
+            "proactive_persona_judge_send_threshold",
+            "proactive_persona_judge_cache_minutes",
+            "proactive_photo_text_probability",
             "passive_topic_memory_hours",
             "tts_generation_mode",
             "tts_voice_language",
@@ -6655,6 +6748,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "rest_reply_mode",
             "rest_reply_probability",
             "rest_reply_llm_threshold",
+            "rest_reply_active_windows",
+            "rest_reply_awake_grace_minutes",
             "enable_rest_backlog_reply",
             "rest_backlog_max_messages",
             "REST_WAKEUP_PROVIDER_ID",
@@ -6840,6 +6935,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "qzone_life_publish_probability",
             "enable_qzone_generated_image_publish",
             "qzone_generated_image_probability",
+            "enable_qzone_comment_inbox",
+            "qzone_comment_inbox_interval_minutes",
+            "qzone_comment_inbox_recent_posts",
+            "qzone_comment_inbox_max_replies_per_tick",
             "enable_qzone_emotional_vent_publish",
             "qzone_emotional_vent_threshold",
             "qzone_emotional_vent_cooldown_hours",
@@ -6904,6 +7003,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return normalizer(value)
             text = str(value or "auto").strip().lower()
             return text if text in {"auto", "always", "off"} else "auto"
+        if key == "rest_reply_active_windows":
+            return re.sub(r"\s+", "", str(value or ""))[:160]
         if key == "quote_target_strategy":
             text = str(value or "current").strip().lower()
             aliases = {
@@ -7186,6 +7287,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0, min(100, int(value)))
             except (TypeError, ValueError):
                 return 65
+        if key == "rest_reply_awake_grace_minutes":
+            try:
+                return max(0, min(240, int(value)))
+            except (TypeError, ValueError):
+                return 30
         if key == "proactive_persona_judge_send_threshold":
             try:
                 return max(0, min(100, int(value)))
@@ -7412,6 +7518,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_qzone_integration",
             "enable_qzone_life_publish",
             "enable_qzone_generated_image_publish",
+            "enable_qzone_comment_inbox",
             "enable_qzone_emotional_vent_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
@@ -8326,6 +8433,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         return {
             "enabled": bool(available and getattr(self.plugin, "enable_qzone_integration", False)),
             "life_publish_enabled": bool(available and getattr(self.plugin, "enable_qzone_life_publish", False)),
+            "comment_inbox_enabled": bool(available and getattr(self.plugin, "enable_qzone_comment_inbox", False)),
             "emotional_vent_enabled": bool(
                 available
                 and getattr(self.plugin, "enable_emotion_simulation", False)
@@ -8338,6 +8446,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "last_emotional_vent_at": self.plugin._format_timestamp_elapsed(state.get("last_emotional_vent_at", 0)),
             "last_emotional_vent_status": state.get("last_emotional_vent_status", ""),
             "last_emotional_vent_text": state.get("last_emotional_vent_text", ""),
+            "last_comment_inbox_checked_at": self.plugin._format_timestamp_elapsed(state.get("last_comment_inbox_checked_at", 0)),
+            "last_comment_inbox_status": state.get("last_comment_inbox_status", ""),
+            "last_comment_inbox_reply_text": state.get("last_comment_inbox_reply_text", ""),
             "auth_block_until": self.plugin._format_timestamp_elapsed(state.get("auth_block_until", 0)),
             "auth_failure_reason": state.get("last_auth_failure_reason", ""),
             "auth_failure_count": self._int(state.get("auth_failure_count")),

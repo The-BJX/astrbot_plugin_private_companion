@@ -2202,9 +2202,9 @@ class DailyStateMixin:
         hunger_like = any(token in label for token in ("饿", "胃口", "嘴馋", "馋", "想吃", "吃点", "吃些"))
         health_like = any(token in label for token in ("病", "难受", "不舒服", "发烧", "头疼", "头痛", "咳", "感冒"))
         if hunger_like and not profile.get("allow_hunger", True):
-            return False, "当前人格或配置不适用饥饿状态。"
+            return False, "当前配置未开启饥饿/胃口状态。"
         if health_like and not profile.get("allow_health", True):
-            return False, "当前人格或配置不适用生病/健康异常状态。"
+            return False, "当前配置未开启健康/不适状态。"
         duration_hours = _safe_int(hours_part.strip() if sep else 12, 12, 1, 72)
         mood = self._infer_manual_state_mood(label)
         energy_delta = self._infer_manual_state_energy_delta(label)
@@ -4197,7 +4197,12 @@ class DailyStateMixin:
     async def _ensure_yesterday_conversation_summary(self, force: bool = False) -> dict[str, Any]:
         today = _today_key()
         cached = self.data.get("yesterday_conversation_summary", {})
-        if isinstance(cached, dict) and cached.get("date") == today and not force:
+        if (
+            isinstance(cached, dict)
+            and cached.get("date") == today
+            and cached.get("scope") == "owner_private_only"
+            and not force
+        ):
             return cached
         raw_text = await self._collect_yesterday_conversation_text()
         if not raw_text:
@@ -4208,6 +4213,7 @@ class DailyStateMixin:
                 "residues": [],
                 "schedule_reference": "无明确可继承影响。",
                 "dream_reference": "无明确可继承碎片。",
+                "scope": "owner_private_only",
                 "raw_excerpt_chars": 0,
             }
         else:
@@ -4228,6 +4234,8 @@ class DailyStateMixin:
         blocks: list[str] = []
         for user_id, raw_user in users.items():
             if not isinstance(raw_user, dict):
+                continue
+            if self._private_user_role(raw_user, str(user_id)) != "owner":
                 continue
             umo = str(raw_user.get("umo") or "").strip()
             if not umo:
@@ -4263,7 +4271,7 @@ class DailyStateMixin:
                 continue
             name = _single_line(raw_user.get("nickname") or user_id, 30)
             source_note = "昨日对话" if dated_lines else "最近对话（history 无时间戳,作为昨日摘要候选）"
-            blocks.append(f"【{name}｜{source_note}】\n" + "\n".join(selected))
+            blocks.append(f"【主人:{name}｜{source_note}】\n" + "\n".join(selected))
         return "\n\n".join(blocks).strip()[-18000:]
 
     def _load_conversation_history_items(self, conversation: Conversation | None) -> list[dict[str, Any]]:
@@ -4377,6 +4385,7 @@ class DailyStateMixin:
                 "residues": [],
                 "schedule_reference": "可把昨日互动作为轻微关系和情绪背景,不要强行改写今日主线。",
                 "dream_reference": "可从昨日对话里的物件、语气和半句话提取梦境碎片。",
+                "scope": "owner_private_only",
                 "raw_excerpt_chars": len(raw_text),
             }
         residues = payload.get("residues", [])
@@ -4401,6 +4410,7 @@ class DailyStateMixin:
             "residues": normalized_residues,
             "schedule_reference": _single_line(payload.get("schedule_reference"), 220) or "作为轻微背景承接,不要强行改写今日主线。",
             "dream_reference": _single_line(payload.get("dream_reference"), 220) or "从昨日对话的物件、感官和半句话中轻取梦境碎片。",
+            "scope": "owner_private_only",
             "raw_excerpt_chars": len(raw_text),
         }
 
@@ -4646,15 +4656,6 @@ class DailyStateMixin:
             "无实体", "没有实体", "没有身体", "无身体", "纯意识", "虚拟人格", "虚拟形象",
             "全息投影", "投影形态", "灵体", "幽灵", "意识体"
         )
-        health_block_markers = (
-            "不会生病", "不生病", "不会感冒", "免疫疾病", "免疫生病", "没有病痛",
-            "无病痛", "不受疾病影响", "不适用生病", "没有健康状态"
-        )
-        hunger_block_markers = (
-            "不需要吃饭", "不用吃饭", "不吃饭", "无需吃饭", "不需要进食", "不用进食",
-            "无需进食", "不进食", "没有饥饿感", "不会饿", "不需要食物", "不吃东西",
-            "不适用饥饿"
-        )
         cycle_block_markers = (
             "男性", "男生", "男孩子", "少年", "男孩", "男人", "男性人类",
             "无生理期", "没有生理期", "不会有生理期", "不来生理期",
@@ -4672,16 +4673,8 @@ class DailyStateMixin:
         soft_non_human_hits = sum(1 for marker in soft_non_human_markers if marker in text)
         is_non_human = (has_strong_non_human or soft_non_human_hits >= 2) and not has_human_markers
         no_biological_body = is_non_human or has_bodyless_markers
-        allow_health = (
-            bool(getattr(self, "enable_health_state", True))
-            and not no_biological_body
-            and not has_any(health_block_markers)
-        )
-        allow_hunger = (
-            bool(getattr(self, "enable_hunger_state", True))
-            and not no_biological_body
-            and not has_any(hunger_block_markers)
-        )
+        allow_health = bool(getattr(self, "enable_health_state", True))
+        allow_hunger = bool(getattr(self, "enable_hunger_state", True))
         allow_cycle = (
             self.enable_cycle_state
             and not no_biological_body
@@ -4706,9 +4699,9 @@ class DailyStateMixin:
             "location": "",
         }
         if not profile.get("allow_health", True):
-            values["health"] = "该人格不适用生病状态"
+            values["health"] = "健康/不适状态未开启"
         if not profile.get("allow_hunger", True):
-            values["hunger"] = "该人格不适用饥饿状态"
+            values["hunger"] = "饥饿/胃口状态未开启"
         if not profile.get("allow_cycle", False):
             values["body_cycle"] = "该人格不适用周期状态"
         return values
@@ -4757,6 +4750,8 @@ class DailyStateMixin:
         lines = []
         for item in raw:
             if not isinstance(item, dict):
+                continue
+            if _single_line(item.get("source_role"), 20) != "owner":
                 continue
             expires_at = _safe_float(item.get("expires_at"), 0)
             if expires_at > 0 and expires_at <= now:
@@ -4859,6 +4854,21 @@ class DailyStateMixin:
             )
         return runtime
 
+    def _sleep_awake_grace_seconds(self) -> int:
+        grace_minutes = _safe_int(getattr(self, "rest_reply_awake_grace_minutes", 30), 30, 0)
+        return max(0, min(240, grace_minutes)) * 60
+
+    def _sleep_rest_window_active(self) -> bool:
+        if not bool(getattr(self, "enable_rest_reply_simulation", False)):
+            return True
+        checker = getattr(self, "_rest_reply_window_active", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return True
+        return True
+
     def _set_sleep_phase(self, phase: str, *, event: str, source: str = "schedule", now: float | None = None) -> dict[str, Any]:
         now = now or _now_ts()
         runtime = self._sleep_runtime_state()
@@ -4874,13 +4884,17 @@ class DailyStateMixin:
     def _refresh_sleep_runtime_state(self, current_item: dict[str, Any] | None = None, *, now: float | None = None) -> dict[str, Any]:
         now = now or _now_ts()
         runtime = self._sleep_runtime_state()
+        item = current_item if isinstance(current_item, dict) else self._get_current_plan_item(self.data.get("daily_plan", {}))
+        rest_window_active = self._sleep_rest_window_active()
+        sleepy = rest_window_active and self._is_sleepy_plan_item(item) if isinstance(item, dict) else False
         if runtime.get("phase") == "woken":
             last_woken = _safe_float(runtime.get("last_woken_at"), _safe_float(runtime.get("updated_at"), now))
-            if now - last_woken >= 30 * 60:
+            grace_seconds = self._sleep_awake_grace_seconds()
+            if grace_seconds <= 0 or now - last_woken >= grace_seconds:
+                if not sleepy:
+                    return self._set_sleep_phase("natural_wake", event="醒后缓冲结束，当前已不在有效休息段", source="time", now=now)
                 return self._set_sleep_phase("sleeping_again", event="用户没有继续打扰，睡意重新接上", source="quiet", now=now)
             return runtime
-        item = current_item if isinstance(current_item, dict) else self._get_current_plan_item(self.data.get("daily_plan", {}))
-        sleepy = self._is_sleepy_plan_item(item) if isinstance(item, dict) else False
         if sleepy:
             text = " ".join(_single_line(item.get(key), 80) for key in ("activity", "mood", "message_seed"))
             if any(token in text for token in ("准备睡", "睡前", "入睡", "洗漱", "收声")):
@@ -4952,11 +4966,50 @@ class DailyStateMixin:
                 _single_line(current_item.get(key), 80)
                 for key in ("activity", "mood", "message_seed")
             )
-        is_actual_rest_segment = any(
+        is_actual_rest_segment = self._sleep_rest_window_active() and any(
             token in current_activity_text
             for token in ("睡", "午休", "休息", "躺", "被窝", "枕头", "入睡", "准备睡", "睡前", "小睡", "补觉", "眯一会")
         )
         if is_actual_rest_segment and not re.search(r"别吵|别发|别找|安静|闭嘴|先别|不要来|忙|我有事|没空", normalized):
+            runtime_before = self._sleep_runtime_state()
+            last_woken = _safe_float(runtime_before.get("last_woken_at"), _safe_float(runtime_before.get("updated_at"), 0))
+            last_user_text = _single_line(runtime_before.get("last_user_text"), 80)
+            current_user_text = _single_line(normalized, 80)
+            consumed_at = _safe_float(runtime_before.get("last_wakeup_context_consumed_at"), 0)
+            same_wakeup_message = bool(
+                runtime_before.get("phase") == "woken"
+                and last_user_text
+                and last_user_text == current_user_text
+                and consumed_at < last_woken
+                and _now_ts() - last_woken < 120
+            )
+            if same_wakeup_message:
+                runtime_before["last_wakeup_context_consumed_at"] = _now_ts()
+                return payload(
+                    source="睡眠中被用户唤醒",
+                    note="当前日程处于休息/睡眠段,这条消息已经在休息闸门放行时登记为唤醒；不要重复计数,语气只保留刚醒的慢一点和轻一点。",
+                    immediate_reaction="她刚被这条消息轻轻叫醒,会慢一点看清内容再回应。",
+                    state_updates=["清醒程度：刚被唤醒/迷糊", "语气：轻、短、带睡意", "后续安排：用户不继续打扰就继续睡"],
+                    intensity="强",
+                    scope="当前休息段和后续短时间",
+                    carry_rule="回复可以带一点刚醒的气息,但不得降低理解、事实和回答质量；不要再表现成又被叫醒一次。",
+                )
+            within_awake_grace = (
+                runtime_before.get("phase") == "woken"
+                and self._sleep_awake_grace_seconds() > 0
+                and _now_ts() - last_woken < self._sleep_awake_grace_seconds()
+            )
+            if within_awake_grace:
+                runtime_before["last_user_text"] = _single_line(normalized, 80)
+                return payload(
+                    source="睡眠中醒后续聊",
+                    note="当前日程仍是休息/睡眠段,但 Bot 已在醒后缓冲期内；这是被叫醒后的连续对话,不再按再次唤醒处理。",
+                    immediate_reaction="她还没完全精神起来,但已经在接着聊天,不会每句话都像重新被吵醒。",
+                    state_updates=["清醒程度：醒后续聊/慢慢清醒", "语气：仍轻一点,但不重复表演被叫醒", "后续安排：停聊后再自然睡回去"],
+                    intensity="中",
+                    scope="醒后缓冲期",
+                    carry_rule="后续回复保持连续聊天感,不要写成每条消息都重新惊醒；用户继续聊时可以逐渐清醒一点。",
+                )
             sleep_runtime = self._mark_sleep_woken_by_user(normalized)
             prior_wakes = 0
             segment = self._current_detail_segment_for_update()
@@ -5095,7 +5148,9 @@ class DailyStateMixin:
             )
         return None
 
-    def _record_schedule_adjustment_from_interaction(self, text: str) -> bool:
+    def _record_schedule_adjustment_from_interaction(self, text: str, user: dict[str, Any] | None = None) -> bool:
+        if self._private_user_role(user) != "owner":
+            return False
         adjustment = self._detect_schedule_adjustment_from_interaction(text)
         if not adjustment:
             return False
@@ -5119,6 +5174,8 @@ class DailyStateMixin:
             "intensity": intensity,
             "scope": _single_line(adjustment.get("scope"), 40),
             "carry_rule": _single_line(adjustment.get("carry_rule"), 160),
+            "source_role": "owner",
+            "source_user_id": _single_line((user or {}).get("user_id"), 80),
             "created_at": now,
             "expires_at": now + ttl_hours * 3600,
         }
@@ -5205,6 +5262,8 @@ class DailyStateMixin:
                 "scope": _single_line(item.get("scope"), 40),
                 "reaction": _single_line(item.get("immediate_reaction"), 140),
                 "state_updates": item.get("state_updates", []),
+                "source_role": _single_line(item.get("source_role"), 20),
+                "source_user_id": _single_line(item.get("source_user_id"), 80),
             }
         )
         del updates[:-6]
@@ -5567,6 +5626,8 @@ class DailyStateMixin:
                 "无饥饿感",
                 "无明显周期影响",
                 "不处于生理期",
+                "健康/不适状态未开启",
+                "饥饿/胃口状态未开启",
                 "该人格不适用生病状态",
                 "该人格不适用饥饿状态",
                 "该人格不适用周期状态",
@@ -6295,6 +6356,8 @@ class DailyStateMixin:
                 update_lines = []
                 for update in interaction_updates[-3:]:
                     if not isinstance(update, dict):
+                        continue
+                    if _single_line(update.get("source_role"), 20) != "owner":
                         continue
                     user_text = _single_line(update.get("user_text"), 60)
                     reaction = _single_line(update.get("reaction"), 90)
@@ -7815,9 +7878,11 @@ class DailyStateMixin:
 
         interaction_updates = snapshot.get("interaction_updates", [])
         if isinstance(interaction_updates, list) and interaction_updates:
-            lines.append("用户介入后的局部更新：")
+            update_lines: list[str] = []
             for update in interaction_updates[-4:]:
                 if not isinstance(update, dict):
+                    continue
+                if _single_line(update.get("source_role"), 20) != "owner":
                     continue
                 at = _single_line(update.get("at"), 8)
                 user_text = _single_line(update.get("user_text"), 80)
@@ -7835,7 +7900,10 @@ class DailyStateMixin:
                         reaction,
                         state_text,
                     ]
-                    lines.append(prefix + "｜".join(part for part in parts if part))
+                    update_lines.append(prefix + "｜".join(part for part in parts if part))
+            if update_lines:
+                lines.append("用户介入后的局部更新：")
+                lines.extend(update_lines)
 
         today_events = snapshot.get("today_events", [])
         scoped_today_events = self._filter_snapshot_items_to_segment(today_events, segment)
@@ -7984,7 +8052,14 @@ class DailyStateMixin:
 
         interaction_updates = snapshot.get("interaction_updates", [])
         if isinstance(interaction_updates, list) and interaction_updates:
-            latest = next((item for item in reversed(interaction_updates) if isinstance(item, dict)), None)
+            latest = next(
+                (
+                    item
+                    for item in reversed(interaction_updates)
+                    if isinstance(item, dict) and _single_line(item.get("source_role"), 20) == "owner"
+                ),
+                None,
+            )
             if isinstance(latest, dict):
                 user_text = _single_line(latest.get("user_text"), 60)
                 reaction = _single_line(latest.get("reaction"), 100)
@@ -8234,6 +8309,7 @@ class DailyStateMixin:
             ("新闻无聊阅读", self._maybe_trigger_news_boredom_read),
             ("夹层无聊阅读", self._maybe_trigger_jm_cosmos_boredom_read),
             ("QQ空间生活说说", self._maybe_publish_qzone_life_post),
+            ("QQ空间评论收件箱", self._maybe_process_qzone_comment_inbox),
             ("夹层推荐请求", self._maybe_schedule_private_reading_recommendation_request),
         ):
             try:
@@ -8713,12 +8789,23 @@ class DailyStateMixin:
                             }
                             self._save_data_sync()
                         if failure_count >= 3:
-                            logger.warning(
-                                "[PrivateCompanion] 主动消息发送前价值复核连续失败,放弃本条候选避免反复调用: count=%s error=%s",
-                                failure_count,
-                                _single_line(exc, 120),
-                            )
-                            review_decision = {"decision": "drop", "reason": "发送前价值复核连续失败，已放弃本条候选"}
+                            review_strength_getter = getattr(self, "_proactive_review_strength", None)
+                            review_strength = review_strength_getter() if callable(review_strength_getter) else str(getattr(self, "proactive_review_strength", "lenient") or "lenient")
+                            if review_strength == "strict":
+                                logger.warning(
+                                    "[PrivateCompanion] 主动消息发送前价值复核连续失败,严格模式放弃本条候选避免反复调用: count=%s error=%s",
+                                    failure_count,
+                                    _single_line(exc, 120),
+                                )
+                                review_decision = {"decision": "drop", "reason": "发送前价值复核连续失败，已放弃本条候选"}
+                            else:
+                                logger.warning(
+                                    "[PrivateCompanion] 主动消息发送前价值复核连续失败,按%s强度放行原候选避免主动归零: count=%s error=%s",
+                                    review_strength or "lenient",
+                                    failure_count,
+                                    _single_line(exc, 120),
+                                )
+                                review_decision = {"decision": "send", "reason": "发送前价值复核连续失败，已按当前强度放行"}
                         else:
                             delay_minutes = min(240, 45 * (2 ** max(0, failure_count - 1)))
                             logger.warning(

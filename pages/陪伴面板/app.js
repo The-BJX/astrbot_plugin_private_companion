@@ -208,6 +208,7 @@ const pluginIntegrationAvailabilityRules = {
   enable_qzone_integration: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_life_publish: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_generated_image_publish: () => Boolean(state.overview?.qzone?.available),
+  enable_qzone_comment_inbox: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
 };
 
@@ -491,8 +492,8 @@ const featureMeta = {
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么；被动只在相关时理解，主动可到点关心。"],
   enable_food_menu_recommendation: ["吃什么候选", "管理常吃菜、菜馆和外卖；用户纠结吃什么时，只取少量贴合项作为回复参考。"],
   enable_humanized_states: ["拟人身体状态", "生成精力、睡眠、梦境、健康、饥饿和周期等扮演状态，影响日程、主动消息和被动语气。"],
-  enable_health_state: ["健康/不适状态", "在人格适合生物身体设定时，允许当前扮演状态出现生病、不舒服或恢复尾声。"],
-  enable_hunger_state: ["饥饿/胃口状态", "在人格适合进食设定时，允许当前扮演状态出现饿、胃口不好或想吃东西。"],
+  enable_health_state: ["健康/不适状态", "开启后视为可用，允许当前扮演状态出现生病、不舒服或恢复尾声。"],
+  enable_hunger_state: ["饥饿/胃口状态", "开启后视为可用，允许当前扮演状态出现饿、胃口不好或想吃东西。"],
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
@@ -552,6 +553,7 @@ const featureMeta = {
   enable_qzone_integration: ["QQ 空间动态", "整合查看、点赞、评论和发布说说入口。"],
   enable_qzone_life_publish: ["生活说说", "根据状态、日程和日记余味低频发布公开生活动态。"],
   enable_qzone_generated_image_publish: ["说说配图", "发布生活说说时可按概率调用主动生图能力生成配图。"],
+  enable_qzone_comment_inbox: ["评论收件箱", "低频查看自己说说下的新评论，并按需公开追加回复。"],
   enable_photo_text_action: ["主动拍照/生图", "允许 Bot 在合适的主动动机下生成真实图片；本地 ComfyUI 可在电脑忙时自动延后。"],
   enable_private_reading_integration: ["夹层阅读素材", "检测到可用素材能力时，允许作为低频私下阅读来源。"],
   enable_private_reading_boredom_read: ["私下阅读", "空档、无聊或夜里低频自己搜索并阅读，形成内部印象。"],
@@ -672,6 +674,7 @@ const featureGroups = [
       "enable_web_exploration_boredom_search",
       "enable_qzone_integration",
       "enable_qzone_life_publish",
+      "enable_qzone_comment_inbox",
       "enable_photo_text_action",
       "enable_private_reading_integration",
       "enable_private_reading_boredom_read",
@@ -723,6 +726,7 @@ const embeddedFeatureParentByKey = {
   enable_web_exploration_boredom_search: "enable_web_exploration",
   enable_qzone_life_publish: "enable_qzone_integration",
   enable_qzone_generated_image_publish: "enable_qzone_integration",
+  enable_qzone_comment_inbox: "enable_qzone_integration",
   enable_qzone_emotional_vent_publish: "enable_emotion_simulation",
   enable_private_reading_boredom_read: "enable_private_reading_integration",
   enable_private_reading_ask_recommendation: "enable_private_reading_integration",
@@ -871,6 +875,10 @@ const configLabels = {
   qzone_emotional_vent_probability: "心情动态触发概率",
   enable_food_menu_recommendation: "吃什么候选",
   response_review_mode: "回复/主动复核模式",
+  proactive_review_strength: "主动复核强度",
+  proactive_review_hard_risk_threshold: "硬拦截风险阈值",
+  proactive_review_low_score_threshold: "低价值分数阈值",
+  proactive_review_pressure_threshold: "打扰压力阈值",
   response_review_max_chars: "被动 full 模式长度阈值",
   tts_frequency_control_mode: "TTS频率控制模式",
   tts_constraint_mode: "TTS约束强度",
@@ -985,6 +993,8 @@ const configLabels = {
   rest_reply_mode: "休息回复判定模式",
   rest_reply_probability: "休息中概率回复(%)",
   rest_reply_llm_threshold: "模型醒来阈值",
+  rest_reply_active_windows: "休息闸门生效时段",
+  rest_reply_awake_grace_minutes: "醒后免重判分钟数",
   enable_rest_backlog_reply: "醒后补看私聊",
   rest_backlog_max_messages: "醒后最多补看条数",
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断模型",
@@ -1111,6 +1121,10 @@ const configLabels = {
   qzone_life_publish_probability: "说说触发概率",
   enable_qzone_generated_image_publish: "说说配图",
   qzone_generated_image_probability: "说说配图概率",
+  enable_qzone_comment_inbox: "空间评论收件箱",
+  qzone_comment_inbox_interval_minutes: "评论检查间隔",
+  qzone_comment_inbox_recent_posts: "扫描最近说说数",
+  qzone_comment_inbox_max_replies_per_tick: "每轮最多回复",
   enable_photo_text_action: "主动拍照/生图",
   photo_action_max_daily: "每日主动生图上限",
   proactive_photo_text_probability: "主动带图触发概率",
@@ -1165,8 +1179,8 @@ const configDescriptions = {
   roleplay_user_profile_prompt: "描述角色如何称呼用户、用户身份、彼此关系和相处方式；不会作为图片自我识别的外观线索。",
   humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
   enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
-  enable_health_state: "开启后，且人格适合生物身体设定时，拟人状态才可能出现生病、不舒服、头疼或恢复尾声；关闭后自动生成和手动增添都会跳过这类状态。",
-  enable_hunger_state: "开启后，且人格适合进食设定时，拟人状态才可能出现饿、胃口不好、想吃东西或想吃甜的；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
+  enable_health_state: "开启后健康/不适状态视为可用，拟人状态可能出现生病、不舒服、头疼或恢复尾声；关闭后自动生成和手动增添都会跳过这类状态。",
+  enable_hunger_state: "开启后饥饿/胃口状态视为可用，拟人状态可能出现饿、胃口不好、想吃东西或想吃甜的；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",
   passive_injection_position: "选择被动状态、环境感知、TTS 本轮频控、转发/引用上下文等动态片段的注入位置。当前请求末尾会进入统一动态块并按稳定顺序排列，更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
@@ -1175,6 +1189,8 @@ const configDescriptions = {
   rest_reply_mode: "仅概率醒来只按概率放行；模型判断会让模型按消息重要性、是否明确叫醒、情绪/安全需要等打分。",
   rest_reply_probability: "仅概率醒来模式使用。越低越不容易在睡眠/休息中被普通消息叫醒。",
   rest_reply_llm_threshold: "模型判断模式使用。模型输出 0-100 分，达到该阈值才醒来回复；建议 60-75。",
+  rest_reply_active_windows: "只有当前时间落入这些时段时，日程里的睡眠/午休/休息才触发休息闸门。多个时段用逗号分隔，如 23:00-08:30,12:20-13:40；留空则按旧行为全天跟随日程休息词。",
+  rest_reply_awake_grace_minutes: "休息中被明确叫醒、模型放行或概率命中并回复后，这段时间内不再对紧接着的消息重复判定是否被吵醒。",
   enable_rest_backlog_reply: "休息闸门静默拦截的目标私聊会暂存成简短摘要；下一次醒来或被叫醒回复时，Bot 会像刚补看消息一样自然接上。只记录私聊，不记录群聊。",
   rest_backlog_max_messages: "休息期间最多保留多少条未回复私聊。超过后只留最近几条，避免醒来后被旧消息淹没。",
   REST_WAKEUP_PROVIDER_ID: "可选。用于休息醒来判断的轻量模型；留空时优先使用回复审校模型，再回退主模型。",
@@ -1379,6 +1395,10 @@ const configDescriptions = {
   qzone_life_publish_probability: "满足条件时发布生活说说的概率，按百分比填写。",
   enable_qzone_generated_image_publish: "开启后，生活说说或情绪说说发布前可按概率调用主动生图能力生成一张配图。需要同时启用 QQ 空间动态和可用的主动生图后端。",
   qzone_generated_image_probability: "满足发说说条件后尝试生成配图的概率，按百分比填写。",
+  enable_qzone_comment_inbox: "默认关闭。开启后低频拉取自己最近说说详情，解析评论列表，首次只记录已见评论；后续新评论由模型判断是否需要公开追加回复。",
+  qzone_comment_inbox_interval_minutes: "两次评论收件箱自动检查之间的最小间隔。",
+  qzone_comment_inbox_recent_posts: "每次向前扫描多少条自己的最近说说详情。",
+  qzone_comment_inbox_max_replies_per_tick: "每次后台检查最多公开回复多少条新评论，建议保持 1，避免刷屏。",
   photo_action_max_daily: "每个私聊对象每天最多生成几张主动图片。真实生成成功就消耗额度，避免失败重试时反复生图。",
   proactive_photo_text_probability: "在主动生图可用、额度未用完，且本轮主动有生活画面或视觉切口时，把普通文字主动升级成带图的概率，按百分比填写。",
   photo_generation_backend: "auto 优先本地 ComfyUI；电脑高负荷且在线图片 API 可用时会绕开本地。comfyui 只用本地，external 只用在线。",
@@ -1426,6 +1446,10 @@ const configDescriptions = {
   atrelay_default_relay_style: "默认转述方式：persona 按人格改写，soft 委婉，original 原话。",
   atrelay_multi_target_limit: "一次转述最多允许几个目标，防止刷屏。",
   response_review_mode: "控制回复/主动复核范围。主动消息发送前统一复核；full 会额外让较长被动回复参与模型改写，延迟更高。",
+  proactive_review_strength: "控制主动消息发送前复核的拦截力度。默认宽松，避免模型过度保守导致主动消息归零。",
+  proactive_review_hard_risk_threshold: "本地语义风险达到该值时会硬拦截主动候选。值越高越少拦截，按百分比填写。",
+  proactive_review_low_score_threshold: "标准/严格强度下，候选价值分低于该值且压力较高时会延后。值越低越少延后，按百分比填写。",
+  proactive_review_pressure_threshold: "标准/严格强度下，打扰压力达到该值且候选分偏低时会延后。值越高越少延后，按百分比填写。",
   response_review_max_chars: "仅 full 模式使用。普通被动回复超过该长度才可能进入模型改写，避免短回复也被额外拖慢。",
   emotional_gate_hurt_threshold: "用户消息让 Bot 伤心、短期变安静的触发阈值；应低于生气触发阈值。",
   emotional_gate_refuse_threshold: "累计刺痛感让 Bot 生气、短暂回避的触发阈值；应高于伤心触发阈值。",
@@ -1466,7 +1490,7 @@ const featureSettingGroups = {
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["max_learned_expression_items"],
   enable_intent_emotion_analysis: [],
-  enable_response_self_review: ["response_review_mode", "response_review_max_chars"],
+  enable_response_self_review: ["response_review_mode", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "response_review_max_chars"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
   enable_emotion_simulation: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
@@ -1475,8 +1499,8 @@ const featureSettingGroups = {
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: [],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
-  enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
-  enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
+  enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
+  enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
   enable_health_state: ["humanized_state_intensity"],
@@ -1579,9 +1603,10 @@ const featureSettingGroups = {
   enable_external_event_self_link: ["external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_share_probability", "web_exploration_share_probability"],
   enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
   enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
-  enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability"],
+  enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability", "enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability"],
+  enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
   enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
@@ -1621,7 +1646,7 @@ const featureSettingSections = {
     {
       title: "回复策略",
       note: "意图画像、回复/主动复核和重复话题抑制。",
-      keys: ["enable_intent_emotion_analysis", "enable_response_self_review", "response_review_mode", "response_review_max_chars", "enable_passive_topic_suppression", "passive_topic_memory_hours"],
+      keys: ["enable_intent_emotion_analysis", "enable_response_self_review", "response_review_mode", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "response_review_max_chars", "enable_passive_topic_suppression", "passive_topic_memory_hours"],
     },
     {
       title: "关系与习惯",
@@ -1778,6 +1803,11 @@ const featureSettingSections = {
       note: "根据状态、日程和日记余味低频发布公开生活动态。",
       keys: ["enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability"],
     },
+    {
+      title: "评论收件箱",
+      note: "低频查看自己说说下的新评论，按需公开追加一句回复。",
+      keys: ["enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
+    },
   ],
   enable_emotion_simulation: [
     {
@@ -1931,9 +1961,11 @@ const featureSettingTypes = {
   tts_frequency_control_mode: { type: "select", options: [["global", "全局频控：间隔+概率控制双路径"], ["legacy", "旧版行为：按各路径原逻辑触发"]] },
   tts_constraint_mode: { type: "select", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：硬禁语音"]] },
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
+  rest_reply_awake_grace_minutes: { type: "number", min: 0, max: 240, step: 5 },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   framework_session_lock_mode: { type: "select", options: [["auto", "自动（仅旧版兼容）"], ["off", "关闭（新版本推荐）"], ["always", "始终启用（旧版排障）"]] },
   response_review_mode: { type: "select", options: [["severe_only", "主动统一复核"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
+  proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
   emotion_judgement_mode: { type: "select", options: [["suspicious", "仅复核可疑项"], ["always", "总是复核普通文本"], ["off", "关闭复核"]] },
   group_high_intensity_merge_scope: { type: "select", options: [["group", "全群连续叫 Bot 合并"], ["same_user", "只合并同一发送者补话"]] },
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
@@ -2002,6 +2034,9 @@ const probabilitySettingKeys = new Set([
   "qzone_life_publish_probability",
   "qzone_generated_image_probability",
   "qzone_emotional_vent_probability",
+  "proactive_review_hard_risk_threshold",
+  "proactive_review_low_score_threshold",
+  "proactive_review_pressure_threshold",
   "private_reading_share_probability",
   "private_reading_ask_probability",
   "creative_inspiration_probability",
@@ -2381,13 +2416,14 @@ function renderConfigImportChecks() {
 function renderConfigMigrationPreview() {
   const box = $("#configMigrationPreview");
   if (!box) return;
+  const modeSelect = $("#configImportMode");
   const conflictSelect = $("#configImportConflict");
   if (conflictSelect) {
-    conflictSelect.disabled = ($("#configImportMode")?.value || "merge") === "replace";
+    conflictSelect.disabled = (modeSelect?.value || "merge") === "replace";
   }
   const preview = state.configImportPreview;
   if (!state.configImportPackage) {
-    box.innerHTML = "还没有选择备份文件。";
+    box.innerHTML = "还没有选择备份或快照文件。";
     $("#previewConfigImportBtn").disabled = true;
     $("#applyConfigImportBtn").disabled = true;
     return;
@@ -2395,10 +2431,14 @@ function renderConfigMigrationPreview() {
   $("#previewConfigImportBtn").disabled = false;
   $("#applyConfigImportBtn").disabled = !preview;
   if (!preview) {
-    box.innerHTML = "已选择备份文件，先点“预览导入”看看会改动哪些内容。";
+    box.innerHTML = "已选择备份/快照文件，先点“预览导入”看看会改动哪些内容。";
     return;
   }
   const sections = Array.isArray(preview.sections) ? preview.sections : [];
+  if (preview.legacy_snapshot && modeSelect && modeSelect.value === "replace") {
+    modeSelect.value = "merge";
+    if (conflictSelect) conflictSelect.disabled = false;
+  }
   const sectionHtml = sections.length
     ? sections.map((item) => `
         <span>
@@ -2423,6 +2463,9 @@ function renderConfigMigrationPreview() {
   const included = Array.isArray(preview.included_sections) && preview.included_sections.length
     ? `<p class="migration-note">备份包含：${escapeHtml(preview.included_sections.map(migrationSectionLabel).join("、"))}</p>`
     : "";
+  const legacy = preview.legacy_snapshot
+    ? `<p class="migration-warn">这是旧版页面快照，只会按合并方式导入可识别的配置、名单、开关和模型指向；页面里的私聊/群聊摘要不会写回数据文件。</p>`
+    : "";
   const ignored = Array.isArray(preview.ignored) && preview.ignored.length
     ? `<p class="migration-warn">已忽略 ${preview.ignored.length} 个未知字段：${escapeHtml(preview.ignored.slice(0, 8).join("、"))}</p>`
     : "";
@@ -2439,6 +2482,7 @@ function renderConfigMigrationPreview() {
     <div class="migration-section-list">${sectionHtml}</div>
     ${compatibilityHtml}
     ${included}
+    ${legacy}
     ${ignored}
     <p class="migration-note">导入前会自动保存当前可迁移配置；Token、缓存、最近消息、审计日志和临时队列不会导入。</p>
   `;
@@ -2464,7 +2508,7 @@ async function readConfigImportFile(file) {
   state.configImportPackage = data;
   state.configImportPreview = null;
   renderConfigMigrationPreview();
-  showToast("备份文件已读取，请先预览");
+  showToast("备份/快照文件已读取，请先预览");
 }
 
 async function previewConfigImport() {
@@ -2483,7 +2527,7 @@ async function applyConfigImport() {
     showToast("请先预览备份内容", "error");
     return;
   }
-  const mode = $("#configImportMode")?.value || "merge";
+  const mode = state.configImportPreview?.legacy_snapshot ? "merge" : ($("#configImportMode")?.value || "merge");
   const conflict = $("#configImportConflict")?.value || "use_backup";
   const conflictText = {
     use_backup: "使用备份内容",
@@ -4845,6 +4889,7 @@ async function renderGroupDetail(forceFetch = false) {
         <button data-group-action="toggle">${escapeHtml(detail.enabled ? "停用" : "启用")}</button>
         <button data-group-action="reset_interjection">重置插话</button>
         <button data-group-action="clear_observation" class="danger">清空观测</button>
+        <button data-group-action="delete" class="danger">删除群聊</button>
       </div>
     </div>
     <div class="visual-strip group-visual-strip">
@@ -5189,6 +5234,15 @@ function bindGroupActions(detail) {
       if (action === "clear_observation") {
         if (!requireSecondClick(button, `group-clear:${detail.group_id}`, "再次点击清空该群的观测数据", "再次点击清空")) return;
         body.clear_observation = true;
+      }
+      if (action === "delete") {
+        if (!requireSecondClick(button, `group-delete:${detail.group_id}`, "再次点击删除该群聊记录和名单 ID", "再次点击删除")) return;
+        await runAction(async () => {
+          await postJson("/group/delete", body);
+          state.selectedGroupId = "";
+          await loadAll();
+        }, "已删除群聊记录", button);
+        return;
       }
       await runAction(() => postJson("/group/update", body), "已更新群聊观测", button);
     });
@@ -7960,7 +8014,7 @@ function renderLongTermStrategyOverview(selector, { creative = {}, bili = {}, qz
     {
       title: "QQ 空间",
       tone: qzone.enabled && qzone.available ? "ok" : qzone.enabled ? "warn" : "off",
-      meta: [qzone.enabled ? (qzone.available ? "可用" : "待服务") : "关闭", qzone.life_publish_enabled ? "生活说说开启" : "生活说说关闭"],
+      meta: [qzone.enabled ? (qzone.available ? "可用" : "待服务") : "关闭", qzone.life_publish_enabled ? "生活说说开启" : "生活说说关闭", qzone.comment_inbox_enabled ? "评论收件箱开启" : ""].filter(Boolean),
       text: qzone.last_text || "暂无最近说说",
     },
     {
@@ -9976,6 +10030,50 @@ function featureRelatedSettings(key) {
   const settings = state.overview?.settings || {};
   const providers = state.overview?.providers || {};
   const keys = featureSettingGroups[key] || [];
+  const fallbackValue = (name) => {
+    const defaults = {
+      inbound_message_debounce_seconds: 3,
+      text_message_debounce_seconds: 8,
+      image_message_debounce_seconds: 8,
+      forward_message_debounce_seconds: 0,
+      text_message_debounce_max_wait_seconds: 12,
+      message_debounce_max_merge_messages: 8,
+      enable_smart_message_debounce: false,
+      SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: "",
+      smart_message_debounce_model_timeout_seconds: 0.8,
+      smart_message_debounce_wait_seconds: 3,
+      smart_message_debounce_learning_window_seconds: 8,
+      smart_message_debounce_examples_limit: 8,
+      tts_generation_mode: "fast_tag",
+      tts_voice_language: "ja",
+      tts_conversion_provider_id: "",
+      tts_extra_prompt: "",
+      tts_frequency_control_mode: "global",
+      tts_constraint_mode: "weak",
+      tts_session_min_interval_seconds: 120,
+      tts_private_min_interval_seconds: -1,
+      tts_group_min_interval_seconds: -1,
+      tts_trigger_probability: 25,
+      tts_private_trigger_probability: -1,
+      tts_group_trigger_probability: -1,
+      enable_tts_local_playback: false,
+      enable_tts_local_playback_live_only: false,
+      tts_local_playback_volume: 35,
+      tts_local_playback_min_interval_seconds: 0,
+      enable_tts_live_subtitle_sync: false,
+      tts_live_subtitle_url: "",
+      auto_voice_enabled: true,
+      auto_voice_full_conversion_enabled: true,
+      auto_voice_max_chars: 80,
+      auto_voice_probability: 20,
+      auto_voice_cooldown_seconds: 180,
+      main_user_voice_probability: 0,
+      main_user_mention_voice_keywords: "",
+      main_user_mention_voice_probability: 0,
+      main_user_mention_voice_prompt: "",
+    };
+    return Object.prototype.hasOwnProperty.call(defaults, name) ? defaults[name] : undefined;
+  };
   return keys
     .filter((item) => visibleConfigKey(item))
     .filter((item) => featureSettingVisibleForCurrentMode(key, item, settings))
@@ -9983,6 +10081,7 @@ function featureRelatedSettings(key) {
       Object.prototype.hasOwnProperty.call(settings, item)
       || Object.prototype.hasOwnProperty.call(providers, item)
       || Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item)
+      || fallbackValue(item) !== undefined
     ))
     .map((item) => ({
       key: item,
@@ -9990,7 +10089,9 @@ function featureRelatedSettings(key) {
         ? settings[item]
         : Object.prototype.hasOwnProperty.call(providers, item)
           ? providers[item]
-          : state.featureDraft[item],
+          : Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item)
+            ? state.featureDraft[item]
+            : fallbackValue(item),
       feature: Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item),
       description: configDescriptions[item] || featureDescription(item) || "这个参数会影响该功能的触发频率、上下文范围或行为边界。",
     }));
@@ -10013,7 +10114,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return true;
   }
   if (featureKey === "enable_humanized_states") {
-    const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
+    const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
     if (restChildren.has(settingKey)) {
       const restEnabled = boolSetting("enable_rest_reply_simulation");
       if (!restEnabled) return false;
@@ -10266,7 +10367,7 @@ function featureDependencyLines(key) {
   }
   if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
   if (["enable_web_exploration", "enable_web_exploration_boredom_search"].includes(key)) dependencies.push(["依赖", "AstrBot 网页搜索"]);
-  if (["enable_qzone_life_publish"].includes(key)) dependencies.push(["依赖", "QQ 空间动态层"]);
+  if (["enable_qzone_life_publish", "enable_qzone_comment_inbox"].includes(key)) dependencies.push(["依赖", "QQ 空间动态层"]);
   if (key === "enable_qzone_generated_image_publish") dependencies.push(["依赖", "QQ 空间动态层 + 主动拍照/生图"]);
   if (key === "enable_qzone_emotional_vent_publish") dependencies.push(["依赖", "情绪模拟 + QQ 空间动态层"]);
   if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI 或在线图片 API"]);
@@ -10320,7 +10421,7 @@ const featureDetailGuides = {
   enable_response_self_review: {
     summary: "主动消息发送前统一做价值复核和轻量润色，重点避免主动开口写成“好呀/确实/刚看到你说”这类像在回复空气的话。",
     trigger: "主动消息生成后、发送前；普通被动回复只保留防漏、防复读和突然换话题等本地保护，full 模式才会积极改写被动回复。",
-    enabled: "主动消息会在发送前判断原样发送、轻改写、延后或取消；重写后仍不对就丢弃本轮主动，宁可不发。",
+    enabled: "主动消息会在发送前判断原样发送、轻改写、延后或取消；默认宽松强度会减少直接取消，避免模型过度保守导致主动消息归零。",
     disabled: "不再调用模型润色主动消息；本地仍会尽量丢弃明显错误的主动消息。",
   },
   enable_passive_topic_suppression: {
@@ -10373,13 +10474,13 @@ const featureDetailGuides = {
   },
   enable_health_state: {
     summary: "控制健康、不舒服和恢复尾声这类身体余波是否参与当前扮演状态。",
-    trigger: "拟人身体状态刷新或手动增添状态时，且人格适合生物身体设定。",
+    trigger: "拟人身体状态刷新或手动增添状态时；开启后不再额外做人格适用性拦截。",
     enabled: "状态可能出现轻微不适、头疼、恢复期等健康底色，并影响精力、日程和语气。",
     disabled: "不会新增健康异常状态；手动增添明显生病/不舒服状态也会被拦截。",
   },
   enable_hunger_state: {
     summary: "控制饥饿、胃口和想吃东西这类身体余波是否参与当前扮演状态。",
-    trigger: "拟人身体状态刷新、饭点饥饿窗口或手动增添状态时，且人格适合进食设定。",
+    trigger: "拟人身体状态刷新、饭点饥饿窗口或手动增添状态时；开启后不再额外做人格适用性拦截。",
     enabled: "状态可能出现饿、胃口不好、想吃甜的等底色，并可能产生吃什么类身体小需求。",
     disabled: "不会新增饥饿/胃口状态；吃什么类身体小需求和手动饥饿状态会被拦截。",
   },
@@ -10725,6 +10826,12 @@ const featureDetailGuides = {
     enabled: "发布前会尝试生成一张符合说说内容的图片；失败时回退纯文字，不阻断发布。",
     disabled: "空间说说只发文字或用户指令中明确提供的图片。",
   },
+  enable_qzone_comment_inbox: {
+    summary: "低频拉取自己最近说说详情，解析评论列表，记录已见评论，并按需公开追加回复。",
+    trigger: "长线主动维护任务到达评论检查间隔时。",
+    enabled: "首次开启只记录现有评论；后续新评论会先经过模型判断，再决定跳过或追加一句公开回复。",
+    disabled: "不会自动读取或回复自己说说下的评论。",
+  },
   enable_private_reading_integration: {
     summary: "启用书柜夹层的私下阅读素材入口；仅在检测到对应素材能力时显示相关配置。",
     trigger: "素材能力可用、书柜打开或私下阅读检查时。",
@@ -11000,11 +11107,13 @@ function bindFeatureDetailActions() {
             state.selectedFeatureKey === "enable_tts_enhancement"
             && ["auto_voice_enabled", "enable_tts_local_playback", "enable_tts_live_subtitle_sync"].includes(input.dataset.featureParam)
           ) {
+            state.featureDraft[input.dataset.featureParam] = input.checked;
             state.overview.settings = state.overview.settings || {};
             state.overview.settings[input.dataset.featureParam] = input.checked;
             renderFeatureSwitches();
           }
           if (state.selectedFeatureKey === "enable_emotion_simulation" && input.dataset.featureParam === "enable_llm_emotion_judgement") {
+            state.featureDraft.enable_llm_emotion_judgement = input.checked;
             state.overview.settings = state.overview.settings || {};
             state.overview.settings.enable_llm_emotion_judgement = input.checked;
             renderFeatureSwitches();
@@ -11013,6 +11122,7 @@ function bindFeatureDetailActions() {
             state.selectedFeatureKey === "enable_group_slang_learning"
             && ["enable_group_slang_meanings", "enable_group_slang_web_search"].includes(input.dataset.featureParam)
           ) {
+            state.featureDraft[input.dataset.featureParam] = input.checked;
             state.overview.settings = state.overview.settings || {};
             state.overview.settings[input.dataset.featureParam] = input.checked;
             renderFeatureSwitches();
@@ -12612,20 +12722,14 @@ $("#addGroupForm").addEventListener("submit", async (event) => {
   event.currentTarget.reset();
 });
 
-$("#exportSnapshotBtn").addEventListener("click", () => {
-  const snapshot = {
-    exported_at: new Date().toISOString(),
-    overview: state.overview,
-    users: state.users,
-    groups: state.groups,
-  };
-  const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `private-companion-snapshot-${new Date().toISOString().slice(0, 10)}.json`;
-  link.click();
-  URL.revokeObjectURL(url);
+$("#exportSnapshotBtn").addEventListener("click", async () => {
+  await runAction(async () => {
+    const params = new URLSearchParams();
+    params.set("sections", "basic,relations,food_skills,providers");
+    const snapshot = await fetchJson(`/config/export?${params.toString()}`);
+    const date = new Date().toISOString().slice(0, 10);
+    downloadJson(`private-companion-snapshot-${date}.json`, snapshot);
+  }, "快照已导出，可在配置迁移中导入", $("#exportSnapshotBtn"));
 });
 
 $("#exportConfigBtn").addEventListener("click", async () => {

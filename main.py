@@ -414,7 +414,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.1.3",
+    "5.2.0",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -632,6 +632,8 @@ class PrivateCompanionPlugin(
             self.rest_reply_mode = "probability"
         self.rest_reply_probability = self._cfg_int(c, "rest_reply_probability", 18, 0, 100) / 100.0
         self.rest_reply_llm_threshold = self._cfg_int(c, "rest_reply_llm_threshold", 65, 0, 100)
+        self.rest_reply_active_windows = self._cfg_str(c, "rest_reply_active_windows", "23:00-08:30,12:20-13:40")
+        self.rest_reply_awake_grace_minutes = self._cfg_int(c, "rest_reply_awake_grace_minutes", 30, 0, 240)
         self.enable_rest_backlog_reply = self._cfg_bool(c, "enable_rest_backlog_reply", True)
         self.rest_backlog_max_messages = self._cfg_int(c, "rest_backlog_max_messages", 4, 1, 12)
         self.rest_wakeup_provider_id = self._cfg_str(c, "REST_WAKEUP_PROVIDER_ID", "")
@@ -812,6 +814,12 @@ class PrivateCompanionPlugin(
         self.response_review_mode = self._cfg_str(c, "response_review_mode", "severe_only", "severe_only").lower()
         if self.response_review_mode not in {"local_only", "severe_only", "full"}:
             self.response_review_mode = "severe_only"
+        self.proactive_review_strength = self._cfg_str(c, "proactive_review_strength", "lenient", "lenient").lower()
+        if self.proactive_review_strength not in {"lenient", "balanced", "strict"}:
+            self.proactive_review_strength = "lenient"
+        self.proactive_review_hard_risk_threshold = self._cfg_unit_interval(c, "proactive_review_hard_risk_threshold", 0.70, 0.0)
+        self.proactive_review_low_score_threshold = self._cfg_unit_interval(c, "proactive_review_low_score_threshold", 0.34, 0.0)
+        self.proactive_review_pressure_threshold = self._cfg_unit_interval(c, "proactive_review_pressure_threshold", 0.55, 0.0)
         self.enable_passive_topic_suppression = self._cfg_bool(c, "enable_passive_topic_suppression", True)
         self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
         self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
@@ -1020,6 +1028,10 @@ class PrivateCompanionPlugin(
         self.qzone_life_publish_probability = self._cfg_unit_interval(c, "qzone_life_publish_probability", 0.18, 0.0)
         self.enable_qzone_generated_image_publish = self._cfg_bool(c, "enable_qzone_generated_image_publish", False)
         self.qzone_generated_image_probability = self._cfg_unit_interval(c, "qzone_generated_image_probability", 0.25, 0.0)
+        self.enable_qzone_comment_inbox = self._cfg_bool(c, "enable_qzone_comment_inbox", False)
+        self.qzone_comment_inbox_interval_minutes = self._cfg_int(c, "qzone_comment_inbox_interval_minutes", 60, 5, 1440)
+        self.qzone_comment_inbox_recent_posts = self._cfg_int(c, "qzone_comment_inbox_recent_posts", 5, 1, 20)
+        self.qzone_comment_inbox_max_replies_per_tick = self._cfg_int(c, "qzone_comment_inbox_max_replies_per_tick", 1, 1, 5)
         self.enable_qzone_emotional_vent_publish = self._cfg_bool(c, "enable_qzone_emotional_vent_publish", False)
         self.qzone_emotional_vent_threshold = self._cfg_int(c, "qzone_emotional_vent_threshold", 90, 40, 100)
         self.qzone_emotional_vent_cooldown_hours = self._cfg_int(c, "qzone_emotional_vent_cooldown_hours", 72, 4, 336)
@@ -1662,13 +1674,20 @@ class PrivateCompanionPlugin(
         if not self._segmented_scope_allows_event(event):
             return
         result = event.get_result()
-        if result is None or not result.chain or not result.is_llm_result():
+        if result is None or not result.chain:
+            return
+        is_llm_result = False
+        try:
+            is_llm_result = bool(result.is_llm_result())
+        except Exception:
+            is_llm_result = False
+        chain = list(result.chain or [])
+        if not is_llm_result and not self._friend_private_plain_result_allows_segmenting(event, chain):
             return
         if getattr(result, "use_t2i_", None) or getattr(result, "use_markdown_", None):
             return
         if str(event.get_platform_name() or "") in {"qq_official", "weixin_official_account", "dingtalk"}:
             return
-        chain = list(result.chain or [])
         if not chain:
             return
         chunks, changed, text = self._segment_llm_reply_chain(event, chain)
@@ -1707,6 +1726,29 @@ class PrivateCompanionPlugin(
                     started_at=activity_baseline,
                 )
             )
+
+    def _friend_private_plain_result_allows_segmenting(self, event: AstrMessageEvent, chain: list[Any]) -> bool:
+        try:
+            if not bool(getattr(event, "is_private_chat", lambda: False)()):
+                return False
+        except Exception:
+            return False
+        if not chain or any(not isinstance(comp, Plain) for comp in chain):
+            return False
+        text = "".join(str(getattr(comp, "text", "") or "") for comp in chain).strip()
+        if not text:
+            return False
+        try:
+            user_id = str(event.get_sender_id())
+        except Exception:
+            user_id = ""
+        user_id = self._canonical_private_user_id(_single_line(user_id, 80))
+        if not user_id:
+            return False
+        raw_users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
+        role = self._private_user_role(user if isinstance(user, dict) else {}, user_id)
+        return role == "friend"
 
     @filter.on_decorating_result()
     async def final_tts_markup_guard_before_send(self, event: AstrMessageEvent):
@@ -3490,6 +3532,24 @@ class PrivateCompanionPlugin(
             approx_tokens,
         )
 
+    def _rest_reply_window_active(self) -> bool:
+        raw = str(getattr(self, "rest_reply_active_windows", "") or "").strip()
+        if not raw:
+            return True
+        raw = re.sub(r"\s+", "", raw)
+        now_minutes = self._environment_now_minutes()
+        for part in re.split(r"[,;；，、]+", raw):
+            window = part.strip()
+            if not window:
+                continue
+            start, end = self._parse_window_minutes(window)
+            if start is None or end is None:
+                continue
+            for candidate in (now_minutes, now_minutes + 24 * 60):
+                if start <= candidate < end:
+                    return True
+        return False
+
     def _rest_reply_sleep_context(self) -> tuple[bool, dict[str, Any], dict[str, Any] | None, str]:
         try:
             current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
@@ -3498,8 +3558,9 @@ class PrivateCompanionPlugin(
             current_item = None
             runtime = self._sleep_runtime_state()
         phase = str((runtime or {}).get("phase") or "")
-        sleepy_item = self._is_sleepy_plan_item(current_item) if isinstance(current_item, dict) else False
-        sleeping = phase in {"falling_asleep", "light_sleep", "sleeping_again"} or sleepy_item
+        window_active = self._rest_reply_window_active()
+        sleepy_item = window_active and self._is_sleepy_plan_item(current_item) if isinstance(current_item, dict) else False
+        sleeping = window_active and (phase in {"falling_asleep", "light_sleep", "sleeping_again"} or sleepy_item)
         if phase == "woken":
             sleeping = False
         if phase in {"natural_wake", "awake"} and not sleepy_item:
@@ -3595,9 +3656,20 @@ class PrivateCompanionPlugin(
                 runtime=runtime,
                 is_private_chat=is_private_chat,
             )
-            return score >= self.rest_reply_llm_threshold, f"llm:{score}/{self.rest_reply_llm_threshold}:{reason}"
+            allowed = score >= self.rest_reply_llm_threshold
+            if allowed:
+                try:
+                    self._mark_sleep_woken_by_user(text)
+                except Exception:
+                    pass
+            return allowed, f"llm:{score}/{self.rest_reply_llm_threshold}:{reason}"
         probability = max(0.0, min(1.0, float(getattr(self, "rest_reply_probability", 0.0) or 0.0)))
         hit = random.random() <= probability
+        if hit:
+            try:
+                self._mark_sleep_woken_by_user(text)
+            except Exception:
+                pass
         return hit, f"probability:{probability:.2f}"
 
     def _rest_backlog_user_for_event(self, event: AstrMessageEvent) -> tuple[str, dict[str, Any] | None]:
@@ -5373,7 +5445,8 @@ class PrivateCompanionPlugin(
                 fast_user["pending_followup_event"] = {}
                 fast_user["planned_proactive_quota_exempt"] = False
             fast_user["ignored_streak"] = 0
-            if self._apply_interaction_warmth_to_state(text, fast_user):
+            fast_user_is_owner = self._private_user_role(fast_user, user_id) == "owner"
+            if fast_user_is_owner and self._apply_interaction_warmth_to_state(text, fast_user):
                 fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
             self._schedule_data_save()
             await self._acquire_framework_session_lock_for_event(event, label="private_event_pipeline")
@@ -5661,25 +5734,31 @@ class PrivateCompanionPlugin(
                     logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
                     if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                         self._schedule_next_proactive(user, now=_now_ts())
+            user_is_owner = self._private_user_role(user, user_id) == "owner"
             food_feedback = self._detect_food_feedback(text) if text else {"is_food": False}
-            food_feedback_applied = bool(text) and self._apply_food_feedback_to_state(text)
+            food_feedback_applied = bool(text) and user_is_owner and self._apply_food_feedback_to_state(text)
             if food_feedback.get("is_food"):
                 user["last_food_feedback_at"] = _now_ts()
                 user["last_food_feedback_text"] = _single_line(text, 120)
-                used_food_items = self._mark_food_menu_item_used_from_text(text)
+                used_food_items = self._mark_food_menu_item_used_from_text(text) if user_is_owner else []
                 if used_food_items:
                     user["last_food_menu_choice"] = {
                         "ts": _now_ts(),
                         "items": used_food_items,
                         "text": _single_line(text, 120),
                     }
-            care_feedback_applied = bool(text) and self._apply_care_feedback_to_state(text)
+            care_feedback_applied = bool(text) and user_is_owner and self._apply_care_feedback_to_state(text)
             if care_feedback_applied:
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
-            interaction_warmth_applied = bool(text) and is_target_user and self._apply_interaction_warmth_to_state(text, user)
+            interaction_warmth_applied = bool(text) and is_target_user and user_is_owner and self._apply_interaction_warmth_to_state(text, user)
             if interaction_warmth_applied:
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 1
-            schedule_adjustment_applied = bool(text) and self._record_schedule_adjustment_from_interaction(text)
+            schedule_adjustment_applied = (
+                bool(text)
+                and is_target_user
+                and user_is_owner
+                and self._record_schedule_adjustment_from_interaction(text, user)
+            )
             if schedule_adjustment_applied:
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 1
             if food_feedback_applied:

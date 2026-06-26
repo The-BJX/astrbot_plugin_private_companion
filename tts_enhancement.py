@@ -60,6 +60,9 @@ DEFAULT_TTS_SANITIZE_REPLACEMENTS = {
     "555": "呜呜呜",
 }
 TTS_EMOTION_PLACEHOLDER_PREFIX = "__PRIVATE_COMPANION_TTS_EMOTION_"
+TTS_VISIBLE_LABEL_PATTERN = re.compile(
+    r"^(?:[\s:：|｜-]*(?:中文含义|中文释义|对应文本|原中文文本|显示文本|可见文本|文本|翻译|释义)[\s:：|｜-]*)+"
+)
 
 
 class TtsEnhancementMixin:
@@ -333,6 +336,60 @@ class TtsEnhancementMixin:
         cleaned = re.sub(r"</?pc[_-]?tts\b[^>]*>", "", str(text or ""), flags=re.IGNORECASE)
         cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
+
+    def _sanitize_tts_visible_text(self, text: Any, *, max_chars: int = 800) -> str:
+        cleaned = self._strip_any_tts_markup(str(text or ""))
+        cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned).strip()
+        cleaned = re.sub(r"(?m)^\s*[>＞]\s*", "", cleaned).strip()
+        previous = None
+        while cleaned and previous != cleaned:
+            previous = cleaned
+            cleaned = TTS_VISIBLE_LABEL_PATTERN.sub("", cleaned).strip()
+        cleaned = re.sub(
+            r"(?m)^(\s*)(?:中文含义|中文释义|对应文本|原中文文本|显示文本|可见文本|文本|翻译|释义)[\s:：|｜-]+",
+            r"\1",
+            cleaned,
+        ).strip()
+        return _single_line(_normalize_outbound_punctuation_flow(cleaned), max_chars) if cleaned else ""
+
+    def _mark_tts_visible_plain(self, text: Any, *, max_chars: int = 800) -> Plain | None:
+        visible = self._sanitize_tts_visible_text(text, max_chars=max_chars)
+        if not visible:
+            return None
+        comp = Plain(visible)
+        try:
+            setattr(comp, "_private_companion_tts_visible_text", True)
+        except Exception:
+            pass
+        return comp
+
+    def _tts_proactive_segment_visible_policy(self, event: Any) -> tuple[str, bool]:
+        try:
+            result = event.get_result()
+        except Exception:
+            result = None
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        full_text = ""
+        index = 0
+        count = 1
+        for comp in chain:
+            full_text = _single_line(getattr(comp, "_private_companion_proactive_full_text", ""), 1200)
+            if not full_text:
+                continue
+            try:
+                index = max(0, int(getattr(comp, "_private_companion_proactive_segment_index", 0) or 0))
+            except Exception:
+                index = 0
+            try:
+                count = max(1, int(getattr(comp, "_private_companion_proactive_segment_count", 1) or 1))
+            except Exception:
+                count = 1
+            break
+        if not full_text:
+            return "", False
+        if count <= 1 or index >= count - 1:
+            return self._sanitize_tts_visible_text(full_text, max_chars=1000), False
+        return "", True
 
     def _protect_tts_blocks_for_framework(self, text: str, event: Any) -> str:
         normalized = self._normalize_tts_tags(str(text or ""))
@@ -697,7 +754,7 @@ class TtsEnhancementMixin:
         return allowed
 
     def _tts_visible_text_has_chinese(self, text: str) -> bool:
-        cleaned = self._strip_any_tts_markup(text)
+        cleaned = self._sanitize_tts_visible_text(text)
         cleaned = re.sub(r"[\s\W_]+", "", cleaned, flags=re.UNICODE)
         if not cleaned:
             return False
@@ -724,8 +781,7 @@ class TtsEnhancementMixin:
         formulas, for example prime numbers, modulo values, URLs, or command
         snippets. Those should remain visible even without two Chinese characters.
         """
-        cleaned = self._strip_any_tts_markup(str(text or ""))
-        cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = self._sanitize_tts_visible_text(text)
         if not cleaned:
             return False
         if re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", cleaned):
@@ -750,8 +806,7 @@ class TtsEnhancementMixin:
 
     def _tts_chinese_visible_fallback_from_mixed(self, text: str) -> str:
         """Extract visible Chinese explanation from a mixed spoken-language fallback."""
-        cleaned = self._strip_any_tts_markup(str(text or ""))
-        cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned).strip()
+        cleaned = self._sanitize_tts_visible_text(text)
         if not cleaned:
             return ""
         if self._tts_visible_text_is_allowed_after_voice(cleaned):
@@ -890,9 +945,9 @@ TTS 朗读文本：
         if voice_lang == "zh":
             language_rule = "<pc_tts> 内也用自然中文；语音块后不强制再写重复翻译。"
         elif voice_lang == "en":
-            language_rule = "<pc_tts> 内必须是自然英语；每个语音块后补上对应中文含义。"
+            language_rule = "<pc_tts> 内必须是自然英语；每个语音块后直接补一句自然中文，不要加“中文含义：”“对应文本：”这类标题。"
         else:
-            language_rule = "<pc_tts> 内必须是自然日语，除极短语气词外要包含假名；每个语音块后补上对应中文含义。"
+            language_rule = "<pc_tts> 内必须是自然日语，除极短语气词外要包含假名；每个语音块后直接补一句自然中文，不要加“中文含义：”“对应文本：”这类标题。"
         examples = ""
         if mode == "fast_tag":
             if voice_lang == "zh":
@@ -922,7 +977,7 @@ TTS 朗读文本：
         if voice_lang == "zh":
             first_rule = "1.自然聊天时用中文文字推进对话，把适合朗读的中文部分用一对<pc_tts>包起来；"
         else:
-            first_rule = "1.自然聊天时用中文文字推进对话，把适合朗读的外语部分用一对<pc_tts>包起来，并在后面补上对应的中文含义；"
+            first_rule = "1.自然聊天时用中文文字推进对话，把适合朗读的外语部分用一对<pc_tts>包起来，并在后面直接补一句自然中文，不要写“中文含义：”“对应文本：”这类标题；"
         rules = [
             "【语音消息规则】",
             first_rule,
@@ -1221,6 +1276,7 @@ TTS 朗读文本：
             new_chain = await self._process_tts_tags(normalized, event)
         if not new_chain:
             fallback_text = self._tts_visible_fallback_text(normalized) or self._strip_any_tts_markup(normalized)
+            fallback_text = self._sanitize_tts_visible_text(fallback_text)
             new_chain = [Plain(fallback_text)] if fallback_text else []
         if len(plain_parts) != len(chain):
             non_plain_tail = [comp for comp in chain if not isinstance(comp, Plain)]
@@ -1249,6 +1305,7 @@ TTS 朗读文本：
             changed = True
             normalized = self._normalize_tts_tags(original)
             fallback_text = self._tts_visible_fallback_text(normalized) or self._strip_any_tts_markup(normalized)
+            fallback_text = self._sanitize_tts_visible_text(fallback_text)
             if fallback_text:
                 cleaned_chain.append(Plain(fallback_text))
         if changed:
@@ -1297,6 +1354,10 @@ TTS 朗读文本：
         if not text:
             return []
         original_text = text
+        is_tts_visible_text = any(bool(getattr(comp, "_private_companion_tts_visible_text", False)) for comp in chunk)
+        if is_tts_visible_text:
+            cleaned_visible = self._sanitize_tts_visible_text(text)
+            return [[Plain(cleaned_visible)]] if cleaned_visible else []
         if getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_is_allowed_after_voice(text):
             chinese_text = self._tts_chinese_visible_fallback_from_mixed(text)
             if chinese_text:
@@ -1454,10 +1515,29 @@ TTS 朗读文本：
             if self._tts_strong_constraint_enabled():
                 self._set_tts_hard_block(event, "probability_miss")
             return []
+        visible_override, suppress_visible = self._tts_proactive_segment_visible_policy(event)
         converted = await self._convert_text_to_tts_markup(text, event, full=(mode == "postprocess" or self.auto_voice_full_conversion_enabled))
         if not converted:
             return []
-        chain = await self._process_tts_tags(converted, event, fallback_plain=text)
+        if visible_override or suppress_visible:
+            try:
+                setattr(event, "_private_companion_tts_visible_text_override", visible_override)
+                setattr(event, "_private_companion_tts_visible_text_suppress", bool(suppress_visible))
+            except Exception:
+                pass
+        fallback_plain = visible_override if visible_override else ("" if suppress_visible else text)
+        try:
+            chain = await self._process_tts_tags(converted, event, fallback_plain=fallback_plain)
+        finally:
+            if visible_override or suppress_visible:
+                for attr in (
+                    "_private_companion_tts_visible_text_override",
+                    "_private_companion_tts_visible_text_suppress",
+                ):
+                    try:
+                        delattr(event, attr)
+                    except Exception:
+                        pass
         if chain:
             session = str(getattr(event, "unified_msg_origin", "") or "")
             self._tts_auto_voice_last_at[session] = time.time()
@@ -1585,12 +1665,12 @@ TTS 朗读文本：
             display_rule = "语音和显示文本同为中文时，不需要额外翻译，标签外仍可保留自然中文聊天文本。"
             language_rule = "语音块内必须是自然中文。"
         elif voice_lang == "en":
-            output_rule = "必须包含一个 <pc_tts>...</pc_tts> 英语语音块，且语音块后必须补一句自然中文含义"
-            display_rule = "不要只输出 <pc_tts>...</pc_tts>；最终格式建议为：<pc_tts>English voice text</pc_tts>\\n中文含义。中文含义必须完整收口。"
+            output_rule = "必须包含一个 <pc_tts>...</pc_tts> 英语语音块，且语音块后必须直接补一句自然中文"
+            display_rule = "不要只输出 <pc_tts>...</pc_tts>；最终格式建议为：<pc_tts>English voice text</pc_tts>\\n我会在这里。中文句子必须完整收口，不要写“中文含义：”“对应文本：”这类标题。"
             language_rule = "语音块内必须完全使用自然英语，不要夹中文评价、中文语气词或中文说明。"
         else:
-            output_rule = "必须包含一个 <pc_tts>...</pc_tts> 日语语音块，且语音块后必须补一句自然中文含义"
-            display_rule = "不要只输出 <pc_tts>...</pc_tts>；最终格式建议为：<pc_tts>日本語の朗読文</pc_tts>\\n中文含义。中文含义必须完整收口。"
+            output_rule = "必须包含一个 <pc_tts>...</pc_tts> 日语语音块，且语音块后必须直接补一句自然中文"
+            display_rule = "不要只输出 <pc_tts>...</pc_tts>；最终格式建议为：<pc_tts>日本語の朗読文</pc_tts>\\n我会在这里。中文句子必须完整收口，不要写“中文含义：”“对应文本：”这类标题。"
             language_rule = "语音块内必须完全使用自然日语，不要夹中文评价、中文语气词或中文说明；除极短语气词外必须包含假名，不要只输出汉字词。"
         prompt = f"""
 请把下面这条回复转换成适合 TTS 朗读的最终输出。
@@ -1641,10 +1721,10 @@ Provider 规则：{emotion_rule}
             visible_rule = "visible_text 仍是最终可见中文文本；如果和 voice_text 一样，可以保持同一句。"
         elif voice_lang == "en":
             language_rule = "voice_text 必须是自然英语，不要夹中文说明。"
-            visible_rule = "visible_text 必须保留完整中文含义，让用户能看懂这段语音对应什么。"
+            visible_rule = "visible_text 必须保留完整自然中文句子，让用户能看懂这段语音对应什么，但不要写“中文含义：”“对应文本：”这类标题。"
         else:
             language_rule = "voice_text 必须是自然日语，不要夹中文说明；除极短语气词外必须包含假名。"
-            visible_rule = "visible_text 必须保留完整中文含义，让用户能看懂这段语音对应什么。"
+            visible_rule = "visible_text 必须保留完整自然中文句子，让用户能看懂这段语音对应什么，但不要写“中文含义：”“对应文本：”这类标题。"
         emotion_rule = self._tts_emotion_tag_rule(provider_kind, subject="voice_text 中")
         if not emotion_rule:
             emotion_rule = "voice_text 不要使用方括号情绪标签。"
@@ -1696,7 +1776,7 @@ Provider 规则：{emotion_rule}
             if not isinstance(payload, dict):
                 return ""
             use_tts = bool(payload.get("use_tts"))
-            visible = _single_line(payload.get("visible_text"), 900) or source
+            visible = self._sanitize_tts_visible_text(payload.get("visible_text"), max_chars=900) or source
             voice = self._normalize_tts_spoken_text(str(payload.get("voice_text") or ""), provider_kind=provider_kind)
             reason = _single_line(payload.get("reason"), 120)
             if not use_tts or not voice:
@@ -1988,12 +2068,12 @@ Provider 规则：{emotion_rule}
         visible = re.sub(r"<tts\b[^>]*>.*?</tts>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
         visible = re.sub(TTS_TAG_PATTERN, "", visible).strip()
         if visible:
-            return visible
+            return self._sanitize_tts_visible_text(visible)
         fallback = str(fallback_plain or "").strip()
         if fallback:
-            return fallback
+            return self._sanitize_tts_visible_text(fallback)
         if getattr(self, "tts_voice_language", "ja") == "zh":
-            return re.sub(TTS_TAG_PATTERN, "", normalized).strip()
+            return self._sanitize_tts_visible_text(re.sub(TTS_TAG_PATTERN, "", normalized).strip())
         return ""
 
     async def _process_tts_tags(self, text: str, event_or_provider: Any, provider_settings: dict[str, Any] | None = None, config: dict[str, Any] | None = None, fallback_plain: str = "") -> list[Any]:
@@ -2023,9 +2103,11 @@ Provider 规则：{emotion_rule}
                 hard_block,
                 _single_line(fallback_text or normalized, 120),
             )
-            return [Plain(_single_line(fallback_text, 800))] if fallback_text else []
+            fallback_text = self._sanitize_tts_visible_text(fallback_text)
+            return [Plain(fallback_text)] if fallback_text else []
         if not tts_provider:
             fallback_text = self._tts_visible_fallback_text(text, fallback_plain)
+            fallback_text = self._sanitize_tts_visible_text(fallback_text)
             if fallback_text:
                 logger.warning(
                     "[PrivateCompanion] TTS强化检测到标签但当前会话没有可用 TTS provider,已隐藏朗读文本并按普通文本发送: %s",
@@ -2087,7 +2169,9 @@ Provider 规则：{emotion_rule}
                             else await self._translate_tts_spoken_to_chinese(source_spoken, event, provider_kind=provider_kind)
                         )
                         if visible_translation:
-                            output.append(Plain(visible_translation))
+                            visible_plain = self._mark_tts_visible_plain(visible_translation, max_chars=300)
+                            if visible_plain is not None:
+                                output.append(visible_plain)
                             logger.info(
                                 "[PrivateCompanion] TTS语音块已补中文释义: 语音=%s 中文=%s",
                                 _single_line(spoken, 80),
@@ -2120,7 +2204,9 @@ Provider 规则：{emotion_rule}
                             provider_kind=provider_kind,
                         )
                         if visible_translation:
-                            output.append(Plain(visible_translation))
+                            visible_plain = self._mark_tts_visible_plain(visible_translation, max_chars=300)
+                            if visible_plain is not None:
+                                output.append(visible_plain)
                             logger.warning(
                                 "[PrivateCompanion] TTS语音组件生成失败,已改用中文释义文本: %s",
                                 _single_line(visible_translation, 120),
@@ -2134,6 +2220,15 @@ Provider 规则：{emotion_rule}
                     output.append(Plain(spoken))
             pos = match.end()
         after = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized[pos:], flags=re.IGNORECASE).strip()
+        visible_override = self._sanitize_tts_visible_text(
+            getattr(event, "_private_companion_tts_visible_text_override", ""),
+            max_chars=1000,
+        ) if event is not None else ""
+        suppress_visible = bool(getattr(event, "_private_companion_tts_visible_text_suppress", False)) if event is not None else False
+        if suppress_visible:
+            after = ""
+        elif visible_override:
+            after = visible_override
         if after and getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_is_allowed_after_voice(after):
             chinese_after = self._tts_chinese_visible_fallback_from_mixed(after)
             if chinese_after:
@@ -2149,10 +2244,12 @@ Provider 规则：{emotion_rule}
                 )
                 after = ""
         if after:
-            output.append(Plain(after))
+            visible_plain = self._mark_tts_visible_plain(after)
+            if visible_plain is not None:
+                output.append(visible_plain)
         has_record = any(isinstance(comp, Record) for comp in output)
         if record_failed and fallback_plain and not has_record:
-            fallback_text = _single_line(fallback_plain, 800)
+            fallback_text = self._sanitize_tts_visible_text(fallback_plain)
             visible_text = "\n".join(
                 str(getattr(comp, "text", "") or "").strip()
                 for comp in output
@@ -2172,11 +2269,14 @@ Provider 规则：{emotion_rule}
             and has_record
             and not plain_after_last_record
         ):
-            output.append(Plain(_single_line(fallback_plain, 800)))
+            visible_plain = self._mark_tts_visible_plain(fallback_plain)
+            if visible_plain is not None:
+                output.append(visible_plain)
         if not output:
             fallback_text = self._tts_visible_fallback_text(normalized, fallback_plain)
+            fallback_text = self._sanitize_tts_visible_text(fallback_text)
             if fallback_text:
-                output.append(Plain(_single_line(fallback_text, 800)))
+                output.append(Plain(fallback_text))
         return output
 
     async def _convert_text_to_spoken_language(self, text: str, event: Any, *, provider_kind: str) -> str:
