@@ -103,6 +103,7 @@ from .dreaming import (
 from .helpers import (
     _date_key,
     _flat_get,
+    _normalize_outbound_punctuation_flow,
     _now_ts,
     _safe_float,
     _safe_int,
@@ -413,7 +414,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.1.2",
+    "5.1.3",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -4629,6 +4630,10 @@ class PrivateCompanionPlugin(
         """规范化 TTS 标签错拼，避免 <ttts> 等内容漏到发送链路。"""
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
+        original_text = str(getattr(resp, "completion_text", "") or "")
+        normalized_text = _normalize_outbound_punctuation_flow(original_text)
+        if normalized_text and normalized_text != original_text:
+            resp.completion_text = normalized_text
         await self.protect_tts_enhancement_response_blocks(event, resp)
 
     @filter.on_llm_response()
@@ -5479,7 +5484,7 @@ class PrivateCompanionPlugin(
                 if isinstance(buffers, dict) and isinstance(buffers.get(key), dict):
                     persisted_images = await self._persist_private_inbound_images(event, user_id)
                     has_model_usable_image = any(self._private_image_source_to_model_url(source) for source in persisted_images)
-                    if not persisted_images or not has_model_usable_image:
+                    if not persisted_images:
                         buffers.pop(key, None)
                         setattr(event, "private_companion_deferred_private_image_only", False)
                         logger.info(
@@ -5489,6 +5494,12 @@ class PrivateCompanionPlugin(
                         )
                         self._schedule_data_save()
                         return
+                    if not has_model_usable_image:
+                        logger.info(
+                            "[PrivateCompanion] 私聊单图已保存但不可直供模型,仍进入防抖等待补充: user=%s sources=%s",
+                            user_id,
+                            len(persisted_images),
+                        )
                     buffers[key]["images"] = persisted_images
                     buffers[key]["original_event"] = event
                     has_dynamic_gif_sources = (

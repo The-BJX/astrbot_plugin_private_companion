@@ -24,7 +24,7 @@ except ImportError:
 from astrbot.core import file_token_service
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .helpers import _safe_int, _single_line
+from .helpers import _normalize_outbound_punctuation_flow, _safe_int, _single_line
 
 
 TTS_BLOCK_PATTERN = re.compile(r"<t{2,}s\b[^>]*>.*?</t{2,}s>", re.IGNORECASE | re.DOTALL)
@@ -644,6 +644,7 @@ class TtsEnhancementMixin:
             if match:
                 return "negative", _single_line(match.group(0), 80), raw_text
         positive_patterns = (
+            r"^(?:听|听听|听一下|想听|想听听|想听一下)(?:你|妳|你的|妳的)?(?:声音|声|语音)$",
             r"(用|发|来|回|回复|说|讲).{0,10}(语音|tts|朗读|念出来|读出来)",
             r"(语音|tts|朗读|念出来|读出来).{0,10}(回|回复|发|来|说|讲|一下|模式)",
             r"(开|启用|打开).{0,8}(语音|tts)",
@@ -1112,7 +1113,7 @@ TTS 朗读文本：
         if not tts_enabled:
             text = str(getattr(resp, "completion_text", "") or "")
             if re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
-                resp.completion_text = self._strip_any_tts_markup(text)
+                resp.completion_text = _normalize_outbound_punctuation_flow(self._strip_any_tts_markup(text))
                 logger.info(
                     "[PrivateCompanion] TTS强化未开启,已从模型回复中移除 TTS 标签: session=%s preview=%s",
                     _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
@@ -1126,7 +1127,7 @@ TTS 朗读文本：
                     cleaned = re.sub(r"<tts\b[^>]*>.*?</tts>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
                     cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned).strip() or self._tts_visible_fallback_text(text)
                     cleaned = cleaned or self._strip_any_tts_markup(text)
-                    resp.completion_text = cleaned
+                    resp.completion_text = _normalize_outbound_punctuation_flow(cleaned)
                     logger.info(
                         "[PrivateCompanion] TTS后处理模式已移除主模型自写语音标签,改由发送前后处理判断: session=%s preview=%s",
                         _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
@@ -1142,7 +1143,7 @@ TTS 朗读文本：
                     provider_kind = self._tts_provider_kind(provider_settings=provider_settings)
                     text = await self._ensure_tts_blocks_have_visible_chinese(text, event, provider_kind=provider_kind)
                 text = self._protect_tts_blocks_for_framework(text, event)
-            resp.completion_text = text
+            resp.completion_text = _normalize_outbound_punctuation_flow(text)
 
     async def apply_tts_enhancement_before_send(self, event: Any) -> None:
         feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)

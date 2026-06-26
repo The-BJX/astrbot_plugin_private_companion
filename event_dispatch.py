@@ -2775,18 +2775,21 @@ class EventDispatchMixin:
             item for item in recent[-12:]
             if isinstance(item, dict) and _safe_float(item.get("ts"), 0) >= active_ts
         ]
+        short_interjection_checker = getattr(self, "_group_scene_short_interjection", None)
         other_after_active = [
             item for item in after_active
             if str(item.get("sender_id") or "") and str(item.get("sender_id") or "") != str(sender_id or "")
+            and not (callable(short_interjection_checker) and short_interjection_checker(item.get("text")))
         ]
         seconds_since = now - active_ts if active_ts > 0 else 9999
         direct_markers = (
             "你", "妳", self.bot_name, "bot", "Bot", "刚才你", "你刚才", "你说", "你觉得", "你看",
-            "那你", "问你", "回你", "跟你说", "不是说你", "不是问你",
+            "那你", "问你", "回你", "跟你说", "不是说你", "不是问你", "你来", "按你说",
         )
         continuation_markers = (
             "所以", "那", "那我", "那你", "还有", "然后", "不过", "但是", "刚刚", "刚才",
-            "这个", "这样", "怎么", "为什么", "可以吗", "行吗", "是不是", "对吗", "呢", "？", "?",
+            "这个", "这样", "怎么", "为什么", "可以吗", "行吗", "是不是", "对吗", "对吧",
+            "是吧", "然后呢", "后来呢", "接着呢", "你呢", "所以呢", "你觉得", "？", "?",
         )
         redirect_markers = ("你们", "大家", "群里", "有人", "谁", "他", "她", "它", "他们", "她们")
         has_direct_cue = any(marker and marker in cleaned for marker in direct_markers)
@@ -2796,6 +2799,10 @@ class EventDispatchMixin:
         if looks_redirected_to_group:
             return False
         if has_direct_cue:
+            return True
+        score_getter = getattr(self, "_group_implicit_reply_score", None)
+        implicit_score = score_getter(cleaned) if callable(score_getter) else 0
+        if seconds_since <= 45 and implicit_score >= 40:
             return True
         if other_after_active:
             if not allow_llm:
@@ -3269,7 +3276,12 @@ class EventDispatchMixin:
 
         def _protected_cleanup_chunks(value: str) -> list[tuple[str, bool]]:
             protected_pattern = re.compile(
-                r"(?is)<tts\b[^>]*>.*?</tts>|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
+                r"(?is)"
+                r"<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?</(?:image|img|video|record|audio|file)>|/?>)"
+                r"|<tts\b[^>]*>.*?</tts>"
+                r"|<[^>\n]{1,240}\bpath=\"[^\"]{1,500}\"[^>\n]*>"
+                r"|<[^>\n]{1,240}\b(?:url|src)=\"[^\"]{1,500}\"[^>\n]*>"
+                r"|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
             )
             bracket_pairs = {
                 "(": ")",
@@ -3277,9 +3289,12 @@ class EventDispatchMixin:
                 "[": "]",
                 "【": "】",
                 "{": "}",
+                "「": "」",
+                "『": "』",
+                "《": "》",
             }
             bracket_closers = {closer: opener for opener, closer in bracket_pairs.items()}
-            quote_pairs = {"\"": "\"", "“": "”"}
+            quote_pairs = {"\"": "\"", "“": "”", "'": "'", "‘": "’"}
             chunks: list[tuple[str, bool]] = []
             current: list[str] = []
             protected = False

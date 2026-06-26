@@ -341,6 +341,44 @@ class GroupWakeupMixin:
             values.append(word)
         return values[: max(1, self.group_wakeup_generated_keyword_limit + len(manual))]
 
+    def _group_scene_short_interjection(self, text: Any) -> bool:
+        cleaned = _single_line(text, 80)
+        compact = re.sub(r"\s+", "", cleaned)
+        if not compact:
+            return True
+        if re.fullmatch(r"(?:\[图片\]|\[表情\]|\[动画表情\]|\[语音\]|\[视频\]|图片|表情|草|艹|6+|w+|哈{1,6}|笑死|确实|雀食|对|嗯|啊|哦|好|好耶|离谱|绷|急|乐|？|\?|!|！|。|…|~|～){1,6}", compact, flags=re.I):
+            return True
+        if len(compact) <= 8 and not re.search(r"(你|妳|bot|Bot|吗|呢|啥|什么|怎么|为什么|咋|然后|觉得|对吧|是吧|咋办|怎么办|帮|求)", compact):
+            return True
+        return False
+
+    def _group_implicit_reply_score(self, text: Any, *, matched_word: str = "", relation_hit: bool = False, mentions_bot: bool = False) -> int:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return 0
+        score = 0
+        if mentions_bot:
+            score += 70
+        if matched_word:
+            score += 30
+        if relation_hit:
+            score += 22
+        if re.search(r"(你|妳|bot|Bot|机器人).{0,12}(觉得|看|说|怎么说|咋看|会不会|能不能|要不要|帮|解释|评价)", cleaned):
+            score += 42
+        if re.search(r"(你觉得|你看|你说|你来|问你|那你|所以你|按你说)", cleaned):
+            score += 40
+        if re.search(r"(然后呢|然后嘞|后来呢|接着呢|所以呢|咋办|怎么办|怎么说|怎么看|咋看)", cleaned):
+            score += 32
+        if re.search(r"(对吧|是吧|对不对|是不是|可以吧|行吧|没错吧)[。！？!?~～]*$", cleaned):
+            score += 28
+        if re.search(r"(吗|嘛|呢|？|\?)", cleaned):
+            score += 20
+        if re.search(r"(帮|求|救|解释|回答|评价|推荐|看看|分析|判断)", cleaned):
+            score += 18
+        if len(cleaned) <= 40 and (matched_word or mentions_bot):
+            score += 18
+        return score
+
     def _group_wakeup_context_should_reply(
         self,
         group: dict[str, Any],
@@ -361,10 +399,15 @@ class GroupWakeupMixin:
         if str(scene.get("trigger") or "") in {"at_other", "reply_other"}:
             return False
         relation_hit = bool(self._select_worldbook_member_profiles_for_group(group, sender_id=sender_id, text=cleaned))
-        requestish = bool(re.search(r"(怎么看|怎么说|觉得|帮|问|叫|找|救|解释|回答|评价|要不要|可不可以|吗|呢|？|\?)", cleaned))
         mentions_bot = any(self._text_contains_wakeup_word(cleaned, word) for word in self._configured_group_direct_wakeup_words())
-        short_call = len(cleaned) <= 40 and bool(matched_word)
-        return bool(requestish or mentions_bot or relation_hit or short_call)
+        score = self._group_implicit_reply_score(
+            cleaned,
+            matched_word=matched_word,
+            relation_hit=relation_hit,
+            mentions_bot=mentions_bot,
+        )
+        threshold = 45 if str(scene.get("talking_to") or "") == "bot" else 58
+        return score >= threshold
 
     def _group_wakeup_fatigue(self, group: dict[str, Any]) -> dict[str, Any]:
         raw = group.get("group_wakeup_fatigue") if isinstance(group.get("group_wakeup_fatigue"), dict) else {}
@@ -1160,10 +1203,14 @@ class GroupWakeupMixin:
             return scene
         recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
         last_other = None
-        for item in reversed(recent[-6:]):
+        skipped_short = 0
+        for item in reversed(recent[-8:]):
             if not isinstance(item, dict):
                 continue
             if str(item.get("sender_id") or "") != sender_id:
+                if self._group_scene_short_interjection(item.get("text")):
+                    skipped_short += 1
+                    continue
                 last_other = item
                 break
         if last_other:
@@ -1174,7 +1221,7 @@ class GroupWakeupMixin:
                     "trigger": "reply_in_flow",
                     "talking_to": target_id,
                     "talking_to_name": self._group_member_identity_label(target_id, last_other.get("identity_name") or last_other.get("name"), limit=40),
-                    "reason": "recent_message_addressed_sender",
+                    "reason": "recent_message_addressed_sender_after_short_interjection" if skipped_short else "recent_message_addressed_sender",
                 })
             elif time_gap < 15 and str(last_other.get("talking_to") or "group") == "group":
                 target_id = str(last_other.get("sender_id") or "")
@@ -1182,7 +1229,7 @@ class GroupWakeupMixin:
                     "trigger": "quick_follow",
                     "talking_to": target_id,
                     "talking_to_name": self._group_member_identity_label(target_id, last_other.get("identity_name") or last_other.get("name"), limit=40),
-                    "reason": "quick_follow_after_group_message",
+                    "reason": "quick_follow_after_group_message_after_short_interjection" if skipped_short else "quick_follow_after_group_message",
                 })
         return scene
 

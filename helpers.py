@@ -120,6 +120,78 @@ def _strip_outbound_control_blocks(
     return normalized
 
 
+def _normalize_outbound_punctuation_flow(text: Any) -> str:
+    normalized = str(text or "")
+    if not normalized:
+        return ""
+    soft = "呢呀啊嘛吧哦喔诶欸啦哇哟"
+    short_token = r"(?:[A-Za-z0-9_\-/\\]{1,60}|[\u4e00-\u9fff]{1,10}|[\u4e00-\u9fffA-Za-z0-9_\-/\\]{1,24})"
+    normalized = re.sub(
+        rf"([A-Za-z0-9_\-/\\]{{1,60}})[。！？!?]\s+([{soft}])(?=[，,。！？!?~～\s]|$)",
+        r"\1\2",
+        normalized,
+    )
+    normalized = re.sub(
+        rf"({short_token})[。！？!?]\s+([{soft}])(?=[，,。！？!?~～\s]|$)",
+        r"\1\2",
+        normalized,
+    )
+    normalized = re.sub(
+        rf"(/[A-Za-z0-9_\-\u4e00-\u9fff]{{1,24}})[，,]\s*([{soft}])(?=[。！？!?~～\s]|$)",
+        r"\1 \2",
+        normalized,
+    )
+    command_like = r"(?:[A-Za-z0-9_\-]{1,24}|[\u4e00-\u9fff]{1,8}(?:/[\u4e00-\u9fffA-Za-z0-9_\-]{1,12})+)"
+    normalized = re.sub(
+        rf"({command_like})[，,]\s*([{soft}])(?=[。！？!?~～\s]|$)",
+        r"\1\2",
+        normalized,
+    )
+    normalized = re.sub(
+        rf"([A-Za-z0-9_\-/\\]{{1,60}})[，,]\s*([{soft}])(?=[。！？!?~～\s]|$)",
+        r"\1\2",
+        normalized,
+    )
+    normalized = re.sub(
+        rf"([\u4e00-\u9fff]{{1,10}})[，,]\s*([{soft}])(?=[。！？!?~～\s]|$)",
+        r"\1\2",
+        normalized,
+    )
+    return normalized
+
+
+def _semantic_text_compact(text: Any) -> str:
+    normalized = str(text or "")
+    normalized = re.sub(r"^(?:读后感|画面记录|札记\s*\d*|笔记\s*\d*)[:：]\s*", "", normalized.strip())
+    normalized = re.sub(r"[\s\r\n\t\"'“”‘’《》【】\[\]（）(){}<>.,，。！？!?；;：:、~～…—_\-]+", "", normalized)
+    return normalized.lower()
+
+
+def _text_similarity(left: Any, right: Any) -> float:
+    a = _semantic_text_compact(left)
+    b = _semantic_text_compact(right)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if len(shorter) >= 12 and shorter in longer:
+        return len(shorter) / max(1, len(longer))
+
+    def grams(value: str) -> set[str]:
+        if len(value) <= 2:
+            return {value}
+        return {value[index : index + 2] for index in range(len(value) - 1)}
+
+    left_grams = grams(a)
+    right_grams = grams(b)
+    overlap = len(left_grams & right_grams)
+    union = len(left_grams | right_grams)
+    if union <= 0:
+        return 0.0
+    return overlap / union
+
+
 _LEGACY_TAG_PATTERN = re.compile(r"&&([A-Za-z_][A-Za-z0-9_]*)&&")
 _LEGACY_TAG_CANONICAL_ALIASES = {
     "morning": "morning_greeting",

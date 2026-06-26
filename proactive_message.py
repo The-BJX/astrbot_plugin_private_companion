@@ -104,7 +104,16 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import (
+    _date_key,
+    _normalize_outbound_punctuation_flow,
+    _now_ts,
+    _safe_float,
+    _safe_int,
+    _single_line,
+    _strip_internal_message_blocks,
+    _today_key,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -1018,6 +1027,20 @@ class ProactiveMessageMixin:
         relationship_fact = self._format_proactive_relationship_fact(user)
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         current_schedule = self._format_schedule_context_for_prompt() or self._format_plan_item_for_prompt(current_item)
+        source_focused_reasons = {
+            "bili_video_share",
+            "news_share",
+            "web_exploration_share",
+            "creative_share",
+            "jm_cosmos_share",
+            "jm_cosmos_recommendation_request",
+        }
+        if reason in source_focused_reasons:
+            current_schedule = "（本轮不取生活片段，只围绕主动来源本身）"
+        elif reason == "group_share":
+            last_sidecar_at = _safe_float(user.get("last_group_share_life_sidecar_at"), 0)
+            if last_sidecar_at > 0 and _now_ts() - last_sidecar_at < 6 * 3600:
+                current_schedule = "（最近群分享已经顺手带过生活片段，本轮只围绕群里那件事）"
         state_hint = self._format_state_for_framework_prompt(
             state if isinstance(state, dict) else {},
             reason=reason,
@@ -1554,7 +1577,6 @@ class ProactiveMessageMixin:
                 try:
                     conv = await self._get_current_conversation_safely(umo, label=f"{label}_framework_read")
                     req.conversation = conv
-                    await self.inject_humanized_state(event, req)
 
                     async def _runner_factory():
                         return await build_main_agent(
@@ -5145,7 +5167,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return ""
         cleaned = self._strip_unsupported_proactive_agreement(cleaned)
         cleaned = self._trim_abrupt_closing_topic_shift(cleaned)
+        cleaned = _normalize_outbound_punctuation_flow(cleaned)
         cleaned = cleaned.replace("！?", "！？").replace("？!", "？！")
+        cleaned = re.sub(
+            r"([A-Za-z0-9_\-]{1,40})[。！？!?]\s+(呢|呀|啊|嘛|吧|哦|喔|诶)(?=[，,。！？!?~～\s]|$)",
+            r"\1\2",
+            cleaned,
+        )
         cleaned = re.sub(r"[ \t]+", " ", cleaned)
         raw_units: list[str] = []
         for raw_line in cleaned.splitlines():
@@ -5179,6 +5207,17 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         head = normalized[:2]
         tail = "".join(normalized[2:])
         return "\n".join(head + [tail])[:260]
+
+    def _group_share_text_has_life_sidecar(self, text: str) -> bool:
+        cleaned = _single_line(text, 500)
+        if "群" not in cleaned:
+            return False
+        life_tokens = (
+            "课", "老师", "同学", "作业", "草稿纸", "书", "笔", "桌", "窗", "路上",
+            "小猫", "猫", "饭", "吃", "喝", "杯", "天气", "雨", "太阳", "云", "风",
+            "困", "饿", "刚刚", "刚才", "这会儿",
+        )
+        return any(token in cleaned for token in life_tokens)
 
     def _strip_unsupported_proactive_agreement(self, text: str) -> str:
         cleaned = str(text or "").strip()

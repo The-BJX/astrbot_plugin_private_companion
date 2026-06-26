@@ -20,7 +20,7 @@ from astrbot.api import logger
 from quart import request, send_file
 
 from .constants import _REASON_TEXT
-from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _text_looks_garbled, _today_key
+from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
@@ -8619,6 +8619,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 pages = item.get("pages") if isinstance(item.get("pages"), list) else []
                 reading_impression = self._single_line(item.get("reading_impression") or item.get("impression"), 1000)
                 vision_impression = self._single_line(item.get("vision"), 1000)
+                show_vision_impression = bool(
+                    vision_impression
+                    and (
+                        not reading_impression
+                        or _text_similarity(vision_impression, reading_impression) < 0.72
+                    )
+                )
                 bot_rating = self._int(item.get("rating"))
                 user_rating = self._int(item.get("user_rating"))
                 rating_reason = self._single_line(item.get("rating_reason"), 180)
@@ -8709,7 +8716,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                                 f"Bot 评分：{bot_rating}/10" if bot_rating else "",
                                 f"用户评分：{user_rating}/10" if user_rating else "",
                                 f"评分理由：{user_rating_reason or rating_reason}" if (user_rating_reason or rating_reason) else "",
-                                f"画面记录：{vision_impression}" if vision_impression and vision_impression != reading_impression else "",
+                                f"画面记录：{vision_impression}" if show_vision_impression else "",
                                 f"关键词：{self._single_line(item.get('keyword'), 80)}" if self._single_line(item.get("keyword"), 80) else "",
                             )
                             if part

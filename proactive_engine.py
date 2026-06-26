@@ -4658,7 +4658,7 @@ class ProactiveEngineMixin:
     def _pick_life_thought_topic(self, reason: str = "") -> str:
         terms = self._worldview_terms()
         if reason == "group_share":
-            return f"{terms['group_chat']}里刚刚那个片段"
+            return f"{terms['group_chat']}里那段片段"
         if reason == "bili_video_share":
             return f"刚看到的{terms['video']}"
         if reason == "news_share":
@@ -4797,7 +4797,7 @@ class ProactiveEngineMixin:
     def _choose_proactive_topic(self, reason: str, user: dict[str, Any]) -> str:
         if reason == "group_share":
             share = user.get("group_share_context") if isinstance(user.get("group_share_context"), dict) else {}
-            return _single_line(share.get("topic"), 48) or _single_line(share.get("text"), 48) or "群里刚刚那个片段"
+            return _single_line(share.get("topic"), 48) or _single_line(share.get("text"), 48) or "群里那段片段"
         if reason == "bili_video_share":
             video = user.get("bilibili_video_context") if isinstance(user.get("bilibili_video_context"), dict) else {}
             return _single_line(video.get("title"), 48) or "刚刷到的 B 站视频"
@@ -5877,6 +5877,10 @@ class ProactiveEngineMixin:
             text = self._remove_unbacked_media_claims(text)
         text = self._visible_text_without_tts_reading(text, limit=1000)
         text = self._normalize_proactive_sentence_flow(text)
+        if reason == "group_share":
+            recency_repair = getattr(self, "_repair_group_share_recency_text", None)
+            if callable(recency_repair):
+                text = recency_repair(user, text)
         if not text:
             return reason, "", "", [], action_summary, effective_action
         if pre_poke_count > 0:

@@ -1287,12 +1287,17 @@ class NewsExplorationMixin:
         keywords = [str(token) for token in source.get("keywords") or [] if str(token).strip()] or ["早报", "日报"]
         queries: list[str] = []
         for keyword in keywords[:4]:
+            compact_keyword = f"AI{keyword}"
             queries.extend(
                 [
-                    f"site:bilibili.com/video {author} AI {keyword} {today}",
-                    f"site:bilibili.com/video {author} AI{keyword} {date_tokens[2]}",
-                    f"site:mp.weixin.qq.com/s {author} AI {keyword} {today}",
-                    f"{author} AI {keyword} 最新 文字版",
+                    f"AI {keyword} {today}",
+                    f"{compact_keyword} {today}",
+                    f"AI {keyword} {date_tokens[2]}",
+                    f"{compact_keyword} {date_tokens[2]}",
+                    f"site:mp.weixin.qq.com/s AI {keyword} {today}",
+                    f"site:mp.weixin.qq.com/s {compact_keyword} {today}",
+                    f"site:bilibili.com/video AI {keyword} {today}",
+                    f"site:bilibili.com/video {compact_keyword} {today}",
                 ]
             )
         queries = list(dict.fromkeys(queries))

@@ -1274,7 +1274,7 @@ const configDescriptions = {
   segmented_proactive_send_as_forward: "开启后，切出多段时优先打包成合并转发消息发送；平台不支持时自动回退为普通逐条分段。",
   segmented_proactive_split_mode: "regex 使用正则切句；words 使用分段词列表，更适合清理句号、空格等固定分隔符。网址会自动保护，不会被按点号或斜杠拆开。",
   segmented_proactive_regex: "分段模式为 regex 时使用的切分正则。",
-  segmented_proactive_split_words: "分段模式为 words 时使用的分段词。推荐一行一个；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部字符会自动保护，完整网址结束处可作为自然断点；括号或引号内部字符会跳过。",
+  segmented_proactive_split_words: "分段模式为 words 时使用的分段词。推荐一行一个；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部字符会自动保护，完整网址结束处可作为自然断点；括号、标题引号和 <image>/<video> 这类尖括号媒体块内部字符会跳过。",
   enable_segmented_proactive_content_cleanup: "开启后会在分段时清理分隔符或无意义字符。",
   segmented_proactive_content_cleanup_scope: "全段清理会移除片段内所有匹配内容；仅句尾清理只移除每段末尾连续出现的清理词/正则。",
   segmented_proactive_content_cleanup_rule: "regex 模式下的后清理正则。",
@@ -9132,10 +9132,10 @@ function escapeRegex(value) {
 }
 
 function segmentedProtectedCleanupChunks(value) {
-  const urlPattern = /\b(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/gi;
-  const bracketPairs = { "(": ")", "（": "）", "[": "]", "【": "】", "{": "}" };
+  const protectedPattern = /<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?<\/(?:image|img|video|record|audio|file)>|\/?>)|<tts\b[^>]*>.*?<\/tts>|<[^>\n]{1,240}\bpath="[^"]{1,500}"[^>\n]*>|<[^>\n]{1,240}\b(?:url|src)="[^"]{1,500}"[^>\n]*>|\b(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/gis;
+  const bracketPairs = { "(": ")", "（": "）", "[": "]", "【": "】", "{": "}", "「": "」", "『": "』", "《": "》" };
   const bracketOpeners = new Set(Object.keys(bracketPairs));
-  const quotePairs = { "\"": "\"", "“": "”" };
+  const quotePairs = { "\"": "\"", "“": "”", "'": "'", "‘": "’" };
   const chunks = [];
   let current = "";
   let protectedChunk = false;
@@ -9185,7 +9185,7 @@ function segmentedProtectedCleanupChunks(value) {
     }
   });
   let match = null;
-  while ((match = urlPattern.exec(text)) !== null) {
+  while ((match = protectedPattern.exec(text)) !== null) {
     feedPlain(text.slice(lastIndex, match.index));
     flush();
     chunks.push([match[0], true]);

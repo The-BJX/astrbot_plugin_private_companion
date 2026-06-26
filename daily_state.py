@@ -105,7 +105,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .helpers import _date_key, _normalize_outbound_punctuation_flow, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -7229,12 +7229,26 @@ class DailyStateMixin:
         cleaned = "，".join(kept).strip("，,。；; ")
         if not cleaned:
             cleaned = "放慢节奏处理手边的小事，把这段时间过得轻一点"
-        logger.info(
-            "[PrivateCompanion] 已清理日程中的未授权社交事实: field=%s before=%s after=%s",
-            field or "-",
-            _single_line(source, 120),
-            _single_line(cleaned, 120),
-        )
+        log_key = "|".join((field or "-", _single_line(source, 120), _single_line(cleaned, 120)))
+        now = _now_ts()
+        recent_logs = getattr(self, "_recent_social_fact_sanitize_logs", None)
+        if not isinstance(recent_logs, dict):
+            recent_logs = {}
+            setattr(self, "_recent_social_fact_sanitize_logs", recent_logs)
+        last_logged = _safe_float(recent_logs.get(log_key), 0)
+        if now - last_logged >= 1800:
+            logger.info(
+                "[PrivateCompanion] 已清理日程中的未授权社交事实: field=%s before=%s after=%s",
+                field or "-",
+                _single_line(source, 120),
+                _single_line(cleaned, 120),
+            )
+            recent_logs[log_key] = now
+            if len(recent_logs) > 200:
+                cutoff = now - 3600
+                for key, ts in list(recent_logs.items()):
+                    if _safe_float(ts, 0) < cutoff:
+                        recent_logs.pop(key, None)
         return cleaned
 
     def _sanitize_daily_plan_inplace(self, plan: dict[str, Any]) -> bool:
@@ -7422,17 +7436,20 @@ class DailyStateMixin:
         for key, snapshot in enhanced.items():
             if not isinstance(snapshot, dict):
                 continue
+            snapshot_changed = False
             summary = _single_line(snapshot.get("summary"), 180)
             if summary:
                 cleaned = self._sanitize_daily_plan_social_fact_text(summary, field=f"detail_enhanced_segments.{key}.summary")
                 if cleaned != summary:
                     snapshot["summary"] = cleaned
                     changed = True
+                    snapshot_changed = True
             if self._sanitize_state_variables_social_facts_inplace(
                 snapshot.get("state_variables"),
                 field=f"detail_enhanced_segments.{key}.state_variables",
             ):
                 changed = True
+                snapshot_changed = True
             for item in snapshot.get("today_events") or []:
                 if not isinstance(item, dict):
                     continue
@@ -7443,6 +7460,7 @@ class DailyStateMixin:
                 if cleaned != original:
                     item["event"] = cleaned
                     changed = True
+                    snapshot_changed = True
             for item in snapshot.get("proactive_events") or []:
                 if not isinstance(item, dict):
                     continue
@@ -7454,6 +7472,10 @@ class DailyStateMixin:
                     if cleaned != original:
                         item[field] = cleaned
                         changed = True
+                        snapshot_changed = True
+            if snapshot_changed and snapshot.get("status") == "done":
+                snapshot["coverage_repair_done"] = True
+                snapshot["social_fact_sanitized_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M:%S")
         return changed
 
     @staticmethod
@@ -8723,6 +8745,7 @@ class DailyStateMixin:
                 if decision == "rewrite":
                     rewritten_text = str(review_decision.get("text") or "").strip()
                     if rewritten_text:
+                        rewritten_text = _normalize_outbound_punctuation_flow(rewritten_text).strip()
                         logger.info(
                             "[PrivateCompanion] 主动消息发送前已润色: user=%s before=%s after=%s",
                             user_id,
@@ -9184,6 +9207,10 @@ class DailyStateMixin:
                         text=visible_text or text,
                         action_summary=action_summary,
                     )
+                if reason == "group_share":
+                    sidecar_checker = getattr(self, "_group_share_text_has_life_sidecar", None)
+                    if callable(sidecar_checker) and sidecar_checker(visible_text or text):
+                        current["last_group_share_life_sidecar_at"] = current["last_sent"]
                 self._mark_planned_candidate_status(current, "sent", "已发送")
                 self._update_proactive_audit(
                     audit_id,

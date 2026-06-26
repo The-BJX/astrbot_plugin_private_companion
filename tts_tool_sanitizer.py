@@ -68,8 +68,17 @@ class TtsToolSanitizerMixin:
             return None
         if not any(
             isinstance(item, dict)
-            and str(item.get("type") or "").strip().lower() == "plain"
-            and re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", str(item.get("text") or ""), flags=re.IGNORECASE)
+            and (
+                (
+                    str(item.get("type") or "").strip().lower() == "plain"
+                    and re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", str(item.get("text") or ""), flags=re.IGNORECASE)
+                )
+                or (
+                    str(item.get("type") or "").strip().lower() == "record"
+                    and not (item.get("path") or item.get("url"))
+                    and str(item.get("text") or item.get("content") or item.get("message") or "").strip()
+                )
+            )
             for item in messages
         ):
             return None
@@ -135,7 +144,29 @@ class TtsToolSanitizerMixin:
                     elif url:
                         components.append(Comp.Record.fromURL(url=url))
                     else:
-                        return f"error: messages[{idx}] must include path or url for record component."
+                        text = str(msg.get("text") or msg.get("content") or msg.get("message") or "").strip()
+                        if not text:
+                            return f"error: messages[{idx}] must include path or url for record component."
+                        processor = getattr(self, "_process_tts_tags", None)
+                        tts_components = (
+                            await processor(f"<pc_tts>{text}</pc_tts>", event, fallback_plain=text)
+                            if callable(processor) and bool(getattr(self, "enable_tts_enhancement", False))
+                            else []
+                        )
+                        if tts_components:
+                            components.extend(tts_components)
+                            logger.info(
+                                "[PrivateCompanion] 已接管 send_message_to_user 的 record 文本并转为插件 TTS: session=%s text=%s",
+                                _single_line(session, 120),
+                                _single_line(text, 120),
+                            )
+                        else:
+                            components.append(Comp.Plain(text=text))
+                            logger.warning(
+                                "[PrivateCompanion] send_message_to_user 的 record 文本无法生成语音,已改为普通文字: session=%s text=%s",
+                                _single_line(session, 120),
+                                _single_line(text, 120),
+                            )
                 elif msg_type == "video":
                     path = msg.get("path")
                     url = msg.get("url")

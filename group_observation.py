@@ -104,7 +104,16 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import (
+    _date_key,
+    _normalize_outbound_punctuation_flow,
+    _now_ts,
+    _safe_float,
+    _safe_int,
+    _single_line,
+    _strip_internal_message_blocks,
+    _today_key,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -644,7 +653,7 @@ class GroupObservationMixin:
         if not text:
             return None
         topic_title = _single_line(best_thread.get("title"), 60) if isinstance(best_thread, dict) else ""
-        topic = self._soften_topic_hook(topic_title or text) or "群里刚刚那段话题"
+        topic = self._soften_topic_hook(topic_title or text) or "群里那段话题"
         summary_items = []
         for item in candidate_lines[-6:]:
             if not isinstance(item, dict):
@@ -668,7 +677,8 @@ class GroupObservationMixin:
             member = members.get(participant_id) if isinstance(members, dict) else None
             name_hint = member.get("identity_name") or member.get("name") if isinstance(member, dict) else participant_id
             participant_names.append(self._group_member_identity_label(participant_id, name_hint, limit=16))
-        duration_minutes = max(1, int((max(_safe_float(item.get("ts"), now) for item in window if isinstance(item, dict)) - min(_safe_float(item.get("ts"), now) for item in window if isinstance(item, dict))) / 60))
+        latest_ts = max(_safe_float(item.get("ts"), now) for item in window if isinstance(item, dict))
+        duration_minutes = max(1, int((latest_ts - min(_safe_float(item.get("ts"), now) for item in window if isinstance(item, dict))) / 60))
         topic_summary = (
             f"这不是单独一句话,而是群里约 {duration_minutes} 分钟里围绕“{topic}”滚起来的一段话题；"
             f"参与者约 {len(participant_names) or active_speakers} 人"
@@ -688,6 +698,7 @@ class GroupObservationMixin:
             "window_minutes": duration_minutes,
             "score": score,
             "trigger_sender_id": trigger_sender_id,
+            "event_ts": latest_ts,
             "created_ts": now,
         }
 
@@ -741,6 +752,7 @@ class GroupObservationMixin:
         if score < 6:
             return None
         chosen = abusive[-1] if abusive else addressed[-1]
+        latest_ts = max(_safe_float(item.get("ts"), now) for item in window if isinstance(item, dict))
         speaker_id = str(chosen.get("sender_id") or "")
         speaker = self._group_member_identity_label(speaker_id, chosen.get("identity_name") or chosen.get("name"), limit=24)
         text = _single_line(chosen.get("text"), 100)
@@ -766,6 +778,7 @@ class GroupObservationMixin:
             "summary": " / ".join(summary_items[-4:]),
             "score": score,
             "trigger_sender_id": trigger_sender_id,
+            "event_ts": latest_ts,
             "created_ts": now,
         }
 
@@ -828,8 +841,10 @@ class GroupObservationMixin:
                 "topic_summary": _single_line(candidate.get("topic_summary"), 260),
                 "participants": candidate.get("participants") if isinstance(candidate.get("participants"), list) else [],
                 "window_minutes": _safe_int(candidate.get("window_minutes"), 0, 0),
+                "event_ts": _safe_float(candidate.get("event_ts"), _safe_float(candidate.get("created_ts"), now)),
                 "created_ts": now,
             }
+            target_absence = self._format_elapsed(now - member_last_seen).removesuffix("前")
             accepted = self._offer_proactive_candidate(
                 target_id,
                 user,
@@ -841,9 +856,9 @@ class GroupObservationMixin:
                     "topic": topic,
                     "score": score,
                     "motive": (
-                        f"群 {group_id} 刚刚有人一直闹 Bot，{self._group_member_identity_name(target_id, target_id, limit=24)} 已经 {self._format_elapsed(now - member_last_seen)} 没在群里冒泡，想及时私下说一声"
+                        f"群 {group_id} 里有人一直闹 Bot；{self._group_member_identity_name(target_id, target_id, limit=24)} 已经有 {target_absence}没在群里冒泡，想私下轻轻提一句"
                         if kind == "bot_harassment"
-                        else f"群 {group_id} 刚刚有个挺有意思的片段，{self._group_member_identity_name(target_id, target_id, limit=24)} 已经 {self._format_elapsed(now - member_last_seen)} 没在群里冒泡，想私下轻轻转述一下"
+                        else f"群 {group_id} 里有个挺有意思的片段；{self._group_member_identity_name(target_id, target_id, limit=24)} 已经有 {target_absence}没在群里冒泡，想私下轻轻转述一下"
                     ),
                     "context_key": "group_share_context",
                     "context": context,
@@ -1090,6 +1105,66 @@ class GroupObservationMixin:
                     member["recent_phrases"] = deduped[:8]
                     changed = True
         return changed
+
+    def _group_share_event_ts(self, share: dict[str, Any]) -> float:
+        if not isinstance(share, dict):
+            return 0.0
+        for key in ("event_ts", "latest_ts", "created_ts"):
+            value = _safe_float(share.get(key), 0)
+            if value > 0:
+                return value
+        return 0.0
+
+    def _group_share_age_seconds(self, share: dict[str, Any], *, now: float | None = None) -> float:
+        event_ts = self._group_share_event_ts(share)
+        if event_ts <= 0:
+            return 0.0
+        check_now = _now_ts() if now is None else now
+        return max(0.0, check_now - event_ts)
+
+    def _group_share_recency_label(self, share: dict[str, Any], *, now: float | None = None) -> str:
+        age = self._group_share_age_seconds(share, now=now)
+        if age < 10 * 60:
+            return "刚才"
+        if age < 45 * 60:
+            return f"{max(10, int(age // 60))} 分钟前"
+        if age < 6 * 3600:
+            return "前面"
+        check_now = _now_ts() if now is None else now
+        try:
+            event_day = datetime.fromtimestamp(self._group_share_event_ts(share)).date()
+            now_day = datetime.fromtimestamp(check_now).date()
+            delta_days = (now_day - event_day).days
+            if delta_days == 0:
+                return "今天早些时候"
+            if delta_days == 1:
+                return "昨天"
+            if delta_days > 1:
+                return f"{delta_days} 天前"
+        except Exception:
+            pass
+        return "前面"
+
+    def _repair_group_share_recency_text(self, user: dict[str, Any], text: str) -> str:
+        cleaned = str(text or "")
+        share = user.get("group_share_context") if isinstance(user.get("group_share_context"), dict) else {}
+        if not cleaned or not isinstance(share, dict):
+            return cleaned
+        if self._group_share_age_seconds(share) < 30 * 60:
+            return cleaned
+        label = self._group_share_recency_label(share)
+        if label in {"刚才", "刚刚"}:
+            return cleaned
+        parts = re.split(r"([。！？!?；;\n])", cleaned)
+        repaired: list[str] = []
+        for index in range(0, len(parts), 2):
+            segment = parts[index]
+            punct = parts[index + 1] if index + 1 < len(parts) else ""
+            if any(token in segment for token in ("群", "群里", "群友", "Bot", "bot", "机器人")):
+                segment = re.sub(r"群里\s*(?:刚刚|刚才)", f"群里{label}", segment)
+                segment = re.sub(r"(?:刚刚|刚才)\s*(?=有人|那个|那条|这条|这段|群友|Bot|bot|机器人)", label, segment)
+            repaired.append(segment + punct)
+        return "".join(repaired)
 
     def _cleanup_group_relationship_edges(self, group: dict[str, Any], *, now: float | None = None) -> bool:
         edges = group.get("relationship_edges")
@@ -1885,8 +1960,10 @@ class GroupObservationMixin:
         share = user.get("group_share_context")
         if not isinstance(share, dict):
             return ""
-        if _now_ts() - _safe_float(share.get("created_ts"), 0) > 3 * 3600:
+        age_seconds = self._group_share_age_seconds(share)
+        if age_seconds > 3 * 3600:
             return ""
+        recency_text = self._group_share_recency_label(share)
         group_id = _single_line(share.get("group_id"), 24)
         speaker = _single_line(share.get("speaker"), 64) or "群友"
         text = _single_line(share.get("text"), 120)
@@ -1898,7 +1975,8 @@ class GroupObservationMixin:
         window_minutes = _safe_int(share.get("window_minutes"), 0, 0)
         parts = [
             f"群聊分享线索：群 {group_id}" if group_id else "群聊分享线索",
-            f"时间窗：最近约 {window_minutes} 分钟的一段群聊" if window_minutes else "",
+            f"发生时间：{recency_text}的一段群聊；超过 30 分钟不要写成刚刚/刚才",
+            f"时间窗：约 {window_minutes} 分钟的一段群聊" if window_minutes else "",
             f"参与者：{participant_text}" if participant_text else "",
             "身份锚点：[QQ:...] 只用于内部区分群友,不要写进最终私聊消息。" if participant_text or speaker else "",
             f"这段话题发生了什么：{topic_summary}" if topic_summary else "",
@@ -1915,8 +1993,8 @@ class GroupObservationMixin:
         if not isinstance(share, dict):
             return "群聊分享上下文已失效"
         check_now = _now_ts() if now is None else now
-        created_ts = _safe_float(share.get("created_ts"), 0)
-        if created_ts <= 0 or check_now - created_ts > 3 * 3600:
+        event_ts = self._group_share_event_ts(share)
+        if event_ts <= 0 or check_now - event_ts > 3 * 3600:
             return "群聊分享候选已过期"
         group_id = _single_line(share.get("group_id"), 40)
         if not group_id:
@@ -1928,7 +2006,7 @@ class GroupObservationMixin:
         members = group.get("members") if isinstance(group.get("members"), dict) else {}
         member = members.get(str(user_id)) if isinstance(members, dict) else None
         member_last_seen = _safe_float((member or {}).get("last_seen"), 0) if isinstance(member, dict) else 0
-        if member_last_seen > created_ts:
+        if member_last_seen > event_ts:
             return f"用户已在群 {group_id} 重新发言（{self._format_elapsed(check_now - member_last_seen)}前）"
         if member_last_seen > 0 and check_now - member_last_seen < 8 * 3600:
             return f"用户距上次群发言不足 8 小时（{self._format_elapsed(check_now - member_last_seen)}前）"
@@ -2207,6 +2285,7 @@ class GroupObservationMixin:
         reply = self._clean_group_interjection_reply(generated)
         if not reply:
             return
+        reply = _normalize_outbound_punctuation_flow(reply)
         if self._response_review_flags(reply, {}):
             return
         quote_message_id = self._resolve_quote_message_id(

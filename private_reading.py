@@ -104,7 +104,16 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import (
+    _date_key,
+    _now_ts,
+    _safe_float,
+    _safe_int,
+    _single_line,
+    _strip_internal_message_blocks,
+    _text_similarity,
+    _today_key,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -611,6 +620,28 @@ class PrivateReadingMixin:
             if (normalized := self._normalize_private_reading_tag(part))
         }
 
+    def _dedupe_private_reading_impression(self, text: Any, *, limit: int = 420) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        chunks: list[str] = []
+        for part in re.split(r"(?:\n+|(?<=[。！？!?；;])\s*)", cleaned):
+            part = _single_line(part.strip(), 240)
+            part = re.sub(r"^(?:读后感|画面记录|札记\s*\d*|笔记\s*\d*)[:：]\s*", "", part).strip()
+            if part:
+                chunks.append(part)
+        if not chunks:
+            chunks = [_single_line(cleaned, limit)]
+        kept: list[str] = []
+        for chunk in chunks:
+            if any(_text_similarity(chunk, existing) >= 0.72 for existing in kept):
+                continue
+            kept.append(chunk)
+            if len("".join(kept)) >= limit:
+                break
+        result = "".join(kept).strip()
+        return _single_line(result or cleaned, limit)
+
     def _jm_cosmos_detail_blocked_by_tags(self, detail: dict[str, Any]) -> str:
         blocked_tags = self._private_reading_blocked_tag_set()
         if not blocked_tags:
@@ -734,7 +765,7 @@ class PrivateReadingMixin:
             parsed = self._parse_jm_cosmos_vision_result(text, sampled_pages or [])
             if parsed.get("impression") or parsed.get("page_comments"):
                 return parsed
-            return {"impression": _single_line(text, 420), "page_comments": []}
+            return {"impression": self._dedupe_private_reading_impression(text), "page_comments": []}
         except Exception as e:
             logger.debug(f"[PrivateCompanion] 夹层阅读视觉分析失败: {e}")
             return {}
@@ -790,7 +821,7 @@ class PrivateReadingMixin:
             if len(comments) >= 8:
                 break
         return {
-            "impression": _single_line(data.get("impression"), 420),
+            "impression": self._dedupe_private_reading_impression(data.get("impression")),
             "rating": _safe_int(data.get("rating"), 0, 0, 10),
             "rating_reason": _single_line(data.get("rating_reason") or data.get("reason"), 160),
             "preference_tags": [
@@ -1011,9 +1042,9 @@ class PrivateReadingMixin:
             "keyword": _single_line(album.get("keyword"), 24),
             "author": _single_line(album.get("author"), 40),
             "tags": list(album.get("tags") or [])[:8] if isinstance(album.get("tags"), list) else [],
-            "impression": _single_line(album.get("impression"), 600),
-            "reading_impression": _single_line(album.get("reading_impression") or album.get("impression"), 600),
-            "vision": _single_line(album.get("vision"), 500),
+            "impression": self._dedupe_private_reading_impression(album.get("impression"), limit=600),
+            "reading_impression": self._dedupe_private_reading_impression(album.get("reading_impression") or album.get("impression"), limit=600),
+            "vision": self._dedupe_private_reading_impression(album.get("vision"), limit=500),
             "rating": _safe_int(album.get("rating"), 0, 0, 10),
             "rating_reason": _single_line(album.get("rating_reason"), 160),
             "user_rating": _safe_int(album.get("user_rating"), 0, 0, 10),
@@ -1299,7 +1330,7 @@ class PrivateReadingMixin:
                     page_paths,
                     sampled_pages=sampled_pages,
                 )
-                vision = _single_line(vision_result.get("impression"), 420) if isinstance(vision_result, dict) else ""
+                vision = self._dedupe_private_reading_impression(vision_result.get("impression")) if isinstance(vision_result, dict) else ""
                 page_comments = vision_result.get("page_comments", []) if isinstance(vision_result, dict) else []
                 bot_rating = _safe_int(vision_result.get("rating"), 0, 0, 10) if isinstance(vision_result, dict) else 0
                 rating_reason = _single_line(vision_result.get("rating_reason"), 160) if isinstance(vision_result, dict) else ""
@@ -1325,8 +1356,8 @@ class PrivateReadingMixin:
                     "photo_count": photo_count,
                     "image_count": len(pages),
                     "vision": vision,
-                    "impression": _single_line(impression, 420),
-                    "reading_impression": _single_line(impression, 420),
+                    "impression": self._dedupe_private_reading_impression(impression),
+                    "reading_impression": self._dedupe_private_reading_impression(impression),
                     "rating": bot_rating,
                     "rating_reason": rating_reason,
                     "preference_tags": [_single_line(tag, 24) for tag in preference_tags[:8] if _single_line(tag, 24)] if isinstance(preference_tags, list) else [],
