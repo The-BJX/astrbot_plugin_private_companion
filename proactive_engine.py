@@ -2035,17 +2035,21 @@ class ProactiveEngineMixin:
             and _safe_float(rel_state.get("hurt_until"), 0) > _now_ts()
         )
         if relationship_blocked or emotion_blocked:
+            gate_until = max(
+                _safe_float(rel_state.get("hurt_until"), 0),
+                _safe_float(rel_state.get("backoff_until"), 0),
+            )
             adjuster = getattr(self, "_defer_or_clean_emotion_blocked_plan", None)
             if callable(adjuster):
                 adjusted_reason = adjuster(user, now=now)
             else:
                 adjusted_reason = "情绪/关系状态处于收敛期"
             logger.info(
-                "[PrivateCompanion] 情绪/关系闸门拦截主动: user=%s mode=%s score=%s hurt_until=%s reason=%s",
+                "[PrivateCompanion] 情绪/关系闸门拦截主动: user=%s mode=%s score=%s gate_until=%s reason=%s",
                 _single_line(user.get("user_id") or user.get("umo") or user.get("nickname"), 80),
                 _single_line(rel_state.get("mode"), 24),
                 _safe_int(rel_state.get("mood_score"), 0, -100, 100),
-                int(_safe_float(rel_state.get("hurt_until"), 0)),
+                int(gate_until),
                 _single_line(rel_state.get("last_hurt_reason"), 80),
             )
             return False, adjusted_reason

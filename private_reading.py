@@ -884,6 +884,7 @@ class PrivateReadingMixin:
         password = self._generate_bookshelf_password()
         secret["password"] = password
         secret["basis"] = "local_random_numeric_v2"
+        secret["reason"] = self._bookshelf_password_fallback_reason(password)
         secret["created_at"] = _now_ts()
         if basis:
             secret["previous_basis"] = basis
@@ -898,9 +899,142 @@ class PrivateReadingMixin:
         basis = _single_line(secret.get("basis"), 40)
         if password and not self._bookshelf_password_should_rotate(password, basis):
             return password
-        candidate = self._ensure_bookshelf_password()
+        prompt = f"""
+请作为这个 Bot 自己,私下给书柜夹层设置一个密码。
+
+要求：
+1. 密码必须是纯数字,只能包含 0-9。
+2. 长度 4 到 6 位,不要太长。
+3. 可以参考人格气质和世界观氛围,但不要参考用户或自己的生日、纪念日、日期、手机号、QQ号、账号、门牌号等现实身份信息。
+4. 不要输出 1234、123456、111111、520520、1314、重复数字、顺子或明显常见密码。
+5. reason 用一句简短的第一人称说明为什么会选这个数字,只能写成气质、手感、私密暗号、书柜氛围之类,不得提生日、纪念日、日期、手机号、QQ号、账号或现实身份信息。
+6. 只输出 JSON,不要使用 Markdown。格式：{{"password":"482719","reason":"这串数字像我随手藏进书页里的暗号,有点偏心又不太好猜。"}}
+
+【Bot 名称】
+{self.bot_name}
+
+【人格】
+{self._get_default_persona_prompt()}
+
+【生活人设补充】
+{self.schedule_persona_prompt or "（无）"}
+
+【世界观补充】
+{self.schedule_worldview_prompt or "（无）"}
+""".strip()
+        raw = await self._llm_call(
+            prompt,
+            max_tokens=40,
+            provider_id=self._task_provider(
+                self.dream_diary_provider_id,
+                self.mai_style_provider_id,
+                self.llm_provider_id,
+            ),
+        )
+        payload = self._parse_bookshelf_password_payload(raw)
+        candidate = _single_line(payload.get("password"), 12)
+        reason = _single_line(payload.get("reason"), 120)
+        if not candidate or self._bookshelf_password_should_rotate(candidate, ""):
+            candidate = self._ensure_bookshelf_password()
+            secret["basis"] = "local_random_numeric_fallback"
+            secret["reason"] = self._bookshelf_password_fallback_reason(candidate)
+        else:
+            secret["password"] = candidate
+            secret["basis"] = "bot_private_llm_numeric_v2"
+            secret["reason"] = reason or self._bookshelf_password_fallback_reason(candidate)
+            secret["created_at"] = _now_ts()
+            if basis:
+                secret["previous_basis"] = basis
         self._save_data_sync()
         return _single_line(secret.get("password") or candidate, 12)
+
+    @staticmethod
+    def _bookshelf_password_fallback_reason(password: str = "") -> str:
+        value = _single_line(password, 12)
+        if value:
+            return "这串数字只是一枚书柜夹层里的私密暗号,没有生日或日期含义。"
+        return "这是一枚书柜夹层里的私密暗号,没有生日或日期含义。"
+
+    @staticmethod
+    def _parse_bookshelf_password_payload(raw: Any) -> dict[str, str]:
+        text = str(raw or "").strip()
+        payload: dict[str, Any] = {}
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except Exception:
+                payload = {}
+        password = re.sub(r"\D", "", _single_line(payload.get("password"), 24))
+        if not password:
+            password = re.sub(r"\D", "", _single_line(text, 40))
+        reason = _single_line(payload.get("reason"), 120)
+        forbidden_reason_terms = (
+            "生日", "纪念日", "日期", "手机号", "手机", "QQ", "qq", "账号", "账户", "门牌", "身份证",
+            "12月", "月份", "日子",
+        )
+        if any(term in reason for term in forbidden_reason_terms):
+            reason = ""
+        return {"password": password, "reason": reason}
+
+    async def _ensure_bookshelf_password_reason_async(self, password: str = "") -> str:
+        secret = self.data.setdefault("bookshelf_secret", {})
+        if not isinstance(secret, dict):
+            secret = {}
+            self.data["bookshelf_secret"] = secret
+        password = _single_line(password or secret.get("password"), 12)
+        reason = self._sanitize_bookshelf_password_reason(secret.get("reason"))
+        if reason:
+            return reason
+        if not password:
+            password = await self._ensure_bookshelf_password_async()
+        prompt = f"""
+请作为这个 Bot 自己,给书柜夹层密码写一句内部理由。
+
+要求：
+1. 密码是：{password}
+2. 只写为什么自己会选这串数字,像私密暗号、书页边缘、抽屉手感、人格气质之类。
+3. 不要把它解释成生日、纪念日、日期、手机号、QQ号、账号、门牌号或任何现实身份信息。
+4. 不要说这是随机数、插件、配置或系统生成。
+5. 只输出一句中文,不要超过 45 字。
+
+【Bot 名称】
+{self.bot_name}
+
+【人格】
+{self._get_default_persona_prompt()}
+""".strip()
+        raw = await self._llm_call(
+            prompt,
+            max_tokens=80,
+            provider_id=self._task_provider(
+                self.dream_diary_provider_id,
+                self.mai_style_provider_id,
+                self.llm_provider_id,
+            ),
+        )
+        reason = self._sanitize_bookshelf_password_reason(raw)
+        if not reason:
+            reason = self._bookshelf_password_fallback_reason(password)
+        secret["reason"] = reason
+        secret["reason_generated_at"] = _now_ts()
+        self._save_data_sync()
+        return reason
+
+    @staticmethod
+    def _sanitize_bookshelf_password_reason(value: Any) -> str:
+        reason = _single_line(value, 120).strip(" ：:，,。.!！?？\"'`")
+        if not reason:
+            return ""
+        forbidden_reason_terms = (
+            "生日", "纪念日", "日期", "手机号", "手机", "QQ", "qq", "账号", "账户", "门牌", "身份证",
+            "12月", "月份", "日子", "随机", "插件", "配置", "系统生成",
+        )
+        if any(term in reason for term in forbidden_reason_terms):
+            return ""
+        return reason[:80]
 
     @staticmethod
     def _bookshelf_password_should_rotate(password: str, basis: str = "") -> bool:

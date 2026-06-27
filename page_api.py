@@ -9019,6 +9019,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
         jm_items = [item for item in shelf_items if isinstance(item, dict) and item.get("type") == "jm_album"]
         jm_state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
+        secret_state = data.get("bookshelf_secret") if isinstance(data.get("bookshelf_secret"), dict) else {}
+        reason_sanitizer = getattr(self.plugin, "_sanitize_bookshelf_password_reason", None)
+        password_hint = ""
+        if callable(reason_sanitizer):
+            try:
+                password_hint = reason_sanitizer(secret_state.get("reason"))
+            except Exception:
+                password_hint = ""
+        else:
+            password_hint = self._single_line(secret_state.get("reason"), 80)
+        if not password_hint:
+            password_hint = "提示会在通过“陪伴 输出夹层密码”生成后显示。"
         last_album = jm_state.get("last_album") if isinstance(jm_state.get("last_album"), dict) else {}
         if last_album and not any(str(item.get("album_id") or item.get("id") or "") == str(last_album.get("id") or "") for item in jm_items):
             jm_items.append(
@@ -9351,6 +9363,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "secret_count": locked_count,
             "diary_count": 1 if diaries else 0,
             "jm_album_count": len(jm_items),
+            "password_hint": password_hint,
             "public_books": public_books,
             "secret_books": secret_books,
         }

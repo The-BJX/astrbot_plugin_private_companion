@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from .helpers import _now_ts, _safe_float, _safe_int, _set_into_config, _single_line

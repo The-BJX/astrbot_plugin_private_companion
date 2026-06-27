@@ -6606,6 +6606,12 @@ function renderBookshelf() {
   $("#bookshelfDiaryCount").textContent = bookshelf.diary_count ?? 0;
   $("#bookshelfJmCount").textContent = bookshelf.jm_album_count ?? 0;
   $("#bookshelfLockState").textContent = bookshelf.unlocked ? "已解锁" : "未解锁";
+  const passwordHint = String(bookshelf.password_hint || "").trim();
+  const passwordHintEl = $("#bookshelfPasswordHint");
+  if (passwordHintEl) {
+    passwordHintEl.textContent = passwordHint ? `提示：${passwordHint}` : "";
+    passwordHintEl.hidden = !passwordHint;
+  }
   $("#bookshelfIntro").textContent = creative.enabled
     ? "上层书架"
     : "创作未开启";

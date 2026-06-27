@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from astrbot.api import logger
+
 LEGACY_PROACTIVE_ACTIONS_KEY = "enabled_proactive_actions"
 
 LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {

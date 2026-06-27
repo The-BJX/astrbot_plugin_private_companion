@@ -8367,6 +8367,24 @@ class DailyStateMixin:
             is_troubleshooting_for_send = self._is_troubleshooting_proactive_plan(user)
             should_send, reason = self._should_send(user)
             if not should_send:
+                if not is_troubleshooting_for_send and _safe_float(user.get("next_proactive_at"), 0) <= now:
+                    guard_reason = _single_line(reason, 120)
+                    if any(token in guard_reason for token in ("情绪", "关系", "收敛", "免打扰", "安静", "太频繁", "刚聊过")):
+                        async with self._data_lock:
+                            current_for_guard = self._get_user(user_id)
+                            if _safe_float(current_for_guard.get("next_proactive_at"), 0) <= now:
+                                delay_seconds = random.uniform(30 * 60, 90 * 60)
+                                current_for_guard["next_proactive_at"] = now + delay_seconds
+                                current_for_guard["planned_proactive_window_start_at"] = current_for_guard["next_proactive_at"]
+                                current_for_guard["planned_proactive_best_until_at"] = current_for_guard["next_proactive_at"] + 45 * 60
+                                current_for_guard["planned_proactive_expire_at"] = current_for_guard["next_proactive_at"] + 90 * 60
+                                self._save_data_sync()
+                                logger.info(
+                                    "[PrivateCompanion] 主动发送检查未通过且无未来调度,已兜底延后: user=%s reason=%s delay=%ss",
+                                    user_id,
+                                    guard_reason,
+                                    int(delay_seconds),
+                                )
                 if is_troubleshooting_for_send and now >= _safe_float(user.get("next_proactive_at"), 0):
                     async with self._data_lock:
                         current_for_failed_check = self._get_user(user_id)

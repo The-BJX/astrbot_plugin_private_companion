@@ -4039,22 +4039,39 @@ class PrivateCompanionPlugin(
     @filter.on_llm_request()
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM 请求前注入陪伴状态、群聊上下文、工具边界和合并消息阅读上下文。"""
+        def log_bookshelf_secret_skip(reason: str, user: dict[str, Any] | None = None, text: str = "") -> None:
+            logger_func = getattr(self, "_log_bookshelf_secret_skip", None)
+            if not callable(logger_func):
+                return
+            source_text = text
+            if not source_text:
+                source_text = (
+                    getattr(event, "private_companion_group_text", "")
+                    or getattr(event, "message_str", "")
+                    or ""
+                )
+            logger_func(reason, source_text, user if isinstance(user, dict) else None)
+
         if not self.enabled:
             return
         if not hasattr(req, "system_prompt"):
+            log_bookshelf_secret_skip("llm_request_no_system_prompt")
             self._release_framework_session_lock_for_event(event, label="llm_request_no_system_prompt")
             return
         self._remember_external_llm_request_for_token_stats(event, req)
         proactive_only_limited = self._proactive_only_limited_passive_event(event)
         if self._proactive_only_blocks_passive_event(event, "llm_request"):
+            log_bookshelf_secret_skip("proactive_only_mode")
             self._release_framework_session_lock_for_event(event, label="proactive_only_mode")
             return
         if proactive_only_limited and not self._proactive_only_llm_request_needs_full_path():
             await self._append_proactive_only_unlocked_llm_request_fragments(event, req)
+            log_bookshelf_secret_skip("proactive_only_limited_light_path")
             return
         is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
         rest_allowed, rest_reason = await self._should_reply_during_rest(event, is_private_chat=is_private_chat)
         if not rest_allowed:
+            log_bookshelf_secret_skip(f"rest_reply_gate:{_single_line(rest_reason, 60)}")
             self._release_framework_session_lock_for_event(event, label="rest_reply_gate")
             self._stop_reply_for_rest_gate(event, rest_reason)
             return
@@ -4111,6 +4128,7 @@ class PrivateCompanionPlugin(
             await self._append_worldbook_mentions_to_request(event, req, mode="light")
             await self._append_conditional_tool_instructions_to_request(event, req)
             await self._append_environment_perception_to_request(event, req)
+            log_bookshelf_secret_skip("passive_injection_disabled", backlog_user if is_private_chat and isinstance(backlog_user, dict) else None)
             return
 
         if not is_private_chat:
@@ -4230,18 +4248,22 @@ class PrivateCompanionPlugin(
                     )
             await self._append_conditional_tool_instructions_to_request(event, req)
             await self._append_environment_perception_to_request(event, req)
+            log_bookshelf_secret_skip("group_chat")
             return
         try:
             user_id = str(event.get_sender_id())
         except Exception:
+            log_bookshelf_secret_skip("private_sender_missing")
             self._release_framework_session_lock_for_event(event, label="private_sender_missing")
             return
         raw_users = self.data.get("users", {})
         current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
         if not isinstance(current_user, dict):
+            log_bookshelf_secret_skip("private_user_missing")
             self._release_framework_session_lock_for_event(event, label="private_user_missing")
             return
         if not self._is_target_private_user(user_id, current_user) or not current_user.get("enabled", True):
+            log_bookshelf_secret_skip("private_user_disabled", current_user)
             self._release_framework_session_lock_for_event(event, label="private_user_disabled")
             return
         await self._acquire_framework_session_lock_for_event(event, label="private_llm_request")
@@ -4251,6 +4273,18 @@ class PrivateCompanionPlugin(
         state = await self._ensure_daily_state(skip_conversation_summary=True, passive_fast=True)
         inbound_text = _single_line(getattr(event, "message_str", "") or current_user.get("last_user_message"), 260)
         lightweight_passive = self._is_lightweight_private_passive_inbound(inbound_text)
+        bookshelf_signal_getter = getattr(self, "_bookshelf_secret_signal_info", None)
+        bookshelf_signal = bookshelf_signal_getter(inbound_text) if callable(bookshelf_signal_getter) else {}
+        if lightweight_passive and isinstance(bookshelf_signal, dict) and bookshelf_signal.get("likely"):
+            lightweight_passive = False
+            logger.info(
+                "[PrivateCompanion] 夹层密码请求退出轻量被动链路: user=%s direct=%s context=%s access=%s text=%s",
+                user_id,
+                ",".join(bookshelf_signal.get("direct_matches") or []) or "-",
+                ",".join(bookshelf_signal.get("context_matches") or []) or "-",
+                ",".join(bookshelf_signal.get("access_matches") or []) or "-",
+                inbound_text,
+            )
         prompt_surface = PromptSurface()
         state_changed = False
         state_update_reason = "legacy"
@@ -4630,9 +4664,7 @@ class PrivateCompanionPlugin(
             except Exception as exc:
                 logger.debug("[PrivateCompanion] 私聊引用图片 prompt 锚点写入失败: %s", exc)
         if lightweight_passive:
-            bookshelf_skip_logger = getattr(self, "_log_bookshelf_secret_skip", None)
-            if callable(bookshelf_skip_logger):
-                bookshelf_skip_logger("lightweight_passive", inbound_text, current_user)
+            log_bookshelf_secret_skip("lightweight_passive", current_user, inbound_text)
         if not lightweight_passive:
             hidden_creative_context = self._format_hidden_creative_context_for_reply(inbound_text)
             if hidden_creative_context:
@@ -4694,10 +4726,12 @@ class PrivateCompanionPlugin(
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         if marker in current_prompt or marker in current_turn_prompt:
+            log_bookshelf_secret_skip("state_marker_already_present", current_user, inbound_text)
             await self._append_conditional_tool_instructions_to_request(event, req)
             return
         if not injection:
             logger.debug("[PrivateCompanion] 被动状态提示词片段为空,跳过状态 marker 注入")
+            log_bookshelf_secret_skip("empty_passive_injection", current_user, inbound_text)
             await self._append_conditional_tool_instructions_to_request(event, req)
             return
         injection_placement = "prompt" if self._append_turn_prompt_fragment_by_position(
@@ -5191,11 +5225,13 @@ class PrivateCompanionPlugin(
                 response = "这个要直接问我本人。她会不会说、怎么说,要看当时的人格和心情。"
             elif bookshelf_password_output_requested:
                 password = await self._ensure_bookshelf_password_async()
+                password_reason = await self._ensure_bookshelf_password_reason_async(password)
                 secret = self.data.get("bookshelf_secret", {}) if isinstance(self.data.get("bookshelf_secret"), dict) else {}
                 response = (
                     "当前书柜夹层密码：\n"
                     f"{password}\n"
-                    f"生成方式：{_single_line(secret.get('basis'), 40) or '未知'}"
+                    f"生成方式：{_single_line(secret.get('basis'), 40) or '未知'}\n"
+                    f"理由：{password_reason or '这是一枚书柜夹层里的私密暗号。'}"
                 )
             elif action in bookshelf_password_reset_actions:
                 secret = self.data.setdefault("bookshelf_secret", {})

@@ -1034,7 +1034,9 @@ class ProactiveMixin:
         )
         rel_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
         hurt_until = _safe_float(rel_state.get("hurt_until"), 0)
-        base_after = max(check_now + 90 * 60, hurt_until + random.uniform(15 * 60, 75 * 60))
+        backoff_until = _safe_float(rel_state.get("backoff_until"), 0)
+        gate_until = max(hurt_until, backoff_until)
+        base_after = max(check_now + 90 * 60, gate_until + random.uniform(15 * 60, 75 * 60))
         if intimate or mode in {"refusing", "backoff"}:
             self._mark_planned_candidate_status(user, "deferred", f"情绪 {mode}: 亲密主动候选已清理/延后")
             self._clear_pending_proactive_plan(user)
