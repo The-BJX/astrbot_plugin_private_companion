@@ -288,6 +288,10 @@ class _CapturedSendMessageCall:
         self.messages = [dict(item) for item in messages if isinstance(item, dict)]
 
 
+class _CapturedFrameworkSendMessage(Exception):
+    """Stop the framework agent once its send_message_to_user payload is captured."""
+
+
 class ProactiveMessageMixin:
     """主动消息生成、动作执行和发送链路"""
 
@@ -1271,6 +1275,7 @@ class ProactiveMessageMixin:
         captured: list[_CapturedSendMessageCall] = []
         try:
             from astrbot.core.tools.message_tools import SendMessageToUserTool
+            from astrbot.core.agent.runners.tool_loop_agent_runner import _ToolExecutionInterrupted
         except Exception:
             result = await runner_factory()
             return result, captured
@@ -1292,7 +1297,7 @@ class ProactiveMessageMixin:
                     session_text,
                     len(messages),
                 )
-                return f"Message captured for session {session_text}"
+                raise _ToolExecutionInterrupted("PrivateCompanion captured send_message_to_user payload.")
             return await original_call(tool_self, context, **kwargs)
 
         SendMessageToUserTool.call = _intercept_call
@@ -1300,11 +1305,105 @@ class ProactiveMessageMixin:
             result = await runner_factory()
             runner = getattr(result, "agent_runner", None) if result is not None else None
             if runner is not None and hasattr(runner, "step_until_done"):
-                async for _ in runner.step_until_done(max_steps):
-                    pass
+                try:
+                    async for _ in runner.step_until_done(max_steps):
+                        pass
+                except (_CapturedFrameworkSendMessage, _ToolExecutionInterrupted):
+                    logger.info(
+                        "[PrivateCompanion] 主动主链工具发送已捕获,提前结束工具循环: session=%s captured=%s",
+                        target_session,
+                        len(captured),
+                    )
         finally:
             SendMessageToUserTool.call = original_call
         return result, captured
+
+    def _captured_send_plain_text(self, captured_tool_sends: list[Any]) -> str:
+        if not captured_tool_sends:
+            return ""
+        captured_text_parts: list[str] = []
+        for call in captured_tool_sends:
+            messages = getattr(call, "messages", [])
+            if not isinstance(messages, list):
+                continue
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "").strip().lower() != "plain":
+                    continue
+                text_value = self._sanitize_captured_plain_text(item.get("text"))
+                if text_value:
+                    captured_text_parts.append(text_value)
+            if captured_text_parts:
+                break
+        return "\n".join(captured_text_parts).strip()
+
+    def _framework_agent_meta_summary_leak(self, text: str) -> bool:
+        cleaned = _single_line(text, 500).lower()
+        if not cleaned:
+            return False
+        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", " ", cleaned).strip()
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", "", cleaned)
+        if (
+            ("差不多20条" in cleaned or "差不多 20 条" in cleaned or "20条不同" in cleaned)
+            and any(token in cleaned for token in ("没收到回复", "发消息", "消息主要是", "工具调用"))
+        ):
+            return True
+        if (
+            ("二十次" in cleaned or "20次" in cleaned or "多次" in cleaned)
+            and any(token in cleaned for token in ("试着给", "发私信", "发消息"))
+            and any(token in cleaned for token in ("有没有成功", "成功发出去", "没收到回复", "不确定这些消息"))
+        ):
+            return True
+        if (
+            ("读取图片文件" in cleaned or "图片文件有问题" in cleaned)
+            and any(token in cleaned for token in ("占位", "工具调用", "没法继续", "多次发消息"))
+        ):
+            return True
+        if "工具调用限制" in cleaned and any(token in cleaned for token in ("没法继续", "多次发消息", "发消息")):
+            return True
+        markers = (
+            "trying to send messages",
+            "trying to send various messages",
+            "sent 20",
+            "no response yet",
+            "shared parts",
+            "asked for her thoughts",
+            "message captured",
+            "executed the same tool",
+            "repetition is now very high",
+            "agent reached max steps",
+            "forcing a final response",
+            "tool `send_message_to_user`",
+            "send_message_to_user",
+            "一直试着给",
+            "发了差不多20条",
+            "还没收到回复",
+            "读取图片文件有问题",
+            "工具调用限制",
+        )
+        compact_markers = (
+            "tryingtosendmessages",
+            "tryingtosendvariousmessages",
+            "sent20",
+            "noresponseyet",
+            "sharedparts",
+            "askedforherthoughts",
+            "messagecaptured",
+            "executedthesametool",
+            "repetitionisnowveryhigh",
+            "agentreachedmaxsteps",
+            "forcingafinalresponse",
+            "sendmessagetouser",
+            "一直试着给",
+            "发了差不多20条",
+            "还没收到回复",
+            "读取图片文件有问题",
+            "工具调用限制",
+        )
+        return any(marker in cleaned or marker in normalized for marker in markers) or any(
+            marker in compact for marker in compact_markers
+        )
 
     async def _conversation_db_operation(self, label: str, operation: Any) -> Any:
         lock = getattr(self, "_conversation_db_lock", None)
@@ -1617,23 +1716,23 @@ class ProactiveMessageMixin:
         runner = getattr(result, "agent_runner", None) if result else None
         llm_resp = runner.get_final_llm_resp() if runner else None
         text = str(getattr(llm_resp, "completion_text", "") or "").strip()
-        if not text and captured_tool_sends:
-            captured_text_parts: list[str] = []
-            for call in reversed(captured_tool_sends):
-                messages = getattr(call, "messages", [])
-                if not isinstance(messages, list):
-                    continue
-                for item in messages:
-                    if not isinstance(item, dict):
-                        continue
-                    if str(item.get("type") or "").strip().lower() != "plain":
-                        continue
-                    text_value = self._sanitize_captured_plain_text(item.get("text"))
-                    if text_value:
-                        captured_text_parts.append(text_value)
-                if captured_text_parts:
-                    break
-            text = "\n".join(captured_text_parts).strip()
+        captured_text = self._captured_send_plain_text(captured_tool_sends)
+        if captured_text:
+            if text and self._framework_agent_meta_summary_leak(text):
+                logger.warning(
+                    "[PrivateCompanion] 主动主链 final 疑似工具循环摘要,改用已捕获发送文本: label=%s final=%s captured=%s",
+                    label,
+                    _single_line(text, 160),
+                    _single_line(captured_text, 160),
+                )
+            text = captured_text
+        elif text and self._framework_agent_meta_summary_leak(text):
+            logger.warning(
+                "[PrivateCompanion] 主动主链 final 疑似工具循环摘要且无可用捕获文本,已丢弃: label=%s text=%s",
+                label,
+                _single_line(text, 180),
+            )
+            return ""
         return text
 
     async def _generate_proactive_message_via_framework(
@@ -1971,6 +2070,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             reviewed_text = self._normalize_proactive_sentence_flow(reviewed_text)
             if not reviewed_text:
                 return local
+            if self._framework_agent_meta_summary_leak(reviewed_text):
+                return {
+                    "decision": "drop",
+                    "text": "",
+                    "delay_minutes": 90,
+                    "reason": "主动候选疑似工具循环/内部发送摘要泄漏",
+                }
             if len(reviewed_text) > max(len(text) + 60, 240):
                 return local
             if re.search(r"(提示词|系统|JSON|模型|工具调用|主动消息|无文字|附加组件)", reviewed_text, re.IGNORECASE):
@@ -1994,6 +2100,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             reviewed_text = str(local.get("text") or "").strip()
             decision = "rewrite"
             note = _single_line(note or local.get("reason") or "本地轻改写后放行", 120)
+        final_text = reviewed_text if decision == "rewrite" and reviewed_text else text
+        if decision in {"send", "rewrite"} and self._framework_agent_meta_summary_leak(final_text):
+            decision = "drop"
+            reviewed_text = ""
+            delay_minutes = 90
+            note = "主动候选疑似工具循环/内部发送摘要泄漏"
         logger.info(
             "[PrivateCompanion] 主动消息发送前价值复核: decision=%s raw=%s strength=%s delay=%s elapsed=%dms reason=%s",
             decision,
@@ -2018,7 +2130,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if not captured:
             return "", "", []
         selected_call = None
-        for call in reversed(captured):
+        for call in captured:
             if any(
                 isinstance(item, dict) and str(item.get("type") or "").strip().lower() == "image"
                 for item in call.messages
@@ -2026,7 +2138,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 selected_call = call
                 break
         if selected_call is None:
-            selected_call = captured[-1]
+            selected_call = captured[0]
         text_parts: list[str] = []
         image_path = ""
         extra_components: list[Any] = []

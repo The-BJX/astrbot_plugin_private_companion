@@ -414,7 +414,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.3.0",
+    "5.3.6",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -1175,6 +1175,8 @@ class PrivateCompanionPlugin(
         self._apply_tts_runtime_overrides()
         if self._cleanup_legacy_proactive_prompt_traces():
             self._save_data_sync()
+        if self._cleanup_framework_meta_leak_records():
+            self._save_data_sync()
         if self._sanitize_runtime_social_facts_inplace():
             self._save_data_sync()
         if self._merge_private_user_alias_records():
@@ -1577,10 +1579,8 @@ class PrivateCompanionPlugin(
 
     @filter.on_decorating_result()
     async def suppress_framework_error_leak_before_send(self, event: AstrMessageEvent):
-        """避免 AstrBot/Core 的技术错误兜底文本直接发进聊天。"""
+        """避免 AstrBot/Core 的技术错误和工具循环摘要直接发进聊天。"""
         if not self.enabled:
-            return
-        if self._proactive_only_blocks_passive_event(event, "llm_request"):
             return
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []
@@ -1598,10 +1598,34 @@ class PrivateCompanionPlugin(
             "image_url",
             "invalidparameter",
         )
-        if not any(marker in compact for marker in error_markers):
+        tool_loop_markers = (
+            "trying to send messages",
+            "sent 20",
+            "no response yet",
+            "shared parts",
+            "asked for her thoughts",
+            "message captured",
+            "executed the same tool",
+            "repetition is now very high",
+            "agent reached max steps",
+            "forcing a final response",
+            "tool `send_message_to_user`",
+            "send_message_to_user",
+            "一直试着给",
+            "发了差不多20条",
+            "还没收到回复",
+        )
+        marker_kind = "framework_error" if any(marker in compact for marker in error_markers) else ""
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        if not marker_kind and callable(meta_leak_checker) and meta_leak_checker(text):
+            marker_kind = "tool_loop_summary"
+        if not marker_kind and any(marker in compact for marker in tool_loop_markers):
+            marker_kind = "tool_loop_summary"
+        if not marker_kind:
             return
         logger.warning(
-            "[PrivateCompanion] 已拦截框架错误文本外发: session=%s preview=%s",
+            "[PrivateCompanion] 已拦截框架异常文本外发: kind=%s session=%s preview=%s",
+            marker_kind,
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             _single_line(text, 180),
         )

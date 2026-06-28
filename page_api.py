@@ -9975,6 +9975,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         for raw in raw_audit:
             if not isinstance(raw, dict):
                 continue
+            meta_leak_checker = getattr(self.plugin, "_framework_agent_meta_summary_leak", None)
+            if callable(meta_leak_checker) and (
+                meta_leak_checker(str(raw.get("text_preview") or ""))
+                or meta_leak_checker(str(raw.get("text") or ""))
+                or meta_leak_checker(str(raw.get("note") or ""))
+            ):
+                continue
             user_id = str(raw.get("user_id") or "")
             user = users.get(user_id) if isinstance(users.get(user_id), dict) else {}
             user_summary = self._user_summary(user_id, user) if user_id else {}

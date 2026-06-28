@@ -612,6 +612,9 @@ class EventDispatchMixin:
         text = self._legacy_proactive_prompt_trace_text(item)
         if not text:
             return False
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        if callable(meta_leak_checker) and meta_leak_checker(text):
+            return True
         markers = (
             "【怎么写这条消息】",
             "【禁止事项】",

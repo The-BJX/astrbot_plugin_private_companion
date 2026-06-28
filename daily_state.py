@@ -1243,10 +1243,19 @@ class DailyStateMixin:
         raw = user.get("recent_proactive_topics", [])
         if not isinstance(raw, list):
             raw = []
-        kept = [
-            item for item in raw
-            if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) <= 6 * 3600
-        ]
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        kept: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            if now - _safe_float(item.get("ts"), 0) > 6 * 3600:
+                continue
+            if callable(meta_leak_checker) and (
+                meta_leak_checker(str(item.get("text") or ""))
+                or meta_leak_checker(str(item.get("signature") or ""))
+            ):
+                continue
+            kept.append(item)
         user["recent_proactive_topics"] = kept[-12:]
         return user["recent_proactive_topics"]
 
@@ -1271,6 +1280,12 @@ class DailyStateMixin:
         return False
 
     def _remember_proactive_topic(self, user: dict[str, Any], *, text: str = "", topic: str = "", motive: str = "") -> None:
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        if callable(meta_leak_checker) and (
+            meta_leak_checker(text) or meta_leak_checker(topic) or meta_leak_checker(motive)
+        ):
+            logger.warning("[PrivateCompanion] 跳过记录疑似工具循环摘要的主动话题记忆")
+            return
         signature = self._proactive_topic_signature(text, topic, motive)
         if not signature:
             return
@@ -1500,9 +1515,12 @@ class DailyStateMixin:
         if not recent:
             return ""
         lines: list[str] = []
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
         for item in recent[-4:]:
             text = _single_line(item.get("text"), 80)
             if not text:
+                continue
+            if callable(meta_leak_checker) and meta_leak_checker(text):
                 continue
             when = self._format_timestamp_elapsed(item.get("ts"))
             lines.append(f"- {when}说过：{text}")
@@ -7448,7 +7466,32 @@ class DailyStateMixin:
         if isinstance(recent_topics, list):
             kept_topics: list[Any] = []
             topics_changed = False
+            meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
             for index, topic in enumerate(recent_topics):
+                if isinstance(topic, dict):
+                    if callable(meta_leak_checker) and (
+                        meta_leak_checker(str(topic.get("text") or ""))
+                        or meta_leak_checker(str(topic.get("signature") or ""))
+                    ):
+                        topics_changed = True
+                        continue
+                    item_changed = False
+                    cleaned_topic = dict(topic)
+                    for key in ("text", "topic", "motive"):
+                        original_value = _single_line(cleaned_topic.get(key), 180)
+                        if not original_value:
+                            continue
+                        cleaned_value = self._sanitize_daily_plan_social_fact_text(
+                            original_value,
+                            field=f"{field}.recent_proactive_topics.{index}.{key}",
+                        )
+                        if cleaned_value != original_value:
+                            cleaned_topic[key] = cleaned_value
+                            item_changed = True
+                    if item_changed:
+                        topics_changed = True
+                    kept_topics.append(cleaned_topic)
+                    continue
                 original = _single_line(topic, 180)
                 if not original:
                     continue
@@ -7494,6 +7537,109 @@ class DailyStateMixin:
                     changed = True
         if changed:
             data["social_fact_sanitized_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M:%S")
+        return changed
+
+    def _cleanup_framework_meta_leak_records(self) -> bool:
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return False
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        if not callable(meta_leak_checker):
+            return False
+
+        def has_meta(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                return meta_leak_checker(value)
+            return meta_leak_checker(str(value))
+
+        def list_item_has_meta(item: Any, fields: tuple[str, ...]) -> bool:
+            if isinstance(item, dict):
+                return any(has_meta(item.get(field)) for field in fields)
+            return has_meta(item)
+
+        changed = False
+        removed_counts: dict[str, int] = {}
+
+        def filter_list(owner: dict[str, Any], key: str, fields: tuple[str, ...], *, limit: int | None = None) -> None:
+            nonlocal changed
+            raw = owner.get(key)
+            if not isinstance(raw, list):
+                return
+            kept = [item for item in raw if not list_item_has_meta(item, fields)]
+            if limit is not None:
+                kept = kept[-limit:]
+            if len(kept) != len(raw):
+                owner[key] = kept
+                removed_counts[key] = removed_counts.get(key, 0) + len(raw) - len(kept)
+                changed = True
+
+        users = data.get("users")
+        if isinstance(users, dict):
+            for user in users.values():
+                if not isinstance(user, dict):
+                    continue
+                for key in (
+                    "last_companion_message",
+                    "last_proactive_message",
+                    "last_proactive_text",
+                    "last_reply_text",
+                ):
+                    if has_meta(user.get(key)):
+                        user[key] = ""
+                        removed_counts[key] = removed_counts.get(key, 0) + 1
+                        changed = True
+                filter_list(user, "recent_proactive_topics", ("text", "signature", "topic", "motive"), limit=12)
+                filter_list(user, "recent_reply_topics", ("text", "signature", "topic"), limit=18)
+                filter_list(user, "action_consequences", ("text", "summary", "action_summary"), limit=18)
+                continuity = user.get("state_continuity")
+                if isinstance(continuity, dict):
+                    for key in ("last_action_text", "last_reply_text", "last_message_text"):
+                        if has_meta(continuity.get(key)):
+                            continuity[key] = ""
+                            count_key = f"state_continuity.{key}"
+                            removed_counts[count_key] = removed_counts.get(count_key, 0) + 1
+                            changed = True
+
+        filter_list(data, "proactive_audit_log", ("text_preview", "text", "note", "topic", "motive"), limit=120)
+
+        troubleshooting = data.get("troubleshooting_test_results")
+        if isinstance(troubleshooting, dict):
+            for key, result in list(troubleshooting.items()):
+                if list_item_has_meta(result, ("text_preview", "detail", "error")):
+                    troubleshooting.pop(key, None)
+                    removed_counts["troubleshooting_test_results"] = removed_counts.get("troubleshooting_test_results", 0) + 1
+                    changed = True
+
+        prompt_root = data.get("recent_prompt_injections")
+        if isinstance(prompt_root, dict):
+            for kind, items in list(prompt_root.items()):
+                if not isinstance(items, list):
+                    continue
+                kept: list[Any] = []
+                removed = 0
+                for item in items:
+                    item_has_meta = list_item_has_meta(item, ("preview", "content", "title"))
+                    if not item_has_meta and isinstance(item, dict):
+                        modules = item.get("modules")
+                        if isinstance(modules, list):
+                            item_has_meta = any(
+                                list_item_has_meta(module, ("preview", "content", "title", "key"))
+                                for module in modules
+                            )
+                    if item_has_meta:
+                        removed += 1
+                        continue
+                    kept.append(item)
+                if removed:
+                    prompt_root[kind] = kept[:8] if kind == "tts" else kept[:5]
+                    count_key = f"recent_prompt_injections.{kind}"
+                    removed_counts[count_key] = removed_counts.get(count_key, 0) + removed
+                    changed = True
+
+        if changed:
+            logger.info("[PrivateCompanion] 已清理框架工具循环摘要污染记录: %s", removed_counts)
         return changed
 
     def _sanitize_story_plan_social_facts_inplace(self, story_plan: dict[str, Any]) -> bool:
@@ -8959,6 +9105,25 @@ class DailyStateMixin:
                     )
                     self._debug_tick_skip(user_id, note, prefix="延后" if decision == "defer" else "取消")
                     continue
+            meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+            if callable(meta_leak_checker) and text and meta_leak_checker(text):
+                note = "主动正文疑似工具循环/内部发送摘要泄漏"
+                async with self._data_lock:
+                    current_for_meta_leak = self._get_user(user_id)
+                    current_for_meta_leak["proactive_sending"] = False
+                    current_for_meta_leak["proactive_sending_started_at"] = 0
+                    self._mark_planned_candidate_status(current_for_meta_leak, "blocked", note)
+                    self._update_proactive_audit(audit_id, status="cancelled", note=note, text=text)
+                    self._clear_pending_proactive_plan(current_for_meta_leak)
+                    self._schedule_next_proactive(current_for_meta_leak, now=_now_ts(), delay_hours=(1.5, 4.0))
+                    self._save_data_sync()
+                logger.warning(
+                    "[PrivateCompanion] 主动消息发送前硬拦截元叙述泄漏: user=%s text=%s",
+                    user_id,
+                    _single_line(text, 180),
+                )
+                self._debug_tick_skip(user_id, note, prefix="取消")
+                continue
             placeholder_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)
             if callable(placeholder_cleaner):
                 cleaned_text = placeholder_cleaner(text)

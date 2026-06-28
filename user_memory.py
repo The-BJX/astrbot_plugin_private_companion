@@ -1167,11 +1167,14 @@ class UserMemoryMixin:
             user["action_consequences"] = items
         now = _now_ts()
         kept: list[dict[str, Any]] = []
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
         for item in items:
             if not isinstance(item, dict):
                 continue
             created = _safe_float(item.get("ts"), now)
             if now - created > 7 * 86400:
+                continue
+            if callable(meta_leak_checker) and meta_leak_checker(str(item.get("text") or "")):
                 continue
             kept.append(item)
         if len(kept) != len(items):
@@ -1262,7 +1265,9 @@ class UserMemoryMixin:
         continuity["last_action_ts"] = _now_ts()
         continuity["last_action"] = action
         continuity["last_action_reason"] = _single_line(reason, 50)
-        continuity["last_action_text"] = _single_line(_strip_internal_message_blocks(text), 120)
+        cleaned_text = _single_line(_strip_internal_message_blocks(text), 120)
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        continuity["last_action_text"] = "" if callable(meta_leak_checker) and meta_leak_checker(cleaned_text) else cleaned_text
 
     def _note_proactive_afterglow_sent(
         self,
@@ -3179,7 +3184,15 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
             raw = []
         kept = [
             item for item in raw
-            if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) <= self.passive_topic_memory_hours * 3600
+            if isinstance(item, dict)
+            and now - _safe_float(item.get("ts"), 0) <= self.passive_topic_memory_hours * 3600
+            and not (
+                callable(getattr(self, "_framework_agent_meta_summary_leak", None))
+                and (
+                    getattr(self, "_framework_agent_meta_summary_leak")(str(item.get("text") or ""))
+                    or getattr(self, "_framework_agent_meta_summary_leak")(str(item.get("signature") or ""))
+                )
+            )
         ]
         user["recent_reply_topics"] = kept[-18:]
         return user["recent_reply_topics"]
