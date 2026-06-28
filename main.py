@@ -1589,6 +1589,35 @@ class PrivateCompanionPlugin(
             return
         text = "\n".join(str(getattr(comp, "text", "") or "") for comp in chain).strip()
         compact = text.lower()
+        receipt_compact = re.sub(r"[\s。.!！?？,，；;:：]+", "", text)
+        if receipt_compact in {
+            "消息已发送",
+            "消息已发送会等对方回复",
+            "messagesent",
+        } or re.fullmatch(r"(?i)message\s+sent\s+to\s+session\s+\S+", text):
+            atrelay_result = getattr(event, "private_companion_atrelay_tool_result", None)
+            if isinstance(atrelay_result, dict) and _single_line(atrelay_result.get("status"), 24) in {"success", "scheduled"}:
+                final_reply = _single_line(atrelay_result.get("final_reply"), 80) or "说过啦。"
+                logger.info(
+                    "[PrivateCompanion] 工具发送回执已改为自然短句: before=%s after=%s",
+                    _single_line(text, 120),
+                    final_reply,
+                )
+                event.set_result(self._build_result_from_chain([Plain(final_reply)]))
+                return
+            logger.warning(
+                "[PrivateCompanion] 已拦截孤立工具发送回执外发: session=%s text=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(text, 120),
+            )
+            empty_result = self._build_result_from_chain([])
+            try:
+                empty_result.stop_event()
+            except Exception:
+                pass
+            event.set_result(empty_result)
+            event.stop_event()
+            return
         error_markers = (
             "error occurred while processing agent request",
             "all chat models failed",

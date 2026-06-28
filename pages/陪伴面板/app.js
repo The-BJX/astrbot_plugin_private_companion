@@ -11789,6 +11789,10 @@ function renderProviderSummary(providers) {
   const qualityRecommended = keys.filter((key) => providerGuides[key]?.preference === "quality").length;
   const vision = providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述";
   $("#providerSummary").innerHTML = `
+    <div class="provider-cost-notice">
+      <b>成本提醒</b>
+      <span>火山方舟协作计划免费额度将在 2026-06-30 结束。使用火山方舟 Provider 时，请检查每日 Token 限额和后台任务开关，注意成本控制。</span>
+    </div>
     <div class="provider-summary-card strong">
       <span>单独配置</span>
       <b>${configured}/${keys.length}</b>
