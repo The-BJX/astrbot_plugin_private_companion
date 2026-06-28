@@ -841,6 +841,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "diagnostics": diagnostics,
                     "sqlite": sqlite_status,
                     "chain_tests": self._troubleshooting_test_results(data),
+                    "recent_photo_generations": self._recent_photo_generation_summary(data),
                     "prompt_injections": self._prompt_injection_summary(data),
                     "proactive_runtime": proactive_tasks.get("runtime", {}),
                     "token_budget": token_stats.get("budget", {}),
@@ -2030,6 +2031,37 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             if isinstance(value, dict)
         }
 
+    def _recent_photo_generation_summary(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = data.get("recent_photo_generations")
+        if not isinstance(raw, list):
+            return []
+        items: list[dict[str, Any]] = []
+        for item in raw[:8]:
+            if not isinstance(item, dict):
+                continue
+            ts = self._float(item.get("ts"))
+            prompt = str(item.get("prompt") or "")
+            items.append(
+                {
+                    "ts": ts,
+                    "time": self.plugin._format_timestamp_elapsed(ts),
+                    "trace": self._single_line(item.get("trace"), 40),
+                    "session": self._single_line(item.get("session"), 100),
+                    "kind": self._single_line(item.get("kind"), 30),
+                    "backend": self._single_line(item.get("backend"), 80),
+                    "ok": bool(item.get("ok")),
+                    "prompt": prompt[:500],
+                    "prompt_preview": self._single_line(prompt, 180),
+                    "path": self._single_line(item.get("path"), 260),
+                    "note": self._single_line(item.get("note"), 220),
+                    "reference": bool(item.get("reference")),
+                    "reference_path": self._single_line(item.get("reference_path"), 260),
+                    "image_size": self._single_line(item.get("image_size"), 40),
+                    "elapsed_ms": self._int(item.get("elapsed_ms")),
+                }
+            )
+        return items
+
     def _prompt_injection_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         raw = data.get("recent_prompt_injections")
         if not isinstance(raw, dict):
@@ -2118,6 +2150,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "file_size": self._int(result.get("file_size")),
             "detail": self._single_line(result.get("detail"), 220),
             "error": self._single_line(result.get("error"), 220),
+            "prompt": self._single_line(result.get("prompt"), 500),
             "text_preview": self._single_line(result.get("text_preview"), 220),
             "action": self._single_line(result.get("action"), 60),
             "reason": self._single_line(result.get("reason"), 40),
@@ -5938,6 +5971,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "plugin_specific_persona_id",
             "target_user_ids",
             "private_user_aliases",
+            "private_user_delivery_aliases",
             "target_platform",
             "environment_perception_timezone",
             "holiday_country",
@@ -6807,6 +6841,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             if self.plugin._merge_private_user_alias_records():
                 self.plugin._save_data_sync()
             return
+        if key == "private_user_delivery_aliases":
+            self.plugin.private_user_delivery_aliases = self.plugin._parse_private_user_aliases(value)
+            users = self.plugin.data.get("users", {})
+            if isinstance(users, dict):
+                for raw_user_id, user in users.items():
+                    if isinstance(user, dict):
+                        self.plugin._ensure_private_user_umo(str(raw_user_id), user)
+                self.plugin._save_data_sync()
+            return
         if key == "worldbook_self_registration_block_words":
             parser = getattr(self.plugin, "_parse_text_list_config", None)
             if callable(parser):
@@ -7146,6 +7189,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "plugin_specific_persona_id",
             "target_user_ids",
             "private_user_aliases",
+            "private_user_delivery_aliases",
             "target_platform",
             "environment_perception_timezone",
             "holiday_country",
@@ -7507,7 +7551,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             }
             text = aliases.get(text, text)
             return text if text in {"group", "same_user"} else "group"
-        if key == "private_user_aliases":
+        if key in {"private_user_aliases", "private_user_delivery_aliases"}:
             return str(value or "").strip()[:4000]
         if key == "worldbook_config_paths":
             return str(value or "").strip()[:1000]

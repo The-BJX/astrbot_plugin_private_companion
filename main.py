@@ -577,6 +577,7 @@ class PrivateCompanionPlugin(
         self.require_private_opt_in = self._cfg_bool(c, "require_private_opt_in", True)
         self.target_user_ids = self._cfg_raw(c, "target_user_ids", [])
         self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))
+        self.private_user_delivery_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_delivery_aliases", ""))
         self._load_tts_enhancement_config(c)
         self.target_platform = self._cfg_str(c, "target_platform", "aiocqhttp", "aiocqhttp")
         self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
@@ -1613,6 +1614,66 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
+    async def suppress_group_question_wakeup_collision_reply(self, event: AstrMessageEvent):
+        """答疑唤醒的群聊回复发送前复核，避免 Bot 碰瓷式插话。"""
+        if not self.enabled:
+            return
+        if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
+            return
+        if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
+            return
+        if not bool(getattr(self, "enable_response_self_review", True)):
+            return
+        if str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower() == "local_only":
+            return
+        if bool(getattr(event, "_private_companion_group_question_review_done", False)):
+            return
+        setattr(event, "_private_companion_group_question_review_done", True)
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id:
+            return
+        scene = getattr(event, "private_companion_group_scene", None)
+        if not isinstance(scene, dict) or str(scene.get("trigger") or "") != "group_wakeup_question":
+            return
+        result = event.get_result()
+        if result is None:
+            return
+        try:
+            if hasattr(result, "is_llm_result") and not result.is_llm_result():
+                return
+        except Exception:
+            pass
+        chain = list(getattr(result, "chain", []) or [])
+        if not chain:
+            return
+        reply_text = self._chain_text_for_forbidden_recall(chain, limit=600)
+        if not reply_text:
+            return
+        try:
+            review = await self._review_group_question_wakeup_reply_before_send(event, reply_text=reply_text)
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 群聊答疑回复发送前复核失败,默认放行: %s",
+                _single_line(exc, 160),
+            )
+            return
+        if str(review.get("decision") or "") != "drop":
+            return
+        logger.info(
+            "[PrivateCompanion] 已拦截群聊答疑碰瓷回复: group=%s reason=%s text=%s",
+            group_id,
+            _single_line(review.get("reason"), 120),
+            _single_line(reply_text, 160),
+        )
+        empty_result = self._build_result_from_chain([])
+        try:
+            empty_result.stop_event()
+        except Exception:
+            pass
+        event.set_result(empty_result)
+        event.stop_event()
+
+    @filter.on_decorating_result()
     async def apply_tts_enhancement_before_send_hook(self, event: AstrMessageEvent):
         """发送前处理 TTS强化标签和自动语音转换。"""
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
@@ -1671,6 +1732,92 @@ class PrivateCompanionPlugin(
             pass
         event.set_result(empty_result)
         event.stop_event()
+
+    async def _review_group_question_wakeup_reply_before_send(
+        self,
+        event: AstrMessageEvent,
+        *,
+        reply_text: str,
+    ) -> dict[str, str]:
+        provider_id = self._task_provider(self.response_review_provider_id, self.group_followup_judge_provider_id, self.mai_style_provider_id)
+        if not provider_id:
+            return {"decision": "send", "reason": "未配置复核模型"}
+        scene = getattr(event, "private_companion_group_scene", None)
+        if not isinstance(scene, dict):
+            scene = {}
+        group_id = self._extract_group_id_from_event(event)
+        group = self._get_group(group_id) if group_id else {}
+        recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
+        recent_lines: list[str] = []
+        for item in recent[-8:]:
+            if not isinstance(item, dict):
+                continue
+            name = self._group_member_identity_label(
+                str(item.get("sender_id") or ""),
+                item.get("identity_name") or item.get("name"),
+                limit=20,
+            )
+            msg = _single_line(item.get("text"), 90)
+            if msg:
+                recent_lines.append(f"- {name}: {msg}")
+        inbound_text = _single_line(
+            getattr(event, "private_companion_group_text", "") or getattr(event, "message_str", "") or "",
+            220,
+        )
+        wakeup = group.get("last_group_wakeup") if isinstance(group.get("last_group_wakeup"), dict) else {}
+        prompt = f"""
+判断这条群聊回复是否应该在发送前拦截。
+
+只输出 JSON 对象，不要解释。
+
+可选 decision：
+- send：确实是在自然回答群里的公共求助/开放问题，可以发送。
+- drop：像 Bot 碰瓷插话，或问题明显是在接群友的话、问别人、吐槽/反问，不该发送。
+
+判断标准：
+- 没有明确 @ Bot 或引用 Bot 时，要更保守。
+- 如果触发句只是“为什么/啥情况/怎么回事/不会吧？”这类接话、吐槽、反问，通常 drop。
+- 如果是“有没有人懂/谁会/求问/报错/怎么解决/帮忙”这类公共求助，通常 send。
+- 如果待发送内容虽然正确，但当前群聊并不需要 Bot 插入，也应 drop。
+
+【本轮群唤醒】
+trigger={_single_line(scene.get('trigger'), 40)} reason={_single_line(scene.get('reason'), 60)}
+wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.get('score'), 20)}/{_single_line(wakeup.get('threshold'), 20)} detail={_single_line(wakeup.get('reason_detail'), 160)}
+
+【最近群聊】
+{chr(10).join(recent_lines) or "（无）"}
+
+【触发消息】
+{inbound_text}
+
+【待发送回复】
+{_single_line(reply_text, 360)}
+
+请输出：
+{{"decision":"send|drop","reason":"一句很短的原因"}}
+""".strip()
+        started = time.perf_counter()
+        raw = await self._llm_call(
+            prompt,
+            max_tokens=120,
+            provider_id=provider_id,
+            task="group_question_wakeup_reply_review",
+        )
+        payload = self._parse_json_object(raw)
+        decision = str((payload or {}).get("decision") or "").strip().lower()
+        reason = _single_line((payload or {}).get("reason"), 120)
+        if decision not in {"send", "drop"}:
+            decision = "send"
+            reason = reason or "复核输出不可解析，默认放行"
+        logger.info(
+            "[PrivateCompanion] 群聊答疑回复发送前复核: decision=%s elapsed=%dms reason=%s trigger=%s text=%s",
+            decision,
+            int((time.perf_counter() - started) * 1000),
+            reason,
+            _single_line(scene.get("trigger"), 40),
+            _single_line(reply_text, 140),
+        )
+        return {"decision": decision, "reason": reason}
 
     @filter.on_decorating_result()
     async def apply_segmented_llm_reply_scope(self, event: AstrMessageEvent):
@@ -4178,7 +4325,7 @@ class PrivateCompanionPlugin(
             if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
                 self._schedule_data_save()
                 return
-            user["umo"] = event.unified_msg_origin
+            self._note_private_user_umo(user_id, user, event.unified_msg_origin)
             self._note_private_display_name_observation(user, user_id, sender_display_name, now=received_ts)
             user["last_seen"] = received_ts
             user["last_activity_at"] = received_ts
@@ -5330,7 +5477,7 @@ class PrivateCompanionPlugin(
         user_id = str(event.get_sender_id())
         async with self._data_lock:
             user = self._get_user(user_id)
-            user["umo"] = event.unified_msg_origin
+            self._note_private_user_umo(user_id, user, event.unified_msg_origin)
 
             if action in {"状态", "status"}:
                 self._reset_daily_counter_if_needed(user)
@@ -5787,7 +5934,7 @@ class PrivateCompanionPlugin(
             if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
                 event.stop_event()
                 return
-            fast_user["umo"] = event.unified_msg_origin
+            self._note_private_user_umo(user_id, fast_user, event.unified_msg_origin)
             self._note_private_display_name_observation(fast_user, user_id, sender_display_name, now=received_ts)
             fast_user["last_seen"] = received_ts
             fast_user["last_activity_at"] = received_ts

@@ -101,16 +101,17 @@ def _migrate_flat_config_into_schema_groups(config: Any, *, schema_path: Path, l
                 if _copy_into_schema_group(root, schema_map, new_key, old_value):
                     changed.append(f"{old_key}->{new_key}")
 
-    removed_flat_keys = _cleanup_flat_schema_item_keys(root, schema_map)
-    if removed_flat_keys:
-        changed.extend(f"{key}~flat-cleanup" for key in removed_flat_keys)
+    added_compat_defaults = _ensure_flat_schema_compat_defaults(root, schema_map)
+    if added_compat_defaults:
+        changed.extend(f"{key}~compat-default" for key in added_compat_defaults)
     removed_section_keys = _cleanup_legacy_section_markers(root)
     if removed_section_keys:
         changed.extend(f"{key}~section-cleanup" for key in removed_section_keys)
     roleplay_hint_changes = _migrate_legacy_roleplay_image_hint(root, schema_map)
     changed.extend(roleplay_hint_changes)
 
-    # 旧兼容键只负责迁移，不继续留在配置树里参与后续保存校验。
+    # 旧别名键只负责迁移；仍在 schema 中登记的 flat 兼容键会保留默认值，
+    # 避免 AstrBot 每次启动都反复补齐并刷屏。
     removed_legacy_keys: list[str] = []
     cleanup_keys = set(LEGACY_KEY_ALIASES) | {LEGACY_PROACTIVE_ACTIONS_KEY, "require_target_group"}
     for old_key in cleanup_keys:
@@ -150,6 +151,19 @@ def _cleanup_flat_schema_item_keys(root: dict[str, Any], schema_map: dict[str, d
         root.pop(key, None)
         removed.append(key)
     return removed
+
+
+def _ensure_flat_schema_compat_defaults(root: dict[str, Any], schema_map: dict[str, dict[str, Any]]) -> list[str]:
+    added: list[str] = []
+    for key, item in schema_map.items():
+        if key in root:
+            continue
+        group_key = str(item.get("group") or "")
+        if not group_key:
+            continue
+        root[key] = _coerce_schema_value(item.get("default"), item)
+        added.append(key)
+    return added
 
 
 def _cleanup_legacy_section_markers(root: dict[str, Any]) -> list[str]:

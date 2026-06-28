@@ -61,6 +61,12 @@
         "hint": "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射,例如：688C2CE7...=100012345。留空则不归并。",
         "default": ""
       },
+      "private_user_delivery_aliases": {
+        "description": "私聊主动发送目标映射",
+        "type": "text",
+        "hint": "只改变主动消息/主动测试的发送出口,不改变记忆归属。每行一个映射,例如：大号QQ=小号QQ。配合“私聊身份别名归并”里的 小号QQ=大号QQ 使用,即可小号收消息、大号保留记忆。",
+        "default": ""
+      },
       "target_platform": {
         "description": "私聊目标平台名",
         "type": "string",
@@ -238,6 +244,12 @@
   },
   "private_user_aliases": {
     "description": "Legacy flat config: 私聊身份别名归并",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
+  "private_user_delivery_aliases": {
+    "description": "Legacy flat config: 私聊主动发送目标映射",
     "type": "text",
     "default": "",
     "invisible": true

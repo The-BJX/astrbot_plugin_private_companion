@@ -268,14 +268,46 @@ class ProactiveMixin:
         platform = _single_line(getattr(self, "target_platform", ""), 40) or "aiocqhttp"
         return f"{platform}:FriendMessage:{user_id}"
 
+    def _private_delivery_user_id_for(self, user_id: str) -> str:
+        canonical = self._canonical_private_user_id(str(user_id or "").strip())
+        aliases = getattr(self, "private_user_delivery_aliases", {}) or {}
+        target = str(aliases.get(canonical) or "").strip()
+        if target and target.isdigit() and not self._is_bot_self_user_id(target):
+            return target
+        return canonical
+
+    def _private_delivery_umo_for_user_id(self, user_id: str) -> str:
+        return self._default_private_umo_for_user_id(self._private_delivery_user_id_for(user_id))
+
+    def _note_private_user_umo(self, user_id: str, user: dict[str, Any] | None, umo: str) -> None:
+        if not isinstance(user, dict):
+            return
+        clean_umo = _single_line(umo, 180)
+        if not clean_umo:
+            return
+        user_id = self._canonical_private_user_id(str(user_id or user.get("user_id") or "").strip())
+        delivery_umo = self._private_delivery_umo_for_user_id(user_id)
+        if delivery_umo:
+            user["umo"] = delivery_umo
+            user["last_inbound_umo"] = clean_umo
+            return
+        user["umo"] = clean_umo
+
     def _ensure_private_user_umo(self, user_id: str, user: dict[str, Any] | None) -> bool:
         if not isinstance(user, dict):
             return False
         user_id = str(user_id or user.get("user_id") or "").strip()
-        fallback = self._default_private_umo_for_user_id(user_id)
+        fallback = self._private_delivery_umo_for_user_id(user_id)
         if not fallback:
             return False
         current = _single_line(user.get("umo"), 180)
+        delivery_id = self._private_delivery_user_id_for(user_id)
+        canonical_id = self._canonical_private_user_id(user_id)
+        if delivery_id and delivery_id != canonical_id:
+            expected_suffix = f":FriendMessage:{delivery_id}"
+            if not current.endswith(expected_suffix):
+                user["umo"] = fallback
+                return True
         if not current:
             user["umo"] = fallback
             return True

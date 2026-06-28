@@ -825,6 +825,9 @@ class ProactiveMessageMixin:
             "状态只影响语气、用词、句子长短、是否开口和话题选择；不要为了表现状态而写动作小剧场。"
         )
         parts.append(
+            "如果一句话已经问候、关心或递出了具体片段,可以直接停住；不用为了显得日常,在后半句补“我刚才在发呆/躺着/盯天花板”这类状态汇报。"
+        )
+        parts.append(
             "即使状态是困倦、迷糊、半梦半醒或低能量,也只能让语气更轻更慢；不能降低理解质量、事实判断或正常承接能力。"
         )
         parts.append(
@@ -1009,6 +1012,7 @@ class ProactiveMessageMixin:
 这会儿的小念头是“{{motive}}”,大概想聊“{{topic}}”,刚做的事是“{{action_context}}”,状态底色是“{{state_hint}}”,生活片段是“{{current_schedule}}”,时段情况是“{{time_guard}}”,最近已经说过“{{recent_topics}}”,关系事实是“{{relationship_fact}}”。
 {{timer_hint}}
 
+只取一个最自然的切口开口,不要把洗漱/穿搭/天气/心情/日程逐项列成状态清单；如果已经有一个具体画面或一句话,就停在那里。
 只输出要发给 {{name}} 的正文。
 """.strip()
 
@@ -2160,6 +2164,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         )
         if not reviewed:
             return ""
+        reviewed = self._trim_proactive_status_inventory(reviewed)
+        reviewed = self._trim_performative_self_state_tail(reviewed)
         return self._normalize_proactive_sentence_flow(reviewed)
 
     def _proactive_reply_air_flags(
@@ -2437,6 +2443,16 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if not cleaned:
             return ""
         lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            collapsed_lines = self._collapse_near_duplicate_proactive_lines(lines)
+            if len(collapsed_lines) < len(lines):
+                result = "\n".join(collapsed_lines).strip()
+                logger.info(
+                    "[PrivateCompanion] 主动消息已合并同轮近似候选: before=%s after=%s",
+                    _single_line(cleaned, 180),
+                    _single_line(result, 160),
+                )
+                return result or cleaned
         units: list[str] = []
         for line in lines or [cleaned]:
             units.extend(self._split_proactive_sentence_units(line))
@@ -2467,6 +2483,63 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if self._private_user_role(user) == "friend" and len(units) > 2:
             units = units[:2]
         return "\n".join(units).strip() or cleaned
+
+    def _proactive_candidate_core_text(self, text: str) -> str:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"^[\w\u4e00-\u9fffぁ-んァ-ヶー]{1,8}[，,、\s]+", "", cleaned)
+        cleaned = re.sub(r"^(?:早上好|早安|上午好|中午好|午安|下午好|晚上好)[。！？!?…~～,，\s]*", "", cleaned)
+        cleaned = re.sub(r"^(?:唔|嗯|诶|欸|啊|嗨|嘿)[。！？!?…~～,，\s]*", "", cleaned)
+        cleaned = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", cleaned)
+        filler_tokens = ("刚刚", "刚才", "现在", "今天", "这会儿", "好像", "感觉", "一点", "有点")
+        for token in filler_tokens:
+            cleaned = cleaned.replace(token, "")
+        return cleaned
+
+    def _proactive_candidate_bigrams(self, text: str) -> set[str]:
+        cleaned = self._proactive_candidate_core_text(text)
+        if len(cleaned) < 2:
+            return set()
+        return {cleaned[index : index + 2] for index in range(len(cleaned) - 1)}
+
+    def _collapse_near_duplicate_proactive_lines(self, lines: list[str]) -> list[str]:
+        kept: list[str] = []
+        for line in lines:
+            current = line.strip()
+            if not current:
+                continue
+            current_core = self._proactive_candidate_core_text(current)
+            duplicate_index = -1
+            for index, old in enumerate(kept):
+                old_core = self._proactive_candidate_core_text(old)
+                if not current_core or not old_core:
+                    continue
+                shorter = min(len(current_core), len(old_core))
+                if shorter < 8:
+                    continue
+                same_core = current_core == old_core
+                contained = current_core in old_core or old_core in current_core
+                current_bigrams = self._proactive_candidate_bigrams(current)
+                old_bigrams = self._proactive_candidate_bigrams(old)
+                bigram_overlap = 0.0
+                if current_bigrams and old_bigrams:
+                    bigram_overlap = len(current_bigrams & old_bigrams) / max(1, min(len(current_bigrams), len(old_bigrams)))
+                if same_core or contained or bigram_overlap >= 0.86:
+                    duplicate_index = index
+                    break
+            if duplicate_index < 0:
+                kept.append(current)
+                continue
+            old = kept[duplicate_index]
+            old_core = self._proactive_candidate_core_text(old)
+            prefer_current = (
+                len(current_core) < len(old_core)
+                or (len(current) + 6 < len(old) and not re.search(r"^(?:早上好|早安|上午好|中午好|午安|下午好|晚上好)", current))
+            )
+            if prefer_current:
+                kept[duplicate_index] = current
+        return kept
 
     def _should_drop_vague_generic_proactive(
         self,
@@ -4093,6 +4166,47 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             f"external_base={external_base or '-'}"
         )
 
+    def _record_recent_photo_generation(
+        self,
+        *,
+        trace_id: str,
+        session_key: str,
+        workflow_kind: str,
+        backend: str,
+        ok: bool,
+        prompt_text: str,
+        image_path: str = "",
+        note: str = "",
+        reference_image_path: str = "",
+        image_size: str = "",
+        elapsed_ms: int = 0,
+    ) -> None:
+        try:
+            item = {
+                "ts": _now_ts(),
+                "trace": _single_line(trace_id, 40),
+                "session": _single_line(session_key, 100),
+                "kind": _single_line(workflow_kind, 30),
+                "backend": _single_line(backend, 80),
+                "ok": bool(ok),
+                "prompt": _single_line(prompt_text, 900),
+                "path": _single_line(image_path, 260),
+                "note": _single_line(note, 240),
+                "reference": bool(reference_image_path),
+                "reference_path": _single_line(reference_image_path, 260),
+                "image_size": _single_line(image_size, 40),
+                "elapsed_ms": int(max(0, elapsed_ms or 0)),
+            }
+            raw = self.data.setdefault("recent_photo_generations", [])
+            if not isinstance(raw, list):
+                raw = []
+                self.data["recent_photo_generations"] = raw
+            raw.insert(0, item)
+            del raw[12:]
+            self._save_data_sync()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 记录最近生图提示词失败: %s", _single_line(exc, 120))
+
     def _apply_photo_generation_fixed_prompt(self, prompt_text: str) -> str:
         prompt = str(prompt_text or "").strip()
         fixed = _single_line(getattr(self, "photo_generation_fixed_prompt", ""), 500)
@@ -4138,6 +4252,19 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         def finish(backend: str, image_path: str, note: str) -> tuple[str, str, str]:
             elapsed_ms = int((time.time() - started) * 1000)
             ok = bool(image_path)
+            self._record_recent_photo_generation(
+                trace_id=trace_id,
+                session_key=session_key,
+                workflow_kind=workflow_kind,
+                backend=backend,
+                ok=ok,
+                prompt_text=prompt_text,
+                image_path=image_path,
+                note=note,
+                reference_image_path=reference_image_path,
+                image_size=image_size,
+                elapsed_ms=elapsed_ms,
+            )
             logger.info(
                 "[PrivateCompanion] 生图结束: trace=%s ok=%s backend=%s elapsed=%sms note=%s %s",
                 trace_id,
@@ -6026,6 +6153,143 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
         return cleaned or str(text or "").strip()
 
+    def _trim_performative_self_state_tail(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        tail_clause_match = re.search(
+            r"([，,；;。！？!?]\s*)"
+            r"((?:我)?(?:刚刚|刚才|刚|这会儿|现在)?"
+            r"(?:在|还在|正|正在)?"
+            r"[^。！？!?；;\n，,]{0,14}"
+            r"(?:发呆|发怔|晃神|躺着|趴着|盯着|望着|看着天花板|看天花板|刷手机|摸鱼|犯困|醒着|睡不着|放空|走神|缓神)"
+            r"[^。！？!?；;\n，,]{0,18}"
+            r"(?:来着|而已|呢|啦|。|！|？|~|～)?$)",
+            cleaned,
+        )
+        if tail_clause_match:
+            kept = cleaned[: tail_clause_match.start()].strip(" ,，、；;")
+            if kept:
+                result = self._finish_trimmed_proactive_text(kept)
+                logger.info(
+                    "[PrivateCompanion] 主动消息已去除刻意状态尾巴: before=%s after=%s",
+                    _single_line(cleaned, 160),
+                    _single_line(result, 160),
+                )
+                return result
+        units: list[str] = []
+        for line in cleaned.splitlines():
+            line = line.strip()
+            if line:
+                units.extend(self._split_proactive_sentence_units(line))
+        units = [unit.strip(" ,，、") for unit in units if unit.strip(" ,，、")]
+        if len(units) <= 1:
+            return cleaned
+        tail = units[-1].strip()
+        if not tail:
+            return cleaned
+        asks_user = bool(re.search(r"(你那边|你呢|你那儿|你那里|你现在|你今天|你还|你有没有|你要不要|你是不是)", tail))
+        if asks_user:
+            return cleaned
+        performative_tail = bool(
+            re.search(
+                r"^(?:我)?(?:刚刚|刚才|刚|这会儿|现在)?"
+                r"(?:在|还在|正|正在)?"
+                r"[^。！？!?；;\n]{0,12}"
+                r"(?:发呆|躺着|趴着|盯着|望着|看着天花板|看天花板|刷手机|摸鱼|犯困|醒着|睡不着|放空|走神|缓神)"
+                r"[^。！？!?；;\n]{0,18}"
+                r"(?:来着|而已|呢|啦|。|！|？|~|～)?$",
+                tail,
+            )
+        )
+        if not performative_tail:
+            return cleaned
+        kept = units[:-1]
+        if not kept:
+            return cleaned
+        result = "\n".join(self._finish_trimmed_proactive_text(unit) for unit in kept if unit)
+        result = result.strip()
+        if result:
+            logger.info(
+                "[PrivateCompanion] 主动消息已去除刻意状态尾巴: before=%s after=%s",
+                _single_line(cleaned, 160),
+                _single_line(result, 160),
+            )
+            return result
+        return cleaned
+
+    def _proactive_status_inventory_kind(self, unit: str) -> str:
+        cleaned = _single_line(unit, 140).strip(" ，,。！？!?~～")
+        if not cleaned:
+            return ""
+        opener_match = re.match(r"^([\w\u4e00-\u9fffぁ-んァ-ヶー]{1,8})[，,]\s*", cleaned)
+        if opener_match:
+            opener_text = opener_match.group(1)
+            if len(opener_text) <= 4 and not re.search(r"(窗外|外面|雨声|风声|天气|今天|现在|刚刚|刚才)", opener_text):
+                cleaned = cleaned[opener_match.end():].strip()
+        if re.search(r"(你|主人|比折|珝环).{0,12}(吗|呢|呀|要不要|有没有)", cleaned):
+            return ""
+        if re.search(r"(窗外|外面|雨声|风声|雨|下雨|小雨|大雨|风|云|天色|阳光|太阳|月亮|路灯|杯沿|书页|桌边)", cleaned):
+            return "scene"
+        if re.search(r"^(?:我)?(?:刚刚|刚才|刚|才|已经|这会儿)?(?:洗漱|洗完|洗澡|刷牙|起床|醒|到家|出门|回家|吃完|喝完|写完|收拾完|换好|换完)", cleaned):
+            return "routine"
+        if re.search(r"^(?:我)?(?:今天|现在|刚刚|刚才|刚|才)?(?:穿了|穿着|换了|换成|披了|套了|戴了|拿了)", cleaned):
+            return "clothing"
+        if re.search(r"(舒服|安静|困|累|清醒|迷糊|开心|烦|平稳|舒服)", cleaned) and len(cleaned) <= 22:
+            return "state"
+        return ""
+
+    def _trim_proactive_status_inventory(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        units: list[str] = []
+        for raw_line in cleaned.splitlines():
+            line = raw_line.strip()
+            if line:
+                units.extend(self._split_proactive_sentence_units(line))
+        units = [unit.strip(" ，,、") for unit in units if unit.strip(" ，,、")]
+        if len(units) < 2:
+            return cleaned
+        kinds = [self._proactive_status_inventory_kind(unit) for unit in units]
+        inventory_count = sum(1 for kind in kinds if kind)
+        if inventory_count < 2:
+            return cleaned
+        if len(units) == 2 and inventory_count < len(units):
+            return cleaned
+        opener = ""
+        opener_match = re.match(r"^([\w\u4e00-\u9fffぁ-んァ-ヶー]{1,4}[，,])", units[0])
+        if opener_match:
+            opener = opener_match.group(1)
+        priority = {"scene": 4, "clothing": 3, "routine": 2, "state": 1}
+        best_index = max(
+            range(len(units)),
+            key=lambda index: (priority.get(kinds[index], 0), index),
+        )
+        chosen = units[best_index].strip()
+        if opener:
+            chosen = re.sub(r"^[\w\u4e00-\u9fffぁ-んァ-ヶー]{1,4}[，,]\s*", "", chosen).strip()
+            if chosen:
+                chosen = f"{opener}{chosen}"
+        chosen = self._ensure_chat_sentence_punctuation(chosen)
+        if chosen and chosen != cleaned:
+            logger.info(
+                "[PrivateCompanion] 主动消息已收束状态清单: before=%s after=%s",
+                _single_line(cleaned, 180),
+                _single_line(chosen, 160),
+            )
+            return chosen
+        return cleaned
+
+    def _finish_trimmed_proactive_text(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        lines = [line.strip(" ,，、；;") for line in cleaned.splitlines() if line.strip(" ,，、；;")]
+        if not lines:
+            return ""
+        return "\n".join(self._ensure_chat_sentence_punctuation(line) for line in lines)
+
     def _has_abrupt_closing_topic_shift(self, text: str, *, inbound_text: str = "") -> bool:
         original = str(text or "").strip()
         if not original:
@@ -6079,7 +6343,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return cleaned
         question_tokens = (
             "吗", "嘛", "么", "什么", "怎么", "咋", "有没有", "是不是", "要不要",
-            "忙什么", "吃东西了吗", "睡了吗", "醒了吗",
+            "忙什么", "吃东西了吗", "睡了吗", "醒了吗", "你呢", "你那边呢", "你那里呢", "你那儿呢",
         )
         if any(token in cleaned for token in question_tokens):
             return cleaned + "？"
@@ -6108,6 +6372,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         cleaned = self._strip_parenthetical_stage_directions(cleaned)
         if not cleaned:
             return ""
+        cleaned = self._trim_proactive_status_inventory(cleaned)
+        cleaned = self._trim_performative_self_state_tail(cleaned)
         cleaned = re.sub(r"^(?:早上好|早安|上午好|中午好|午安|下午好|晚上好)[,,\s]*", "", cleaned)
 
         _SOCIAL_REPLACEMENTS = [

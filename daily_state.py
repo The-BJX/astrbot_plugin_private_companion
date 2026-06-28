@@ -1171,11 +1171,11 @@ class DailyStateMixin:
         elif why and len(why) <= 30:
             base = why
         if scene and tone:
-            base = f"刚刚在{scene},状态偏{tone},适合补充一句近况"
+            base = f"{scene}里有个可以自然提到的小切口"
         elif scene:
-            base = f"刚刚在{scene},适合补充一句近况"
+            base = f"{scene}里有个可以自然提到的小切口"
         elif tone and not topic:
-            base = f"这会儿状态偏{tone},适合和用户说一句"
+            base = "这会儿适合短短说一句,状态只留在语气里"
         return self._normalize_internal_motive_text(_single_line(base, 80))
 
     def _dedupe_proactive_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1214,6 +1214,15 @@ class DailyStateMixin:
         image_markers = ("图", "图片", "照片", "拍", "自拍", "画面")
         if sum(1 for token in image_markers if token in text) >= 2:
             return "photo_share"
+        weather_markers = (
+            "窗外", "外面", "天气", "天晴", "晴吗", "晴天", "下雨", "没下雨",
+            "雨声", "小雨", "大雨", "阴天", "多云", "太阳", "云",
+        )
+        morning_markers = ("早上", "早安", "刚醒", "醒了", "刚醒来", "起床", "洗漱")
+        if any(token in text for token in weather_markers) and (
+            any(token in text for token in morning_markers) or "你那边" in text or "你那里" in text
+        ):
+            return "morning_weather_check"
         tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{3,}", text)
         stopwords = {
             "刚才", "现在", "今天", "这个", "那个", "一下", "一点", "有点", "还是",
@@ -1274,6 +1283,32 @@ class DailyStateMixin:
             }
         )
         del recent[:-12]
+
+    def _recent_proactive_text_duplicate_reason(
+        self,
+        user: dict[str, Any],
+        *,
+        text: str = "",
+        topic: str = "",
+        motive: str = "",
+        now: float | None = None,
+    ) -> str:
+        signature = self._proactive_topic_signature(text, topic, motive)
+        if not signature:
+            return ""
+        check_now = now or _now_ts()
+        for item in self._cleanup_recent_proactive_topics(user, now=check_now):
+            old_signature = str(item.get("signature") or "")
+            if not self._topic_signature_similar(signature, old_signature):
+                continue
+            age = check_now - _safe_float(item.get("ts"), 0)
+            if age > 4 * 3600:
+                continue
+            old_text = _single_line(item.get("text"), 80)
+            if signature == "morning_weather_check":
+                return f"早晨天气问候刚刚发过" + (f"：{old_text}" if old_text else "")
+            return f"近 {max(1, int(age // 60))} 分钟已发送相似主动" + (f"：{old_text}" if old_text else "")
+        return ""
 
     def _pending_proactive_send_retry(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | None:
         payload = user.get("pending_proactive_send_retry") if isinstance(user, dict) else None
@@ -9021,6 +9056,33 @@ class DailyStateMixin:
                     self._save_data_sync()
                 self._debug_tick_skip(user_id, "主动消息时间不一致", prefix="取消")
                 continue
+            if not is_troubleshooting_for_send and (effective_action_for_send or planned_action_for_send or "message") == "message":
+                async with self._data_lock:
+                    current_for_similarity_guard = self._get_user(user_id)
+                    similar_note = self._recent_proactive_text_duplicate_reason(
+                        current_for_similarity_guard,
+                        text=text,
+                        topic=current_for_similarity_guard.get("planned_proactive_topic"),
+                        motive=planned_motive_for_send,
+                        now=_now_ts(),
+                    )
+                    if similar_note:
+                        current_for_similarity_guard["proactive_sending"] = False
+                        current_for_similarity_guard["proactive_sending_started_at"] = 0
+                        self._mark_planned_candidate_status(current_for_similarity_guard, "blocked", similar_note)
+                        self._clear_pending_proactive_plan(current_for_similarity_guard)
+                        self._schedule_next_proactive(current_for_similarity_guard, now=_now_ts(), delay_hours=(2.0, 5.0))
+                        self._update_proactive_audit(audit_id, status="cancelled", note=similar_note, text=text)
+                        self._save_data_sync()
+                if similar_note:
+                    logger.info(
+                        "[PrivateCompanion] 主动消息正文近似重复,已取消: user=%s reason=%s text=%s",
+                        user_id,
+                        _single_line(similar_note, 120),
+                        _single_line(text, 120),
+                    )
+                    self._debug_tick_skip(user_id, similar_note, prefix="取消")
+                    continue
             if not is_troubleshooting_for_send and (effective_action_for_send or planned_action_for_send or "message") == "message":
                 async with self._data_lock:
                     current_for_greeting_text = self._get_user(user_id)

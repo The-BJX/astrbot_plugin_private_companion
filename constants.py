@@ -79,6 +79,7 @@ _DATA_STORE_KEYS = (
     "bot_diaries",
     "dream_fragments",
     "diary_generated_day",
+    "recent_photo_generations",
     "daily_story_plan",
     "detail_enhanced_day",
     "detail_enhanced_segments",

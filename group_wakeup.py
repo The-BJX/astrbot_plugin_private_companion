@@ -840,7 +840,82 @@ class GroupWakeupMixin:
             "score": min(100, score),
             "intensity": intensity,
             "help_type": help_type,
+            "raw_text": cleaned,
         }
+
+    def _group_wakeup_question_context_gate(
+        self,
+        group: dict[str, Any],
+        scene: dict[str, Any],
+        text: str,
+        signal: dict[str, Any],
+    ) -> tuple[bool, list[str], int]:
+        cleaned = _single_line(text, 260)
+        reason = _single_line(signal.get("reason"), 60)
+        base_score = _safe_int(signal.get("score"), 0, 0, 100)
+        help_type = _single_line(signal.get("help_type"), 24)
+        trigger = str(scene.get("trigger") or "")
+        notes: list[str] = []
+        penalty = 0
+        strong_public_help = (
+            reason in {"open_help", "help_request"}
+            or help_type in {"排障", "操作"}
+            or bool(
+                re.search(
+                    r"(有没有人|有人|谁|哪位|大佬).{0,14}(懂|知道|会|能帮|帮忙)|"
+                    r"(求问|请教|急求|急问|在线等|帮忙|帮我)|"
+                    r"(报错|异常|error|traceback|bug|日志|堆栈|闪退|崩溃|跑不起来|卡住|失败)",
+                    cleaned,
+                    flags=re.I,
+                )
+            )
+        )
+        conversational_only = bool(
+            re.search(
+                r"^(?:啊|诶|欸|哈|哈哈|草|不是|不会吧|真的假的|所以|那|这|啥|为什么|为啥|怎么|咋|什么情况|啥情况)[，,。.\s]*[^，,。！？!?]{0,24}[?？]?$",
+                cleaned,
+            )
+        )
+        if trigger in {"reply_in_flow", "quick_follow"}:
+            if strong_public_help:
+                penalty += 8
+                notes.append("接话场景但像公共求助")
+            else:
+                penalty += 28 if base_score < 76 else 18
+                notes.append("上下文像在接别人话")
+        recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
+        now = _now_ts()
+        recent_other_messages = [
+            item
+            for item in recent[-6:]
+            if isinstance(item, dict)
+            and _safe_float(item.get("ts"), 0.0, 0.0) > 0
+            and now - _safe_float(item.get("ts"), 0.0, 0.0) <= 90
+        ]
+        if conversational_only and not strong_public_help:
+            penalty += 18
+            notes.append("短反问/吐槽句")
+        if recent_other_messages and not strong_public_help:
+            last_text = _single_line(recent_other_messages[-1].get("text"), 160)
+            if last_text and re.search(r"(就是|因为|所以|应该|可以|不用|不是|这个|那个|确实|对|已经|试试|看看)", cleaned):
+                penalty += 10
+                notes.append("疑似延续群内讨论")
+            answered_like = any(
+                re.search(r"(可以|应该|因为|原因|解决|试试|改成|换成|用|装|配置|设置|报错|日志|看起来|大概)", _single_line(item.get("text"), 160))
+                for item in recent_other_messages[-3:]
+            )
+            if answered_like and reason in {"explain_question", "question_mark", "question"}:
+                penalty += 8
+                notes.append("附近已有讨论/回答")
+        if re.search(r"(你们|你俩|他|她|它|这人|那人|楼上|上面|群主|管理员|作者|大佬).{0,16}[?？]$", cleaned) and not strong_public_help:
+            penalty += 22
+            notes.append("问题目标不像 Bot")
+        block = False
+        if not strong_public_help and trigger in {"reply_in_flow", "quick_follow"} and base_score - penalty < 60:
+            block = True
+        if not strong_public_help and conversational_only and base_score - penalty < 65:
+            block = True
+        return block, notes, penalty
 
     def _group_wakeup_question_score_context(
         self,
@@ -865,6 +940,19 @@ class GroupWakeupMixin:
         if str(scene.get("trigger") or "") in {"reply_in_flow", "quick_follow"}:
             score -= 10
             notes.append("疑似接别人话")
+        context_blocked, context_notes, context_penalty = self._group_wakeup_question_context_gate(
+            group,
+            scene,
+            _single_line(signal.get("text"), 260) or _single_line(signal.get("raw_text"), 260) or "",
+            signal,
+        )
+        if context_penalty:
+            score -= context_penalty
+            notes.extend(context_notes)
+        if context_blocked:
+            score = min(score, 49)
+            if "上下文门控" not in notes:
+                notes.append("上下文门控")
         state = self.data.get("daily_state") if isinstance(getattr(self, "data", None), dict) else {}
         runtime = state.get("sleep_runtime") if isinstance(state, dict) and isinstance(state.get("sleep_runtime"), dict) else {}
         phase = str(runtime.get("phase") or "")

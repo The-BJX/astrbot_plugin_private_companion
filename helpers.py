@@ -246,13 +246,16 @@ _MISSING = object()
 def _flat_get(config: Any, key: str, default: Any = None) -> Any:
     """Read both flat config keys and keys nested under schema object/items groups."""
     if isinstance(config, dict):
-        if key in config:
-            return config[key]
+        # Prefer schema-group values over top-level legacy compatibility keys.
+        # AstrBot may add invisible legacy flat defaults before plugin init; if
+        # those are read first they would shadow the user's real grouped config.
         for value in config.values():
             if isinstance(value, dict):
                 found = _flat_get(value, key, _MISSING)
                 if found is not _MISSING:
                     return found
+        if key in config:
+            return config[key]
     for attr in ("data", "config"):
         target = getattr(config, attr, None)
         if isinstance(target, dict):

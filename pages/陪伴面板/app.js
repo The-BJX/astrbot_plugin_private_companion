@@ -855,6 +855,7 @@ const configLabels = {
   default_style: "默认语气",
   plugin_specific_persona_id: "插件指定人格 ID",
   private_user_aliases: "私聊身份别名归并",
+  private_user_delivery_aliases: "私聊主动发送目标映射",
   schedule_persona_prompt: "角色设定补充",
   schedule_worldview_prompt: "世界观/生活背景",
   roleplay_user_profile_prompt: "用户与关系补充",
@@ -1192,6 +1193,7 @@ const configDescriptions = {
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
   plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于角色设定补充，它会影响私聊被动回复和关系判断。",
   private_user_aliases: "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射，例如：688C2CE7...=100012345。",
+  private_user_delivery_aliases: "只改变主动消息/主动测试的发送出口，不改变记忆归属。每行一个映射，例如：大号QQ=小号QQ。",
   schedule_persona_prompt: "给陪伴插件的日程、状态、主动行为、识图和创作提供角色补充；不会覆盖 AstrBot 主人格。",
   schedule_worldview_prompt: "给陪伴插件判断生活背景和世界规则，适合写所在世界、日常规则、居住/学校/城市环境和与用户的生活关系。",
   roleplay_user_profile_prompt: "描述角色如何称呼用户、用户身份、彼此关系和相处方式；不会作为图片自我识别的外观线索。",
@@ -2042,6 +2044,7 @@ const featureSettingTypes = {
   worldbook_config_paths: { type: "textarea" },
   worldbook_self_registration_block_words: { type: "textarea" },
   private_user_aliases: { type: "textarea" },
+  private_user_delivery_aliases: { type: "textarea" },
   tts_extra_prompt: { type: "textarea" },
   main_user_mention_voice_keywords: { type: "textarea" },
   main_user_mention_voice_prompt: { type: "textarea" },
@@ -3367,7 +3370,7 @@ function renderTroubleshooting() {
       </section>
     `).join("")
     : `<div class="empty small">没有检测到候选 SQLite 数据库文件</div>`;
-  chainEl.innerHTML = troubleshootingChainTestMarkup(data.chain_tests || {});
+  chainEl.innerHTML = troubleshootingChainTestMarkup(data.chain_tests || {}, data.recent_photo_generations || []);
   injectionsEl.innerHTML = troubleshootingPromptInjectionMarkup(data.prompt_injections || {});
   if (debounceEl) {
     debounceEl.innerHTML = troubleshootingDebounceTraceMarkup(state.overview?.message_debounce || {});
@@ -3458,7 +3461,7 @@ function troubleshootingEventMarkup(item) {
   `;
 }
 
-function troubleshootingChainTestMarkup(results) {
+function troubleshootingChainTestMarkup(results, recentPhotoGenerations = []) {
   const tests = [
     {
       type: "image_generation_text2img",
@@ -3493,7 +3496,7 @@ function troubleshootingChainTestMarkup(results) {
       button: "运行模型排障",
     },
   ];
-  return tests.map((test) => {
+  const testsMarkup = tests.map((test) => {
     const result = results?.[test.type]
       || (test.type === "image_generation_text2img" ? results?.image_generation : null)
       || (test.type === "model_diagnostics" ? results?.skill_similarity : null)
@@ -3528,6 +3531,7 @@ function troubleshootingChainTestMarkup(results) {
       </section>
     `;
   }).join("");
+  return `${testsMarkup}${troubleshootingRecentPhotoGenerationMarkup(recentPhotoGenerations)}`;
 }
 
 function troubleshootingChainDetailText(test, result, hasResult) {
@@ -3582,7 +3586,56 @@ function troubleshootingChainPreviewMarkup(type, result) {
       </details>
     `;
   }
-  return result.text_preview ? `<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>` : "";
+  const parts = [];
+  if (result.text_preview) parts.push(`<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>`);
+  if (result.prompt) parts.push(`<small class="path">提示词：${escapeHtml(result.prompt)}</small>`);
+  return parts.join("");
+}
+
+function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
+  const items = Array.isArray(itemsRaw) ? itemsRaw.filter(Boolean) : [];
+  if (!items.length) {
+    return `
+      <section class="troubleshooting-chain-test info">
+        <div>
+          <b>最近生图提示词</b>
+          <p>暂无真实生图记录；运行一次主动拍照、每日穿搭、自然语言生图或生图排障后会显示。</p>
+        </div>
+      </section>
+    `;
+  }
+  return `
+    <section class="troubleshooting-chain-test info">
+      <div>
+        <b>最近生图提示词</b>
+        <p>展示最近 ${escapeHtml(String(items.length))} 次真实生图调用，便于排查构图、模型、参考图和后端回退问题。</p>
+        <details class="chain-test-steps chain-test-preview">
+          <summary>查看最近生图记录</summary>
+          ${items.map((item) => {
+            const meta = [
+              item.ok ? "成功" : "失败",
+              item.backend || "",
+              item.kind ? `类型 ${item.kind}` : "",
+              item.image_size ? `尺寸 ${item.image_size}` : "",
+              item.reference ? "带参考图" : "",
+              item.elapsed_ms ? `${item.elapsed_ms}ms` : "",
+              item.time || "",
+              item.trace ? `trace ${item.trace}` : "",
+            ].filter(Boolean).join(" · ");
+            return `
+              <div class="chain-test-preview-section">
+                <b>${escapeHtml(meta || "生图记录")}</b>
+                ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
+                ${item.path ? `<small class="path">${escapeHtml(item.path)}</small>` : ""}
+                ${item.reference_path ? `<small class="path">参考图：${escapeHtml(item.reference_path)}</small>` : ""}
+                <p>${escapeHtml(item.prompt || item.prompt_preview || "")}</p>
+              </div>
+            `;
+          }).join("")}
+        </details>
+      </div>
+    </section>
+  `;
 }
 
 function troubleshootingDebounceTraceMarkup(data) {
@@ -10120,6 +10173,7 @@ function renderFeatureSwitches() {
   if (state.selectedFeatureKey && state.selectedFeatureKey !== "enable_proactive_only_mode" && !visibleFeatureSwitchKey(state.selectedFeatureKey)) {
     state.selectedFeatureKey = "";
   }
+  syncFeatureFooterAction();
   if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft, state.selectedFeatureKey)) {
     $("#featureFlags").innerHTML = featureDetailPage(state.selectedFeatureKey);
     bindFeatureDetailActions();
@@ -10162,6 +10216,14 @@ function renderFeatureSwitches() {
     });
   });
   bindProactiveOnlyTempUnlockActions($("#featureFlags"));
+}
+
+function syncFeatureFooterAction() {
+  const button = $("#saveFeaturesBtn");
+  if (!button) return;
+  const inDetail = Boolean(state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey));
+  button.textContent = inDetail ? "返回功能列表" : "保存功能开关";
+  button.dataset.action = inDetail ? "back" : "save";
 }
 
 function renderProactiveOnlyModeCard() {
@@ -13113,7 +13175,13 @@ $("#accessQuickGroups").addEventListener("click", async (event) => {
   }), "已更新群聊名单", button);
 });
 
-$("#saveFeaturesBtn").addEventListener("click", async () => {
+$("#saveFeaturesBtn").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (button?.dataset?.action === "back" || (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey))) {
+    state.selectedFeatureKey = "";
+    renderFeatureSwitches();
+    return;
+  }
   const overviewSettings = state.overview?.settings || {};
   const features = {};
   const settings = {};
@@ -13125,7 +13193,7 @@ $("#saveFeaturesBtn").addEventListener("click", async () => {
       features[key] = toBool(value);
     }
   });
-  await runAction(() => postJson("/settings/update", { features, settings }), "已保存功能开关", $("#saveFeaturesBtn"));
+  await runAction(() => postJson("/settings/update", { features, settings }), "已保存功能开关", button);
 });
 
 $("#enableSafeFeaturesBtn").addEventListener("click", () => {
