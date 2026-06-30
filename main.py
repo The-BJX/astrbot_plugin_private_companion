@@ -413,7 +413,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.4.0",
+    "5.4.4",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -852,12 +852,24 @@ class PrivateCompanionPlugin(
         self.emotion_judgement_mode = self._cfg_str(c, "emotion_judgement_mode", "suspicious", "suspicious").lower()
         if self.emotion_judgement_mode not in {"suspicious", "always", "off"}:
             self.emotion_judgement_mode = "suspicious"
-        self.emotional_gate_hurt_threshold = self._cfg_int(c, "emotional_gate_hurt_threshold", 55, 10, 100)
-        self.emotional_gate_refuse_threshold = self._cfg_int(c, "emotional_gate_refuse_threshold", 80, 20, 100)
+        self.emotional_gate_hurt_threshold = self._cfg_int(c, "emotional_gate_hurt_threshold", 70, 10, 100)
+        if self.emotional_gate_hurt_threshold == 55:
+            self.emotional_gate_hurt_threshold = 70
+            _set_into_config(c, "emotional_gate_hurt_threshold", self.emotional_gate_hurt_threshold)
+        self.emotional_gate_refuse_threshold = self._cfg_int(c, "emotional_gate_refuse_threshold", 90, 20, 100)
+        if self.emotional_gate_refuse_threshold == 80:
+            self.emotional_gate_refuse_threshold = 90
+            _set_into_config(c, "emotional_gate_refuse_threshold", self.emotional_gate_refuse_threshold)
         if self.emotional_gate_refuse_threshold <= self.emotional_gate_hurt_threshold:
             self.emotional_gate_refuse_threshold = min(100, self.emotional_gate_hurt_threshold + 5)
-        self.emotional_gate_recovery_per_hour = self._cfg_int(c, "emotional_gate_recovery_per_hour", 12, 1, 60)
-        self.emotional_gate_max_hurt_minutes = self._cfg_int(c, "emotional_gate_max_hurt_minutes", 180, 10, 720)
+        self.emotional_gate_recovery_per_hour = self._cfg_int(c, "emotional_gate_recovery_per_hour", 24, 1, 60)
+        if self.emotional_gate_recovery_per_hour == 12:
+            self.emotional_gate_recovery_per_hour = 24
+            _set_into_config(c, "emotional_gate_recovery_per_hour", self.emotional_gate_recovery_per_hour)
+        self.emotional_gate_max_hurt_minutes = self._cfg_int(c, "emotional_gate_max_hurt_minutes", 90, 10, 720)
+        if self.emotional_gate_max_hurt_minutes == 180:
+            self.emotional_gate_max_hurt_minutes = 90
+            _set_into_config(c, "emotional_gate_max_hurt_minutes", self.emotional_gate_max_hurt_minutes)
         self.enable_dialogue_episode_memory = self._cfg_bool(c, "enable_dialogue_episode_memory", True)
         self.enable_open_loop_tracking = self._cfg_bool(c, "enable_open_loop_tracking", True)
         self.enable_user_habit_learning = self._cfg_bool(c, "enable_user_habit_learning", True)
@@ -3187,22 +3199,22 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         mood = _single_line(state.get("mood_bias"), 18) or "平稳"
         now = self._environment_now()
         time_label, _ = self._current_time_period_label(now)
-        pieces = [f"这会儿大概是{time_label}的节奏", f"精神在{energy}/100左右", f"情绪偏{mood}"]
+        pieces = [f"时间节奏：{time_label}", f"精神约 {energy}/100", f"情绪底色偏{mood}"]
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         schedule = self._sanitize_schedule_context_for_private_user(
             self._format_plan_item_for_prompt(current_item),
             current_user or {},
         )
         if schedule:
-            pieces.append(f"附近的生活线索是：{schedule}")
+            pieces.append(f"拟人化日程素材：{schedule}")
         detail = self._current_detail_segment_for_update()
         if isinstance(detail, dict):
             summary = _single_line(detail.get("summary"), 90)
             if summary:
-                pieces.append(f"更细一点的氛围是：{summary}")
+                pieces.append(f"模拟氛围：{summary}")
         weather = _single_line(state.get("weather"), 60)
         if weather and weather != "暂无天气信息":
-            pieces.append(f"外部天气：{weather}")
+            pieces.append(f"天气素材：{weather}")
         conditions: list[str] = []
         raw_conditions = state.get("conditions")
         if isinstance(raw_conditions, list):
@@ -3213,9 +3225,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 if label and label not in conditions:
                     conditions.append(label)
         if conditions:
-            pieces.append("身体感：" + "、".join(conditions[:2]))
-        prefix = "用户这轮在问近况或状态。" if direct else "最近状态有变化。"
-        return prefix + " ".join(pieces) + "。"
+            pieces.append("身体感素材：" + "、".join(conditions[:2]))
+        usage = (
+            "用户这轮在问 Bot 近况或状态，可以把下面内容当作 Bot 自身近况简短承接。"
+            if direct
+            else "Bot 自身模拟状态刚有变化；用户没问近况时不要主动展开。"
+        )
+        return "\n".join(
+            [
+                "【Bot 自身模拟状态更新】",
+                "以下只描述 Bot 的拟人化内部状态/场景素材，不是用户事实、不是现实证据，也不要写入长期记忆。",
+                "只用于语气、长短、节奏和轻微接话；不要把它改写成用户做过的事或现实已经发生的事件。",
+                usage + " " + "；".join(pieces) + "。",
+            ]
+        )
 
     def _private_passive_state_update_for_prompt(
         self,
@@ -4848,6 +4871,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 priority=25,
                 source="daily_state",
             )
+        is_wake_event = bool(getattr(event, "is_wake", False)) or bool(
+            getattr(event, "is_at_or_wake_command", False)
+        )
+        if is_private_chat and not is_wake_event:
+            proactive_context = await self._format_proactive_reply_context(event)
+            if proactive_context:
+                prompt_surface.add("proactive.reply_context", proactive_context, priority=45, source="proactive")
         buffered_image_context = self._take_buffered_private_image_context_for_event(event)
         buffered_images = (
             [str(item) for item in buffered_image_context.get("images", []) if str(item or "").strip()]
@@ -5196,13 +5226,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             livingmemory_guidance = self._format_livingmemory_guidance(scope="private" if is_private_chat else "group")
             if livingmemory_guidance:
                 prompt_surface.add("livingmemory.guidance", livingmemory_guidance, priority=90, source="livingmemory")
-            is_wake_event = bool(getattr(event, "is_wake", False)) or bool(
-                getattr(event, "is_at_or_wake_command", False)
-            )
-            if is_private_chat and not is_wake_event:
-                proactive_context = await self._format_proactive_reply_context(event)
-                if proactive_context:
-                    prompt_surface.add("proactive.reply_context", proactive_context, priority=58, source="proactive")
             detail_injection = self._format_detail_injection()
             if detail_injection:
                 prompt_surface.add("detail.injection", detail_injection, priority=40, source="daily_detail")

@@ -1760,6 +1760,33 @@ class ProactiveMessageMixin:
 
         return await self._conversation_db_operation(label, _read)
 
+    async def _ensure_conversation_id_for_umo(self, umo: str, *, title: str = "Private Companion 主动消息") -> str:
+        conv_mgr = getattr(getattr(self, "context", None), "conversation_manager", None)
+        if conv_mgr is None:
+            return ""
+        conv_id = await conv_mgr.get_curr_conversation_id(umo)
+        if conv_id:
+            return str(conv_id)
+        session = self._parse_message_session(umo)
+        platform_id = _single_line(getattr(session, "platform_id", ""), 80) if session is not None else ""
+        try:
+            if platform_id:
+                conv_id = await conv_mgr.new_conversation(umo, platform_id)
+            else:
+                conv_id = await conv_mgr.new_conversation(umo, title=title)
+        except TypeError:
+            try:
+                conv_id = await conv_mgr.new_conversation(umo, title=title)
+            except TypeError:
+                conv_id = await conv_mgr.new_conversation(umo)
+        if conv_id:
+            logger.info(
+                "[PrivateCompanion] 已为主动消息存档创建 AstrBot 会话: umo=%s cid=%s",
+                _single_line(umo, 140),
+                _single_line(conv_id, 80),
+            )
+        return str(conv_id or "")
+
     def _proactive_synthetic_event(self, umo: str, *, prompt: str, name: str) -> AstrMessageEvent | None:
         session = self._parse_message_session(umo)
         if not session:
@@ -6829,7 +6856,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 user_msg_obj = UserMessageSegment(content=str(user_prompt or ""))
                 assistant_msg_obj = AssistantMessageSegment(content=str(assistant_response or ""))
                 async def _write():
-                    conv_id = await self.context.conversation_manager.get_curr_conversation_id(umo)
+                    conv_id = await self._ensure_conversation_id_for_umo(umo, title="Private Companion 主动消息")
                     if not conv_id:
                         return False
                     await self.context.conversation_manager.add_message_pair(
@@ -6841,7 +6868,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 
                 written = await self._conversation_db_operation("archive_proactive_message", _write)
                 if not written:
-                    logger.debug("[PrivateCompanion] 当前私聊没有活动对话,跳过主动消息存档: %s", umo)
+                    logger.warning("[PrivateCompanion] 主动消息存档失败: 无法获取或创建 AstrBot 会话 history umo=%s", _single_line(umo, 140))
                     return
                 if attempt > 0:
                     logger.info("[PrivateCompanion] 主动消息写入 AstrBot 会话历史成功: %s retry=%s", umo, attempt)

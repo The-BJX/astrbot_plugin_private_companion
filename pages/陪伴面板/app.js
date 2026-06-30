@@ -1485,10 +1485,10 @@ const configDescriptions = {
   proactive_review_low_score_threshold: "标准/严格强度下，候选价值分低于该值且压力较高时会延后。值越低越少延后，按百分比填写。",
   proactive_review_pressure_threshold: "标准/严格强度下，打扰压力达到该值且候选分偏低时会延后。值越高越少延后，按百分比填写。",
   response_review_max_chars: "用于判断普通被动回复是否偏长。默认模式会处理短闲聊被扩写成建议清单、天气小作文的情况；full 模式会更积极复核普通偏长回复。",
-  emotional_gate_hurt_threshold: "用户消息让 Bot 伤心、短期变安静的触发阈值；应低于生气触发阈值。",
-  emotional_gate_refuse_threshold: "累计刺痛感让 Bot 生气、短暂回避的触发阈值；应高于伤心触发阈值。",
-  emotional_gate_recovery_per_hour: "情绪余波每小时自然缓和多少分。",
-  emotional_gate_max_hurt_minutes: "单次刺痛事件最长收敛/暂停主动的分钟数。",
+  emotional_gate_hurt_threshold: "用户消息明确刺到 Bot、并达到该阈值后才会短期变安静；轻度玩笑和普通边界不会直接触发。",
+  emotional_gate_refuse_threshold: "累计刺痛感达到该阈值后才会明显不满或短暂回避；建议保持较高。",
+  emotional_gate_recovery_per_hour: "情绪余波每小时自然缓和多少分；数值越高越不容易长时间低落。",
+  emotional_gate_max_hurt_minutes: "单次刺痛事件最长收敛/暂停主动的分钟数；道歉或安抚可以提前恢复。",
   enable_llm_emotion_judgement: "可选使用模型异步复核用户消息是否会改变 Bot 自身短期情绪余波；本轮被动回复仍使用缓存状态。",
   emotion_judgement_mode: "模型复核范围：可疑项更省消耗，总是复核更细但更耗；结果主要影响后续轮次。",
   EMOTION_JUDGEMENT_PROVIDER_ID: "用于异步复核用户消息是否会改变 Bot 自身短期情绪余波。建议选择便宜、低延迟、JSON 稳定、分类保守的小模型；留空会先回退到排障检查模型，再回退到关系站位/陪伴通用/主模型。",
@@ -2039,6 +2039,7 @@ const featureSettingTypes = {
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
   segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
+  segmented_proactive_send_as_forward: { type: "checkbox" },
   segmented_proactive_split_mode: { type: "select", options: [["regex", "正则"], ["words", "分段词列表"]] },
   segmented_proactive_interval_method: { type: "select", options: [["log", "按字数对数"], ["random", "随机"]] },
   segmented_proactive_content_cleanup_scope: { type: "select", options: [["all", "全段清理"], ["trailing", "仅句尾清理"]] },
@@ -4971,6 +4972,7 @@ async function renderUserDetail(forceFetch = false) {
       <button data-user-action="clear_schedule">清空主动计划</button>
       <button data-user-action="clear_emotion_state">重置情绪状态</button>
       <button data-user-action="clear_learning" class="danger">清空学习记忆</button>
+      <button data-user-action="delete" class="danger">删除私聊用户</button>
     </div>
     <form id="userEditForm" class="inline-form">
       <label>称呼 <input name="nickname" value="${escapeHtml(detail.nickname || "")}" placeholder="例如 主人 / 名字" /></label>
@@ -5268,6 +5270,15 @@ function bindUserActions(detail) {
       if (action === "clear_learning") {
         if (!requireSecondClick(button, `user-clear:${detail.user_id}`, "再次点击清空该用户的学习记忆", "再次点击清空")) return;
         body.clear_learning = true;
+      }
+      if (action === "delete") {
+        if (!requireSecondClick(button, `user-delete:${detail.user_id}`, "再次点击删除该私聊用户、目标名单和相关映射", "再次点击删除")) return;
+        await runAction(async () => {
+          await postJson("/user/delete", body);
+          state.selectedUserId = "";
+          await loadAll();
+        }, "已删除私聊用户", button);
+        return;
       }
       await runAction(() => postJson("/user/update", body), "已更新私聊对象", button);
       await refreshSelectedUserDetail();
@@ -10798,10 +10809,11 @@ function featureSettingInput(key, value) {
   const disabled = featureLockedByProactiveOnlyMode(key);
   const disabledAttr = disabled ? " disabled" : "";
   if (spec.type === "checkbox") {
+    const checked = toBool(value);
     return `
       <label class="feature-param-check">
-        <input type="checkbox" data-feature-param="${safeKey}" ${value ? "checked" : ""}${disabledAttr}>
-        <span>${escapeHtml(disabled ? "已锁定" : value ? "开启" : "关闭")}</span>
+        <input type="checkbox" data-feature-param="${safeKey}" ${checked ? "checked" : ""}${disabledAttr}>
+        <span>${escapeHtml(disabled ? "已锁定" : checked ? "开启" : "关闭")}</span>
       </label>
     `;
   }

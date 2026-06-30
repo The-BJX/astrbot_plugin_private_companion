@@ -168,6 +168,105 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新用户失败: {exc}", exc_info=True)
             return self._error(str(exc))
+
+    async def delete_user(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        user_id = str(payload.get("user_id", "")).strip()
+        if not user_id:
+            return self._error("缺少 user_id")
+        try:
+            async with self.plugin._data_lock:
+                users = self.plugin.data.get("users")
+                if not isinstance(users, dict):
+                    users = {}
+                    self.plugin.data["users"] = users
+                canonical_user_id = self.plugin._canonical_private_user_id(user_id)
+                removed_ids = {user_id}
+                removed_user = users.pop(user_id, None)
+                if isinstance(removed_user, dict):
+                    for alias_id in removed_user.get("alias_user_ids") if isinstance(removed_user.get("alias_user_ids"), list) else []:
+                        alias_text = str(alias_id or "").strip()
+                        if alias_text:
+                            removed_ids.add(alias_text)
+                removed_ids = {item for item in removed_ids if item}
+
+                old_target_user_ids = self._normalize_id_list(getattr(self.plugin, "target_user_ids", []) or [])
+                target_user_ids = [item for item in old_target_user_ids if item not in removed_ids]
+                removed_target = len(target_user_ids) != len(old_target_user_ids)
+
+                private_aliases = {
+                    str(alias).strip(): str(target).strip()
+                    for alias, target in (getattr(self.plugin, "private_user_aliases", {}) or {}).items()
+                    if str(alias).strip()
+                    and str(target).strip()
+                    and str(alias).strip() not in removed_ids
+                    and str(target).strip() not in removed_ids
+                }
+                delivery_aliases = {
+                    str(alias).strip(): str(target).strip()
+                    for alias, target in (getattr(self.plugin, "private_user_delivery_aliases", {}) or {}).items()
+                    if str(alias).strip()
+                    and str(target).strip()
+                    and str(alias).strip() not in removed_ids
+                    and str(target).strip() not in removed_ids
+                }
+                removed_private_aliases = len(private_aliases) != len(getattr(self.plugin, "private_user_aliases", {}) or {})
+                removed_delivery_aliases = len(delivery_aliases) != len(getattr(self.plugin, "private_user_delivery_aliases", {}) or {})
+
+                alias_text = self._format_private_alias_mapping(private_aliases)
+                delivery_alias_text = self._format_private_alias_mapping(delivery_aliases)
+                overrides = {
+                    "target_user_ids": target_user_ids,
+                    "private_user_aliases": alias_text,
+                    "private_user_delivery_aliases": delivery_alias_text,
+                }
+                self._apply_config_value("target_user_ids", target_user_ids, overrides)
+                self._apply_config_value("private_user_aliases", alias_text, overrides)
+                self._apply_config_value("private_user_delivery_aliases", delivery_alias_text, overrides)
+                self.plugin._save_data_sync()
+
+            config_saved = await self._save_config_if_possible()
+            message_parts = []
+            if removed_user is not None:
+                message_parts.append("已删除私聊用户记录")
+            if removed_target:
+                message_parts.append("已移出主动目标名单")
+            if removed_private_aliases:
+                message_parts.append("已清理身份归并映射")
+            if removed_delivery_aliases:
+                message_parts.append("已清理主动发送映射")
+            message = "，".join(message_parts) if message_parts else "没有找到可删除的私聊用户记录"
+            return self._ok(
+                {
+                    "user_id": user_id,
+                    "canonical_user_id": canonical_user_id,
+                    "removed_ids": sorted(removed_ids),
+                    "removed_user": removed_user is not None,
+                    "removed_target": removed_target,
+                    "removed_private_aliases": removed_private_aliases,
+                    "removed_delivery_aliases": removed_delivery_aliases,
+                    "config_saved": config_saved,
+                    "message": message,
+                }
+            )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 删除用户失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    @staticmethod
+    def _format_private_alias_mapping(mapping: dict[str, str]) -> str:
+        return "\n".join(
+            f"{alias}={target}"
+            for alias, target in sorted(
+                (
+                    (str(alias or "").strip(), str(target or "").strip())
+                    for alias, target in (mapping or {}).items()
+                ),
+                key=lambda item: (item[1], item[0]),
+            )
+            if alias and target and alias != target
+        )
+
     async def list_groups(self) -> dict[str, Any]:
         start = time.perf_counter()
         try:

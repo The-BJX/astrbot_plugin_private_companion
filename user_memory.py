@@ -339,8 +339,8 @@ class UserMemoryMixin:
         now = _now_ts()
         mood_score = self._decay_relationship_mood_score(rel_state, now=now)
         hurt_active = _safe_float(rel_state.get("hurt_until"), 0) > now
-        hurt_threshold = _safe_int(getattr(self, "emotional_gate_hurt_threshold", 55), 55, 10, 100)
-        refuse_threshold = _safe_int(getattr(self, "emotional_gate_refuse_threshold", 80), 80, 20, 100)
+        hurt_threshold = _safe_int(getattr(self, "emotional_gate_hurt_threshold", 70), 70, 10, 100)
+        refuse_threshold = _safe_int(getattr(self, "emotional_gate_refuse_threshold", 90), 90, 20, 100)
         if mode == "refusing" and hurt_active and abs(mood_score) >= refuse_threshold:
             return "对用户刚才的言行还有些不满,表现得回避一点；回复短一些、安静一些,先别急着贴近。"
         if mode == "hurt" and hurt_active and abs(mood_score) >= hurt_threshold:
@@ -2030,9 +2030,9 @@ class UserMemoryMixin:
                 "confidence": confidence,
             }
         if identity_hurt:
-            return {"event": "hurt", "intensity": 72, "reason": "否定情感真实性或人格", "target": "bot", "rule": "identity_hurt", "confidence": 0.84}
+            return {"event": "hurt", "intensity": 76, "reason": "否定情感真实性或人格", "target": "bot", "rule": "identity_hurt", "confidence": 0.84}
         if mild_hurt:
-            return {"event": "hurt", "intensity": 58, "reason": "轻度否定或拉开距离", "target": "bot", "rule": "mild_hurt", "confidence": 0.72}
+            return {"event": "hurt", "intensity": 48, "reason": "轻度否定或拉开距离", "target": "bot", "rule": "mild_hurt", "confidence": 0.66}
         if apology:
             return {"event": "apology", "intensity": 68, "reason": "道歉或修复", "target": "bot", "rule": "apology", "confidence": 0.84}
         if comfort:
@@ -2213,7 +2213,7 @@ target 只能是 bot/self/other/ambiguous/none。
             state["mood_updated_ts"] = now
             return score
         hours = max(0.0, (now - last_ts) / 3600)
-        recovery = max(1, _safe_int(getattr(self, "emotional_gate_recovery_per_hour", 12), 12, 1, 60))
+        recovery = max(1, _safe_int(getattr(self, "emotional_gate_recovery_per_hour", 24), 24, 1, 60))
         delta = int(hours * recovery)
         if delta <= 0:
             return score
@@ -2252,19 +2252,25 @@ target 只能是 bot/self/other/ambiguous/none。
         reason = _single_line(intent.get("emotion_reason"), 80)
         target = _single_line(intent.get("emotion_target"), 24) or "none"
         rule = _single_line(intent.get("emotion_rule"), 40)
-        hurt_threshold = _safe_int(getattr(self, "emotional_gate_hurt_threshold", 55), 55, 10, 100)
-        refuse_threshold = _safe_int(getattr(self, "emotional_gate_refuse_threshold", 80), 80, 20, 100)
+        hurt_threshold = _safe_int(getattr(self, "emotional_gate_hurt_threshold", 70), 70, 10, 100)
+        refuse_threshold = _safe_int(getattr(self, "emotional_gate_refuse_threshold", 90), 90, 20, 100)
         if refuse_threshold <= hurt_threshold:
             refuse_threshold = min(100, hurt_threshold + 5)
         min_until = _safe_float(state.get("emotion_min_until"), 0)
         if emotion_enabled and emotion_event == "hurt" and target in {"bot", "ambiguous"} and intensity >= hurt_threshold:
-            mood_score = max(-100, mood_score - max(8, int(intensity * 0.8)))
+            over_threshold = max(0, intensity - hurt_threshold)
+            penalty = max(8, 12 + int(over_threshold * 0.65))
+            if target == "ambiguous":
+                penalty = max(6, int(penalty * 0.75))
+            if emotion_confidence < 0.82:
+                penalty = max(5, int(penalty * 0.8))
+            mood_score = max(-100, mood_score - penalty)
             hurt_minutes = min(
-                _safe_int(getattr(self, "emotional_gate_max_hurt_minutes", 180), 180, 10, 720),
-                max(15, int(intensity * 1.8)),
+                _safe_int(getattr(self, "emotional_gate_max_hurt_minutes", 90), 90, 10, 720),
+                max(10, int(intensity * 1.0)),
             )
             state["hurt_until"] = now + hurt_minutes * 60
-            min_minutes = 25 if abs(mood_score) >= refuse_threshold else 12
+            min_minutes = 15 if abs(mood_score) >= refuse_threshold else 8
             state["emotion_min_until"] = max(min_until, now + min(min_minutes, hurt_minutes) * 60)
             state["silence_turns"] = max(
                 _safe_int(state.get("silence_turns"), 0, 0, 5),
@@ -2521,6 +2527,7 @@ target 只能是 bot/self/other/ambiguous/none。
 - 如果回复已经在说晚安、睡觉、做梦、告别,不要再突然追加天气、日程、生活观察或另一个新话题
 - 如果问题是重复上一条 Bot 消息,必须直接承接用户这句话,不要再说上一条里的“吃饱犯困/下午还有事/有什么安排”等同义内容
 - 如果原回复为了表现困、迷糊、半梦半醒或低能量而变得含混,优先改成清楚承接用户；状态只能留在语气里,不能牺牲回答质量
+- 如果用户没有问 Bot 近况,删掉由内部模拟状态带出的“我刚在/正在/继续做某事”等动作或日程复述；不要把模拟状态说成现实事件
 - 如果问题是表达学习过头、异常断句或照抄用户样本,保留意思,改成自然中文私聊；不要为了模仿口癖而加奇怪逗号、空格、断句或复读用户原话
 """.strip()
         started = time.perf_counter()
@@ -2771,6 +2778,8 @@ target 只能是 bot/self/other/ambiguous/none。
 普通问答、日志、报错、临时调试、一次性闲聊如果没有情绪余味,不要硬整理成重要经历。
 玩笑、反讽、口嗨和临时抱怨不要写成长期事实；不确定就写得轻一点。
 open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“以后还能聊”的内容放进 reusable_topic。
+严格区分说话人：用户行才可以写入 user_events；Bot/助手行里的第一人称动作、身体状态、日程和生活片段多半是拟人化表达，只能当作当时回复风格或轻微情绪余味。
+bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或之后处理的事；不要把“我刚在吃饭/整理/路上/犯困/继续做某事”这类模拟状态当承诺或共同经历。
 
 【AstrBot 默认人格】
 {self._get_default_persona_prompt()}

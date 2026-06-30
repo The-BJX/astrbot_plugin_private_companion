@@ -4370,7 +4370,7 @@ class DailyStateMixin:
     def _format_history_item_for_summary(self, item: dict[str, Any]) -> str:
         role = _single_line(item.get("role") or item.get("type") or item.get("speaker"), 20).lower()
         if role in {"assistant", "bot", "ai"}:
-            speaker = self.bot_name
+            speaker = f"{self.bot_name}(Bot回复)"
         elif role in {"user", "human"}:
             speaker = "用户"
         else:
@@ -4419,6 +4419,8 @@ class DailyStateMixin:
 4. 摘要要给日程模型用,所以写成可执行参考,不是聊天回复。
 5. 梦境参考只提炼碎片和情绪质感,不要编完整梦。
 6. 饮食偏好要有衰退：某个菜名、零食或口味反复出现时,只当“近期聊过/需要避错”的软背景,不要要求今天继续安排购买、带饭、留一份或一起吃。用户说“不吃/不喜欢/不要/避开某食物”时,只写成“相关时避开该食物”,不要写成今天必须准备替代餐食。
+7. 严格区分说话人：只有“用户”行能写成用户真实信息；“Bot回复”里的我在做什么、身体/心情/日程、动作描写或生活片段，只能视为 Bot 当时的拟人化表达，不能当作用户事实、现实证据或今天必须继承的事件。
+8. 只有用户明确确认、提出或约定的事，才可以进入计划/未完成约定；Bot 自称的吃饭、整理、犯困、走动、创作等状态不要转成稳定记忆或现实日程。
 
 对话材料：
 {raw_text}
@@ -5579,12 +5581,13 @@ class DailyStateMixin:
         primary = "，".join(dict.fromkeys(fragment for fragment in primary_fragments if fragment)) or "状态一般"
         secondary = "，".join(dict.fromkeys(fragment for fragment in secondary_fragments if fragment))
         lines = [
-            "【当前扮演状态】",
-            f"1. {primary}；",
+            "【Bot 自身模拟状态】",
+            "边界：这是 Bot 的拟人化/模拟状态，不是用户事实、现实证据或长期记忆。",
+            f"- 底色：{primary}；",
         ]
         if secondary:
-            lines.append(f"2. {secondary}；")
-        lines.append(f"{len(lines)}. 上述状态只决定回复的底色，即语气、长短和节奏。")
+            lines.append(f"- 叠加：{secondary}；")
+        lines.append("- 用法：只决定回复的语气、长短和节奏；用户没问 Bot 近况时不要主动复述具体状态。")
         return "\n".join(lines)
 
     def _format_transition_hint(self, cond: dict[str, Any]) -> str:
@@ -5710,6 +5713,7 @@ class DailyStateMixin:
         mood = _single_line(state.get("mood_bias"), 20)
         hints: list[str] = []
         hints.append("先准确接住用户的话；当前状态主要改变语气、长短和节奏，理解、事实判断和承接保持清楚。")
+        hints.append("这里的当前状态只属于 Bot 自身的模拟状态，不代表用户事实，也不要参与长期记忆归因。")
         if energy <= 38:
             hints.append("回复可以短一点、慢一点，用更省力的口语。")
         elif energy <= 55:
@@ -5745,10 +5749,11 @@ class DailyStateMixin:
         if not life_lines:
             return ""
         return (
-            "【当前生活背景】\n"
+            "【Bot 模拟生活背景】\n"
+            "以下是给 Bot 的拟人化场景/日程素材，不是用户经历，也不是已证实的现实事件；不要写入用户画像或长期记忆。\n"
             + "\n".join(life_lines)
-            + "\n这些内容只用于让回复有生活延续感；用户没问就不要提具体日程、科目、任务、天气或地点。"
-            + "如果要承接,只体现在语气和话题选择里,不要照搬原句,不要写成“我正在做某事”的汇报。"
+            + "\n这些内容只用于让回复有生活延续感；用户没问 Bot 近况或今天安排时，不要提具体日程、科目、任务、天气或地点。"
+            + "如果要承接，只体现在语气和话题选择里，不要照搬原句，不要把内部素材写成真实发生过的事件。"
             + "回复必须像同一个连续现场里发生的对话；如果生活背景之间互相冲突,优先服从当前真实时段和当前日程,只保留最合理的一条线索。"
         )
 
@@ -5791,7 +5796,17 @@ class DailyStateMixin:
         normalized = _single_line(text, 180)
         if not normalized:
             return False
-        return bool(re.search(r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|做什么|做啥|忙什么|忙啥|弄什么|写什么|写了什么|创作什么|创作了什么|玩什么|折腾什么)|你.{0,8}(在)?(干嘛|做什么|忙什么|写什么|写了什么|弄什么|创作什么|创作了什么)", normalized))
+        return bool(
+            re.search(
+                r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|做什么|做啥|忙什么|忙啥|弄什么|写什么|写了什么|创作什么|创作了什么|玩什么|折腾什么)|"
+                r"你.{0,8}(在)?(干嘛|做什么|忙什么|写什么|写了什么|弄什么|创作什么|创作了什么)",
+                normalized,
+            )
+            or re.search(
+                r"你.{0,10}(吃饭|吃过|喝水|睡|休息|累不累|困不困|在不在|在哪|出门|上课|工作|学习|看书|画图|忙不忙)",
+                normalized,
+            )
+        )
 
     def _user_asks_recent_creative_activity(self, text: str) -> bool:
         normalized = _single_line(text, 220)
@@ -6346,11 +6361,14 @@ class DailyStateMixin:
             if not schedule_context:
                 return ""
             return (
-                "【当前片段】\n"
-                "附近的日程只作轻量背景,不要当成正在逐字发生。\n"
+                "【Bot 模拟当前片段】\n"
+                "附近的日程只作 Bot 的拟人化轻量背景，不是用户事实，也不要当成正在逐字发生的现实事件。\n"
                 f"{schedule_context}"
             )
-        lines = ["【当前片段】"]
+        lines = [
+            "【Bot 模拟当前片段】",
+            "这是 Bot 自身的拟人化片段素材，不是用户事实/现实证据；不要写进长期记忆，用户没问就不要复述。",
+        ]
         primary_parts = []
         if snapshot.get("summary"):
             primary_parts.append(snapshot["summary"])
@@ -9439,7 +9457,8 @@ class DailyStateMixin:
                 continue
             try:
                 reason_label = _REASON_TEXT.get(reason, reason or "check_in")
-                reason_label = reason_label.replace("{name}", name)
+                target_name = _single_line(user.get("nickname") or self.default_nickname, 24)
+                reason_label = reason_label.replace("{name}", target_name)
                 reason_detail = "；".join(
                     item
                     for item in (

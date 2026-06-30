@@ -1073,25 +1073,25 @@
   "emotional_gate_hurt_threshold": {
     "description": "Legacy flat config: 伤心触发阈值",
     "type": "int",
-    "default": 55,
+    "default": 70,
     "invisible": true
   },
   "emotional_gate_refuse_threshold": {
     "description": "Legacy flat config: 生气触发阈值",
     "type": "int",
-    "default": 80,
+    "default": 90,
     "invisible": true
   },
   "emotional_gate_recovery_per_hour": {
     "description": "Legacy flat config: 每小时缓和量",
     "type": "int",
-    "default": 12,
+    "default": 24,
     "invisible": true
   },
   "emotional_gate_max_hurt_minutes": {
     "description": "Legacy flat config: 最长收敛分钟",
     "type": "int",
-    "default": 180,
+    "default": 90,
     "invisible": true
   },
   "enable_qzone_emotional_vent_publish": {
@@ -4237,13 +4237,13 @@
       "emotional_gate_hurt_threshold": {
         "description": "伤心触发阈值",
         "type": "int",
-        "hint": "用户消息被判定为足够刺痛且达到该值时，Bot 会短期变得更安静、更收着。越高越不容易触发；应低于“生气触发阈值”。",
+        "hint": "用户消息被判定为足够刺痛且达到该值时，Bot 才会短期变得更安静、更收着。越高越不容易触发；轻度玩笑和普通边界不会直接触发。应低于“生气触发阈值”。",
         "slider": {
           "min": 10,
           "max": 100,
           "step": 5
         },
-        "default": 55,
+        "default": 70,
         "condition": {
           "enable_emotion_simulation": true
         }
@@ -4251,13 +4251,13 @@
       "emotional_gate_refuse_threshold": {
         "description": "生气触发阈值",
         "type": "int",
-        "hint": "累计刺痛感达到该值后，Bot 会表现出更明显的不满和短暂回避。应高于“伤心触发阈值”；若配置过低，运行时会自动抬高。",
+        "hint": "累计刺痛感达到该值后，Bot 才会表现出更明显的不满和短暂回避。建议保持较高，只让连续明确伤害触发。",
         "slider": {
           "min": 20,
           "max": 100,
           "step": 5
         },
-        "default": 80,
+        "default": 90,
         "condition": {
           "enable_emotion_simulation": true
         }
@@ -4271,7 +4271,7 @@
           "max": 60,
           "step": 1
         },
-        "default": 12,
+        "default": 24,
         "condition": {
           "enable_emotion_simulation": true
         }
@@ -4279,13 +4279,13 @@
       "emotional_gate_max_hurt_minutes": {
         "description": "最长收敛分钟",
         "type": "int",
-        "hint": "单次刺痛事件造成的最长主动暂停/收敛时长。道歉或安抚可以提前恢复。",
+        "hint": "单次刺痛事件造成的最长主动暂停/收敛时长。默认较短，避免情绪余波长时间压低回复；道歉或安抚可以提前恢复。",
         "slider": {
           "min": 10,
           "max": 720,
           "step": 10
         },
-        "default": 180,
+        "default": 90,
         "condition": {
           "enable_emotion_simulation": true
         }

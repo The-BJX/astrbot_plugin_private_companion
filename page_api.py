@@ -79,6 +79,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/users", self.list_users, ["GET"], "Private Companion Page users"),
             ("/user", self.get_user, ["GET"], "Private Companion Page user detail"),
             ("/user/update", self.update_user, ["POST"], "Private Companion Page update user"),
+            ("/user/delete", self.delete_user, ["POST"], "Private Companion Page delete user"),
             ("/groups", self.list_groups, ["GET"], "Private Companion Page groups"),
             ("/group", self.get_group, ["GET"], "Private Companion Page group detail"),
             ("/group/update", self.update_group, ["POST"], "Private Companion Page update group"),
@@ -6702,6 +6703,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "rest_reply_probability": _percent_attr("rest_reply_probability", 0.18),
             }
         )
+        for key in self._schema_bool_keys():
+            if key in values:
+                values[key] = self._normalize_bool_value(values[key])
         return values
 
     def _build_diagnostics(self, users: dict[str, Any], groups: dict[str, Any]) -> list[dict[str, str]]:
@@ -7163,6 +7167,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             return
         if key == "group_blacklist_ids":
             self.plugin.group_blacklist_ids = list(value or [])
+            return
+        if key == "target_user_ids":
+            self.plugin.target_user_ids = [
+                str(item).strip()
+                for item in (value or [])
+                if str(item or "").strip()
+            ]
             return
         if key == "QZONE_COOKIE":
             self.plugin.qzone_cookie = str(value or "").strip()
