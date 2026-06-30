@@ -8848,10 +8848,12 @@ class DailyStateMixin:
                 if isinstance(user.get("planned_event_chain"), list)
                 else []
             )
+            self._ensure_private_user_umo(user_id, user)
+            send_umo_for_send = _single_line(user.get("umo"), 180)
             friend_proactive_for_send = self._private_user_role(user) == "friend"
             if friend_proactive_for_send:
                 planned_chain_for_send = []
-            proactive_quote_message_id = self._planned_proactive_quote_message_id(user, str(user.get("umo") or ""))
+            proactive_quote_message_id = self._planned_proactive_quote_message_id(user, send_umo_for_send)
             planned_opener_mode_for_send = str(user.get("planned_opener_mode") or "")
             planned_followup_kind_for_send = str(user.get("planned_followup_kind") or "")
             if not is_troubleshooting_for_send and normalize_legacy_tag_text(user.get("planned_proactive_reason")) == "activity_share":
@@ -9468,19 +9470,20 @@ class DailyStateMixin:
                     if item
                 )
                 logger.info(
-                    "[PrivateCompanion] 准备主动发送给 %s: reason=%s(%s) action=%s quote=%s text=%s image=%s extra=%s%s",
+                    "[PrivateCompanion] 准备主动发送给 %s: reason=%s(%s) action=%s quote=%s umo=%s text=%s image=%s extra=%s%s",
                     user_id,
                     reason,
                     reason_label,
                     effective_action_for_send or planned_action_for_send or "message",
                     bool(proactive_quote_message_id),
+                    send_umo_for_send,
                     _single_line(text, 120),
                     bool(image_path),
                     len(extra_components),
                     f" detail={reason_detail}" if reason_detail else "",
                 )
                 await self._send_proactive_message_chain(
-                    user["umo"],
+                    send_umo_for_send,
                     text,
                     image_path,
                     extra_components=extra_components,
@@ -9593,8 +9596,12 @@ class DailyStateMixin:
                 simulation_active = self._simulation_active(current)
                 self._reset_daily_counter_if_needed(current)
                 current["last_sent"] = _now_ts()
+                if send_umo_for_send:
+                    current["umo"] = send_umo_for_send
                 visible_text = self._visible_text_without_tts_reading(text, limit=500)
                 current["last_companion_message"] = _single_line(visible_text, 500)
+                current["last_proactive_message"] = _single_line(visible_text, 500)
+                current["last_proactive_sent_at"] = current["last_sent"]
                 current["last_proactive_reason"] = reason
                 current["last_proactive_action"] = effective_action_for_send or planned_action_for_send or "message"
                 current["last_proactive_behavior_summary"] = action_summary

@@ -837,7 +837,10 @@ function featureSearchText(key) {
     .filter(([childKey]) => topLevelFeatureKey(childKey) === key)
     .map(([childKey]) => `${childKey} ${featureLabel(childKey)} ${featureDescription(childKey)}`)
     .join(" ");
-  return `${key} ${featureLabel(key)} ${featureDescription(key)} ${childText}`.toLowerCase();
+  const settingText = (featureSettingGroups[key] || [])
+    .map((settingKey) => `${settingKey} ${configLabel(settingKey)} ${configDescriptions[settingKey] || ""}`)
+    .join(" ");
+  return `${key} ${featureLabel(key)} ${featureDescription(key)} ${childText} ${settingText}`.toLowerCase();
 }
 
 const safeFeatureKeys = [

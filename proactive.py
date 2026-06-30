@@ -278,6 +278,21 @@ class ProactiveMixin:
     def _private_delivery_umo_for_user_id(self, user_id: str) -> str:
         return self._default_private_umo_for_user_id(self._private_delivery_user_id_for(user_id))
 
+    def _private_umo_matches_user_id(self, umo: str, user_id: str) -> bool:
+        clean_umo = _single_line(umo, 180)
+        clean_user_id = str(user_id or "").strip()
+        if not clean_umo or not clean_user_id:
+            return False
+        if f":FriendMessage:{clean_user_id}" not in clean_umo:
+            return False
+        parser = getattr(self, "_parse_message_session", None)
+        if callable(parser):
+            try:
+                return parser(clean_umo) is not None
+            except Exception:
+                return False
+        return True
+
     def _note_private_user_umo(self, user_id: str, user: dict[str, Any] | None, umo: str) -> None:
         if not isinstance(user, dict):
             return
@@ -285,12 +300,14 @@ class ProactiveMixin:
         if not clean_umo:
             return
         user_id = self._canonical_private_user_id(str(user_id or user.get("user_id") or "").strip())
-        delivery_umo = self._private_delivery_umo_for_user_id(user_id)
-        if delivery_umo:
+        user["last_inbound_umo"] = clean_umo
+        delivery_id = self._private_delivery_user_id_for(user_id)
+        if delivery_id and delivery_id != user_id:
+            delivery_umo = self._private_delivery_umo_for_user_id(user_id)
             user["umo"] = delivery_umo
-            user["last_inbound_umo"] = clean_umo
             return
-        user["umo"] = clean_umo
+        if self._private_umo_matches_user_id(clean_umo, user_id):
+            user["umo"] = clean_umo
 
     def _ensure_private_user_umo(self, user_id: str, user: dict[str, Any] | None) -> bool:
         if not isinstance(user, dict):
@@ -306,6 +323,15 @@ class ProactiveMixin:
             expected_suffix = f":FriendMessage:{delivery_id}"
             if not current.endswith(expected_suffix):
                 user["umo"] = fallback
+                return True
+        else:
+            last_inbound_umo = _single_line(user.get("last_inbound_umo"), 180)
+            if (
+                last_inbound_umo
+                and last_inbound_umo != current
+                and self._private_umo_matches_user_id(last_inbound_umo, canonical_id)
+            ):
+                user["umo"] = last_inbound_umo
                 return True
         if not current:
             user["umo"] = fallback
