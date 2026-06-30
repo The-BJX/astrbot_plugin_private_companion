@@ -386,6 +386,18 @@
     "default": "",
     "invisible": true
   },
+  "CREATIVE_OUTLINE_PROVIDER_ID": {
+    "description": "Legacy flat config: 创作大纲模型（留空跟随私下创作模型）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "CREATIVE_REVIEW_PROVIDER_ID": {
+    "description": "Legacy flat config: 创作审校/分析模型（留空跟随私下创作模型）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "VOICE_PROMPT_PROVIDER_ID": {
     "description": "Legacy flat config: 主动语音文案文本模型（留空跟随陪伴通用模型）",
     "type": "string",
@@ -3075,6 +3087,20 @@
         "description": "私下创作模型（留空跟随陪伴通用模型）",
         "type": "string",
         "hint": "用于生成创作项目设定和闲暇时的单次正文片段。作品可以是小说、诗、随笔、剧本、设定集等文本。建议选择文风稳定、能遵守人设身份边界的模型。",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "CREATIVE_OUTLINE_PROVIDER_ID": {
+        "description": "创作大纲模型（留空跟随私下创作模型）",
+        "type": "string",
+        "hint": "用于每次续写前整理本段短大纲。可以选择便宜、擅长结构化短输出的模型；留空时跟随私下创作模型。",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "CREATIVE_REVIEW_PROVIDER_ID": {
+        "description": "创作审校/分析模型（留空跟随私下创作模型）",
+        "type": "string",
+        "hint": "用于续写后的质量复核、重复检测辅助和故事圣经抽取。建议选择遵循 JSON 较稳定的模型；留空时跟随私下创作模型。",
         "default": "",
         "_special": "select_provider"
       },

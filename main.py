@@ -706,6 +706,8 @@ class PrivateCompanionPlugin(
         self.creative_max_active_projects = self._cfg_int(c, "creative_max_active_projects", 2, 1, 5)
         self.creative_hidden_mode = self._cfg_bool(c, "creative_hidden_mode", True)
         self.creative_provider_id = self._cfg_str(c, "CREATIVE_PROVIDER_ID", "")
+        self.creative_outline_provider_id = self._cfg_str(c, "CREATIVE_OUTLINE_PROVIDER_ID", "")
+        self.creative_review_provider_id = self._cfg_str(c, "CREATIVE_REVIEW_PROVIDER_ID", "")
         self.voice_prompt_provider_id = self._cfg_str(c, "VOICE_PROMPT_PROVIDER_ID", "")
         self.history_summary_provider_id = self._cfg_str(c, "HISTORY_SUMMARY_PROVIDER_ID", "")
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
@@ -1648,6 +1650,13 @@ class PrivateCompanionPlugin(
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             recalled_message_id,
         )
+        self._record_passive_no_reply(
+            event,
+            source="撤回取消",
+            reason="触发消息已撤回或发送前不可见",
+            detail=str(recalled_message_id),
+            level="info",
+        )
         empty_result = self._build_result_from_chain([])
         try:
             empty_result.stop_event()
@@ -1679,6 +1688,14 @@ class PrivateCompanionPlugin(
             "[PrivateCompanion] 待发送消息命中违禁词，已拦截发送: word=%s session=%s",
             _single_line(hit, 40),
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+        )
+        self._record_passive_no_reply(
+            event,
+            source="发送前拦截",
+            reason="待发送消息命中屏蔽词",
+            detail=hit,
+            reply_preview=text,
+            level="warn",
         )
         empty_result = self._build_result_from_chain([])
         try:
@@ -1719,6 +1736,13 @@ class PrivateCompanionPlugin(
                 "[PrivateCompanion] 已拦截孤立工具发送回执外发: session=%s text=%s",
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
                 _single_line(text, 120),
+            )
+            self._record_passive_no_reply(
+                event,
+                source="发送前拦截",
+                reason="孤立工具发送回执被拦截",
+                reply_preview=text,
+                level="warn",
             )
             empty_result = self._build_result_from_chain([])
             try:
@@ -1768,6 +1792,13 @@ class PrivateCompanionPlugin(
             marker_kind,
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             _single_line(text, 180),
+        )
+        self._record_passive_no_reply(
+            event,
+            source="发送前拦截",
+            reason=f"框架异常文本外发被拦截:{marker_kind}",
+            reply_preview=text,
+            level="warn",
         )
         empty_result = self._build_result_from_chain([])
         try:
@@ -1829,6 +1860,13 @@ class PrivateCompanionPlugin(
             _single_line(review.get("reason"), 120),
             _single_line(reply_text, 160),
         )
+        self._record_passive_no_reply(
+            event,
+            source="群聊答疑复核",
+            reason=_single_line(review.get("reason"), 120) or "群聊答疑碰瓷回复被拦截",
+            reply_preview=reply_text,
+            level="info",
+        )
         empty_result = self._build_result_from_chain([])
         try:
             empty_result.stop_event()
@@ -1846,6 +1884,12 @@ class PrivateCompanionPlugin(
             logger.info(
                 "[PrivateCompanion] 智能沉默发送前兜底拦截: reason=%s",
                 _single_line(getattr(event, "_private_companion_smart_silence_reason", ""), 120),
+            )
+            self._record_passive_no_reply(
+                event,
+                source="智能沉默",
+                reason=_single_line(getattr(event, "_private_companion_smart_silence_reason", ""), 120) or "用户边界语义触发静默",
+                level="info",
             )
             empty_result = self._build_result_from_chain([])
             try:
@@ -1914,6 +1958,13 @@ class PrivateCompanionPlugin(
             _single_line(inbound_text, 120),
             _single_line(reply_text, 140),
         )
+        self._record_passive_no_reply(
+            event,
+            source="智能沉默",
+            reason=_single_line(decision.get("reason"), 120) or "群聊边界语义触发静默",
+            reply_preview=reply_text,
+            level="info",
+        )
         empty_result = self._build_result_from_chain([])
         try:
             empty_result.stop_event()
@@ -1921,6 +1972,35 @@ class PrivateCompanionPlugin(
             pass
         event.set_result(empty_result)
         event.stop_event()
+
+    @filter.on_decorating_result()
+    async def record_empty_passive_result_before_send(self, event: AstrMessageEvent):
+        """发送前兜底记录空结果，避免被动不回复却没有排障原因。"""
+        if not self.enabled:
+            return
+        if bool(getattr(event, "_private_companion_passive_no_reply_recorded", False)):
+            return
+        if bool(getattr(event, "private_companion_proactive_framework", False)):
+            return
+        result = event.get_result()
+        if result is None:
+            return
+        chain = list(getattr(result, "chain", []) or [])
+        if chain:
+            return
+        try:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private = False
+        is_group = bool(self._extract_group_id_from_event(event))
+        if not is_private and not is_group:
+            return
+        self._record_passive_no_reply(
+            event,
+            source="发送前检查",
+            reason="发送前结果为空",
+            level="info",
+        )
 
     @filter.on_decorating_result()
     async def apply_tts_enhancement_before_send_hook(self, event: AstrMessageEvent):
@@ -1974,6 +2054,13 @@ class PrivateCompanionPlugin(
         if not self._is_silent_control_reply_text(text):
             return
         logger.info("[PrivateCompanion] 已静默吞掉群聊不回复控制语: %s", _single_line(text, 120))
+        self._record_passive_no_reply(
+            event,
+            source="群聊静默",
+            reason="模型输出不回复控制语",
+            reply_preview=text,
+            level="info",
+        )
         empty_result = self._build_result_from_chain([])
         try:
             empty_result.stop_event()
@@ -4439,6 +4526,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             _single_line(reason, 120),
         )
+        self._record_passive_no_reply(
+            event,
+            source="休息闸门",
+            reason=reason or "睡眠/休息回复闸门拦截",
+            level="info",
+        )
         empty_result = self._build_result_from_chain([])
         try:
             empty_result.stop_event()
@@ -4453,6 +4546,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             _single_line(user_id, 80),
             _single_line(text, 120),
         )
+        self._record_passive_no_reply(
+            event,
+            source="休息静默",
+            reason="用户表达休息后本轮私聊静默",
+            detail=text,
+            level="info",
+        )
         empty_result = self._build_result_from_chain([])
         try:
             empty_result.stop_event()
@@ -4460,6 +4560,133 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             pass
         event.set_result(empty_result)
         event.stop_event()
+
+    def _passive_no_reply_event_text(self, event: AstrMessageEvent | None, *, limit: int = 180) -> str:
+        if event is None:
+            return ""
+        candidates = [
+            getattr(event, "private_companion_group_text", ""),
+            getattr(event, "message_str", ""),
+        ]
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj is not None:
+            candidates.append(getattr(message_obj, "message_str", ""))
+        for value in candidates:
+            text = _single_line(value, limit)
+            if text:
+                return text
+        component_types: list[str] = []
+        try:
+            for item in self._event_components(event):
+                name = _single_line(self._component_type_name(item), 32)
+                if name and name not in component_types:
+                    component_types.append(name)
+        except Exception:
+            component_types = []
+        return ",".join(component_types[:6])
+
+    def _record_passive_no_reply(
+        self,
+        event: AstrMessageEvent | None,
+        *,
+        source: str,
+        reason: str,
+        detail: str = "",
+        level: str = "info",
+        action: str = "",
+        reply_preview: str = "",
+    ) -> None:
+        if bool(getattr(event, "_private_companion_passive_no_reply_recorded", False)):
+            return
+        if bool(getattr(event, "private_companion_proactive_framework", False)):
+            return
+        source_text = _single_line(source, 40) or "被动未回复"
+        reason_text = _single_line(reason, 120) or "未说明原因"
+        level_text = _single_line(level, 12)
+        if level_text not in {"error", "warn", "info"}:
+            level_text = "info"
+        now = _now_ts()
+        session = _single_line(getattr(event, "unified_msg_origin", ""), 160) if event is not None else ""
+        try:
+            sender_id = _single_line(event.get_sender_id(), 80) if event is not None else ""
+        except Exception:
+            sender_id = ""
+        inbound = self._passive_no_reply_event_text(event)
+        detail_text = _single_line(detail, 220)
+        reply_text = _single_line(reply_preview, 180)
+        key = hashlib.sha1(f"{source_text}|{reason_text}".encode("utf-8", errors="ignore")).hexdigest()[:16]
+        root = self.data.setdefault("passive_no_reply_records", {})
+        if not isinstance(root, dict):
+            root = {}
+            self.data["passive_no_reply_records"] = root
+        items = root.setdefault("items", [])
+        if not isinstance(items, list):
+            items = []
+            root["items"] = items
+        target: dict[str, Any] | None = None
+        for item in items:
+            if isinstance(item, dict) and item.get("key") == key:
+                target = item
+                break
+        if target is None:
+            target = {
+                "key": key,
+                "source": source_text,
+                "reason": reason_text,
+                "level": level_text,
+                "count": 0,
+                "first_ts": now,
+                "last_ts": 0,
+                "samples": [],
+            }
+            items.append(target)
+        target["source"] = source_text
+        target["reason"] = reason_text
+        target["level"] = level_text
+        target["count"] = _safe_int(target.get("count"), 0, 0) + 1
+        target["last_ts"] = now
+        target["last_session"] = session
+        target["last_sender_id"] = sender_id
+        target["last_inbound"] = inbound
+        target["last_detail"] = detail_text
+        target["last_action"] = _single_line(action, 120)
+        target["last_reply_preview"] = reply_text
+        sample = {
+            "ts": now,
+            "time": self._format_timestamp_elapsed(now),
+            "session": session,
+            "sender_id": sender_id,
+            "inbound": inbound,
+            "detail": detail_text,
+            "reply_preview": reply_text,
+        }
+        samples = target.setdefault("samples", [])
+        if not isinstance(samples, list):
+            samples = []
+            target["samples"] = samples
+        samples.insert(0, sample)
+        del samples[5:]
+        root["total"] = _safe_int(root.get("total"), 0, 0) + 1
+        root["last_ts"] = now
+        items.sort(key=lambda item: _safe_float(item.get("last_ts"), 0) if isinstance(item, dict) else 0, reverse=True)
+        del items[80:]
+        if event is not None:
+            try:
+                setattr(event, "_private_companion_passive_no_reply_recorded", True)
+            except Exception:
+                pass
+        logger.info(
+            "[PrivateCompanion] 已记录被动未回复: source=%s reason=%s count=%s session=%s inbound=%s",
+            source_text,
+            reason_text,
+            target.get("count"),
+            session or "-",
+            _single_line(inbound, 120),
+        )
+        try:
+            self._schedule_data_save()
+        except Exception:
+            pass
 
     def _proactive_only_unlock_store(self) -> set[str]:
         data = getattr(self, "data", None)
@@ -5543,6 +5770,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             original_text = str(resp.completion_text or "").strip()
             if not original_text:
                 self._stop_passive_input_status_loop(event)
+                self._record_passive_no_reply(
+                    event,
+                    source="主链回复",
+                    reason="LLM 返回空回复",
+                    level="warn",
+                )
                 release_now = True
                 return
             try:
@@ -5633,6 +5866,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     _single_line(silence_decision.get("reason"), 120),
                     _single_line(inbound_text, 120),
                     _single_line(working_text, 140),
+                )
+                self._record_passive_no_reply(
+                    event,
+                    source="智能沉默",
+                    reason=_single_line(silence_decision.get("reason"), 120) or "用户边界语义触发静默",
+                    detail=inbound_text,
+                    reply_preview=working_text,
+                    level="info",
                 )
                 release_now = True
                 return
@@ -6242,6 +6483,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user_id,
                 ",".join([item for item in component_types if item]) or "-",
             )
+            self._record_passive_no_reply(
+                event,
+                source="私聊事件",
+                reason="空私聊事件被忽略",
+                detail=",".join([item for item in component_types if item]) or "-",
+                level="info",
+            )
             empty_result = self._build_result_from_chain([])
             try:
                 empty_result.stop_event()
@@ -6292,6 +6540,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 logger.info("[PrivateCompanion] 忽略 poke 回流事件,不计入用户新消息: %s", user_id)
                 return
             if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
+                self._record_passive_no_reply(
+                    event,
+                    source="私聊去重",
+                    reason="重复私聊事件被忽略",
+                    detail=text,
+                    level="info",
+                )
                 event.stop_event()
                 return
             self._note_private_user_umo(user_id, fast_user, event.unified_msg_origin)
@@ -6339,6 +6594,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 return
             if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
                 self._schedule_data_save()
+                self._record_passive_no_reply(
+                    event,
+                    source="私聊去重",
+                    reason="重复私聊事件被忽略",
+                    detail=text,
+                    level="info",
+                )
                 event.stop_event()
                 return
             if is_target_user and text and not forward_only_prompt and not reference_media_with_text:

@@ -331,6 +331,7 @@ class CoreStoreMixin:
             "bookshelf_items": [],
             "bookshelf_secret": {},
             "creative_projects": [],
+            "creative_memory_pool": [],
             "proactive_candidate_pool": [],
             "external_proactive_abilities": {},
             "worldbook_entries": [],
@@ -381,6 +382,7 @@ class CoreStoreMixin:
         data.setdefault("bookshelf_items", [])
         data.setdefault("bookshelf_secret", {})
         data.setdefault("creative_projects", [])
+        data.setdefault("creative_memory_pool", [])
         data.setdefault("proactive_candidate_pool", [])
         data.setdefault("external_proactive_abilities", {})
         data.setdefault("worldbook_entries", [])

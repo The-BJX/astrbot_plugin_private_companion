@@ -111,6 +111,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/bookshelf/rate", self.rate_bookshelf_item, ["POST"], "Private Companion Page rate bookshelf item"),
             ("/bookshelf/tags", self.update_bookshelf_item_tags, ["POST"], "Private Companion Page update bookshelf item tags"),
             ("/bookshelf/comments/update", self.update_bookshelf_item_comments, ["POST"], "Private Companion Page update bookshelf item comments"),
+            ("/creative/project", self.get_creative_project, ["GET"], "Private Companion Page creative project detail"),
+            ("/creative/project/update", self.update_creative_project, ["POST"], "Private Companion Page update creative project"),
+            ("/creative/project/chunk/update", self.update_creative_chunk, ["POST"], "Private Companion Page update creative chunk"),
+            ("/creative/project/outline/update", self.update_creative_outline, ["POST"], "Private Companion Page update creative outline"),
+            ("/creative/project/characters/update", self.update_creative_characters, ["POST"], "Private Companion Page update creative characters"),
+            ("/creative/project/reanalyze", self.reanalyze_creative_project, ["POST"], "Private Companion Page reanalyze creative project"),
+            ("/creative/project/rebuild_memory", self.rebuild_creative_memory, ["POST"], "Private Companion Page rebuild creative memory"),
+            ("/creative/project/delete", self.delete_creative_project, ["POST"], "Private Companion Page delete creative project"),
             ("/worldbook/import", self.import_worldbook, ["POST"], "Private Companion Page import worldbook"),
             ("/worldbook/member/livingmemory", self.get_worldbook_member_livingmemory, ["GET"], "Private Companion Page worldbook member LivingMemory"),
             ("/worldbook/member/update", self.update_worldbook_member, ["POST"], "Private Companion Page update worldbook member"),
@@ -969,11 +977,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             cache = self._cache_summary(data)
             tts = self._tts_runtime_summary(users)
             sqlite_status = await self._sqlite_wal_status_summary()
+            passive_no_reply = self._passive_no_reply_summary(data)
+            screen_companion = self._screen_companion_summary(data)
+            qzone = self._qzone_summary(data)
             recent_events = self._troubleshooting_recent_events(
                 diagnostics=diagnostics,
                 proactive_tasks=proactive_tasks,
                 proactive_candidates=proactive_candidates,
                 token_stats=token_stats,
+                passive_no_reply=passive_no_reply,
             )
             checks = self._troubleshooting_checks(
                 data=data,
@@ -1008,7 +1020,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "sqlite": sqlite_status,
                     "chain_tests": self._troubleshooting_test_results(data),
                     "recent_photo_generations": self._recent_photo_generation_summary(data),
+                    "passive_no_reply": passive_no_reply,
                     "prompt_injections": self._prompt_injection_summary(data),
+                    "screen_companion": screen_companion,
+                    "qzone": qzone,
                     "proactive_runtime": proactive_tasks.get("runtime", {}),
                     "token_budget": token_stats.get("budget", {}),
                     "cache": cache,
@@ -1032,6 +1047,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 result = await self._run_image_generation_chain_test(image_payload)
             elif test_type == "tts_generation":
                 result = await self._run_tts_generation_chain_test(payload)
+            elif test_type == "screen_peek":
+                result = await self._run_screen_peek_chain_test(payload)
+            elif test_type == "qzone_integration":
+                result = await self._run_qzone_chain_test(payload)
             elif test_type == "proactive_message":
                 result = await self._run_proactive_message_chain_test(payload)
             elif test_type in {"skill_similarity", "model_diagnostics"}:
@@ -1214,6 +1233,204 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             seen.add(item)
             unique.append(item)
         return self._single_line("，".join(unique), 420)
+
+    async def _run_screen_peek_chain_test(self, payload: dict[str, Any]) -> dict[str, Any]:
+        getter = getattr(self.plugin, "_get_screen_companion_plugin", None)
+        screen_plugin = getter() if callable(getter) else None
+        if screen_plugin is None or not callable(getattr(screen_plugin, "_invoke_screen_skill", None)):
+            return {
+                "ok": False,
+                "title": "窥屏链路测试",
+                "error": "未检测到可用的 screen_companion 插件或识屏入口",
+            }
+        async with self.plugin._data_lock:
+            users = deepcopy(self.plugin.data.get("users") if isinstance(self.plugin.data.get("users"), dict) else {})
+        umo = self._single_line(payload.get("umo"), 180) or self._preferred_tts_test_umo(users)
+        event = None
+        if umo and callable(getattr(screen_plugin, "_create_virtual_event", None)):
+            try:
+                event = screen_plugin._create_virtual_event(umo)
+            except Exception as exc:
+                logger.info(
+                    "[PrivateCompanionPage] 窥屏排障虚拟事件创建失败,将无事件调用: umo=%s error=%s",
+                    self._single_line(umo, 120),
+                    self._single_line(exc, 120),
+                )
+        prompt = self._single_line(payload.get("prompt"), 500) or (
+            "这是一次插件排障中心发起的授权识屏链路测试。请只判断当前屏幕观察能力是否可用，"
+            "用一句很短的内部摘要描述大概画面类型；不要输出账号、完整聊天内容、隐私细节或长文本。"
+        )
+        started = time.time()
+        try:
+            raw_result = await asyncio.wait_for(
+                screen_plugin._invoke_screen_skill(
+                    event,
+                    request_prompt=prompt,
+                    history_user_text="Private Companion 排障中心正在测试 screen_companion 识屏链路。",
+                    task_id="private_companion_troubleshooting_screen_peek",
+                ),
+                timeout=max(15, self._int(payload.get("timeout_seconds"), 60, 5, 180)),
+            )
+        except Exception as exc:
+            elapsed_ms = int((time.time() - started) * 1000)
+            error = self._single_line(exc, 220)
+            logger.warning("[PrivateCompanionPage] 窥屏排障测试失败: %s", error, exc_info=True)
+            return {
+                "ok": False,
+                "title": "窥屏链路测试",
+                "umo": umo,
+                "elapsed_ms": elapsed_ms,
+                "error": error or repr(exc),
+            }
+        elapsed_ms = int((time.time() - started) * 1000)
+        context = "screen_peek：\n" + (self._single_line(raw_result, 500) if raw_result else "没有得到屏幕观察结果")
+        unusable_checker = getattr(self.plugin, "_is_unusable_screen_peek_context", None)
+        unusable = bool(unusable_checker(context)) if callable(unusable_checker) else not bool(raw_result)
+        preview = self._single_line(raw_result, 220)
+        logger.info(
+            "[PrivateCompanionPage] 窥屏排障测试结束: ok=%s elapsed=%sms umo=%s preview=%s",
+            not unusable,
+            elapsed_ms,
+            self._single_line(umo, 120),
+            preview,
+        )
+        return {
+            "ok": not unusable,
+            "title": "窥屏链路测试",
+            "umo": umo,
+            "provider": "screen_companion",
+            "detail": "已成功获得屏幕观察摘要" if not unusable else "识屏返回为空或不可用结果",
+            "text_preview": preview,
+            "context_chars": len(str(raw_result or "")),
+            "elapsed_ms": elapsed_ms,
+            "error": "" if not unusable else (preview or "没有得到屏幕观察结果"),
+        }
+
+    async def _run_qzone_chain_test(self, payload: dict[str, Any]) -> dict[str, Any]:
+        steps: list[dict[str, str]] = []
+
+        def add_step(name: str, status: str, detail: str) -> None:
+            steps.append(
+                {
+                    "name": self._single_line(name, 40),
+                    "status": self._single_line(status, 16),
+                    "detail": self._single_line(detail, 180),
+                }
+            )
+
+        started = time.time()
+        service_available = bool(
+            callable(getattr(self.plugin, "_test_qzone_integration", None))
+            and callable(getattr(self.plugin, "_qzone_get_cookies", None))
+        )
+        enabled = bool(getattr(self.plugin, "enable_qzone_integration", False))
+        comment_enabled = bool(getattr(self.plugin, "enable_qzone_comment_inbox", False))
+        add_step("内置服务", "ok" if service_available else "error", "可用" if service_available else "QQ 空间模块入口不可用")
+        add_step("整合开关", "ok" if enabled else "warn", "已开启" if enabled else "已关闭")
+        if not service_available or not enabled:
+            return {
+                "ok": False,
+                "title": "QQ 空间链路测试",
+                "provider": "qzone",
+                "detail": "QQ 空间整合未启用或模块入口不可用",
+                "text_preview": "开启 QQ 空间整合后再测试 Cookie、读取和发布工具链路。",
+                "steps": steps,
+                "elapsed_ms": int((time.time() - started) * 1000),
+                "error": "QQ 空间整合未启用或模块入口不可用",
+            }
+
+        target_id = self._single_line(payload.get("target_id"), 40)
+        read_text = ""
+        read_ok = False
+        read_detail = ""
+        reader = getattr(self.plugin, "_test_qzone_integration", None)
+        if callable(reader):
+            try:
+                read_text = await asyncio.wait_for(
+                    reader(None, target_id=target_id),
+                    timeout=max(15, self._int(payload.get("timeout_seconds"), 45, 10, 180)),
+                )
+                read_ok = ("读取链路正常" in read_text) or ("读取链路可调用" in read_text)
+                read_detail = (
+                    (self._qzone_test_line_with_prefix(read_text, "查询结果：失败") if not read_ok else "")
+                    or self._qzone_test_last_result_line(read_text)
+                    or self._single_line(read_text, 180)
+                )
+                add_step("Cookie/读取", "ok" if read_ok else "error", read_detail or "读取测试未返回明确结果")
+            except Exception as exc:
+                read_detail = self._single_line(exc, 180)
+                add_step("Cookie/读取", "error", read_detail or "读取测试异常")
+        else:
+            add_step("Cookie/读取", "error", "缺少 _test_qzone_integration 测试入口")
+
+        publish_ok = False
+        publish_detail = ""
+        publisher = getattr(self.plugin, "_pc_qzone_publish_feed_impl", None)
+        if callable(publisher):
+            try:
+                raw = await asyncio.wait_for(publisher(None, ""), timeout=15)
+                parsed = json.loads(raw) if isinstance(raw, str) else {}
+                status = self._single_line(parsed.get("status"), 40) if isinstance(parsed, dict) else ""
+                message = self._single_line(parsed.get("message"), 160) if isinstance(parsed, dict) else self._single_line(raw, 160)
+                publish_ok = status == "need_text"
+                publish_detail = "空参数返回 need_text，发布工具入口正常" if publish_ok else (message or f"返回 {status or '未知状态'}")
+                add_step("发布模拟", "ok" if publish_ok else "warn", publish_detail)
+            except Exception as exc:
+                publish_detail = self._single_line(exc, 180)
+                add_step("发布模拟", "error", publish_detail or "发布工具空参数测试异常")
+        else:
+            add_step("发布模拟", "warn", "缺少发布工具入口，无法测试空参数模拟")
+
+        async with self.plugin._data_lock:
+            qzone_state = deepcopy(
+                self.plugin.data.get("qzone_integration")
+                if isinstance(self.plugin.data.get("qzone_integration"), dict)
+                else {}
+            )
+        list_len = lambda key: len(qzone_state.get(key)) if isinstance(qzone_state.get(key), list) else 0
+        seen_count = list_len("comment_inbox_seen_ids") + list_len("comment_inbox_seen_keys")
+        replied_count = list_len("comment_inbox_replied_ids") + list_len("comment_inbox_replied_keys")
+        inbox_status = self._single_line(qzone_state.get("last_comment_inbox_status"), 120)
+        inbox_detail = (
+            f"{'已开启' if comment_enabled else '未开启'}；已见 {seen_count}，已回复 {replied_count}"
+            + (f"；最近 {inbox_status}" if inbox_status else "")
+        )
+        add_step("评论收件箱", "ok" if comment_enabled else "info", inbox_detail)
+
+        ok = bool(read_ok and publish_ok)
+        preview_parts = [
+            read_detail,
+            publish_detail,
+            inbox_detail,
+        ]
+        if read_text:
+            preview_parts.append(self._single_line(read_text, 500))
+        return {
+            "ok": ok,
+            "title": "QQ 空间链路测试",
+            "provider": "qzone",
+            "detail": "QQ 空间读取和发布模拟正常" if ok else "QQ 空间链路存在需要处理的项",
+            "text_preview": self._single_line("；".join(part for part in preview_parts if part), 500),
+            "steps": steps,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "error": "" if ok else (read_detail or publish_detail or "QQ 空间链路测试未通过"),
+        }
+
+    @staticmethod
+    def _qzone_test_last_result_line(text: str) -> str:
+        for line in reversed(str(text or "").replace("\r", "\n").split("\n")):
+            clean = line.strip().lstrip("-").strip()
+            if clean.startswith("结果："):
+                return clean
+        return ""
+
+    @staticmethod
+    def _qzone_test_line_with_prefix(text: str, prefix: str) -> str:
+        for line in str(text or "").replace("\r", "\n").split("\n"):
+            clean = line.strip().lstrip("-").strip()
+            if clean.startswith(prefix):
+                return clean
+        return ""
 
     async def _run_tts_generation_chain_test(self, payload: dict[str, Any]) -> dict[str, Any]:
         context = getattr(self.plugin, "context", None)
@@ -2429,6 +2646,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "error": self._single_line(result.get("error"), 220),
             "prompt": self._single_line(result.get("prompt"), 500),
             "text_preview": self._single_line(result.get("text_preview"), 220),
+            "context_chars": self._int(result.get("context_chars")),
             "action": self._single_line(result.get("action"), 60),
             "reason": self._single_line(result.get("reason"), 40),
             "extra_count": self._int(result.get("extra_count")),
@@ -2476,6 +2694,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "image_generation_text2img": "文生图链路测试",
             "image_generation_selfie": "自拍参考图链路测试",
             "tts_generation": "TTS 生成链路测试",
+            "screen_peek": "窥屏链路测试",
+            "qzone_integration": "QQ 空间链路测试",
             "proactive_message": "主动消息链路测试",
             "model_diagnostics": "模型数据排障",
             "skill_similarity": "技能相似项检查",
@@ -2488,6 +2708,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         proactive_tasks: dict[str, Any],
         proactive_candidates: dict[str, Any],
         token_stats: dict[str, Any],
+        passive_no_reply: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
 
@@ -2562,8 +2783,88 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             )
             add("error", "模型调用", title, detail, ts=self._float(item.get("ts")), jump="tokens")
 
+        passive_items = passive_no_reply.get("items", []) if isinstance(passive_no_reply, dict) else []
+        for item in passive_items[:40]:
+            if not isinstance(item, dict):
+                continue
+            count = self._int(item.get("count"))
+            source = self._single_line(item.get("source"), 40) or "被动未回复"
+            reason = self._single_line(item.get("reason"), 100) or "未说明原因"
+            inbound = self._single_line(item.get("last_inbound"), 100)
+            detail = "；".join(
+                part
+                for part in [
+                    f"已合并 {count} 次" if count > 1 else "最近 1 次",
+                    f"会话 {self._single_line(item.get('last_session'), 80)}" if item.get("last_session") else "",
+                    f"消息 {inbound}" if inbound else "",
+                    self._single_line(item.get("last_detail"), 120),
+                ]
+                if part
+            )
+            add(
+                self._single_line(item.get("level"), 12) or "info",
+                source,
+                reason,
+                detail,
+                ts=self._float(item.get("last_ts")),
+                action="同类原因已合并计数，刷新后可查看最近样本",
+                jump="troubleshooting",
+            )
+
         events.sort(key=lambda item: self._float(item.get("ts")), reverse=True)
         return events
+
+    def _passive_no_reply_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        raw = data.get("passive_no_reply_records")
+        if not isinstance(raw, dict):
+            return {"total": 0, "items": []}
+        items: list[dict[str, Any]] = []
+        for item in raw.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            samples = []
+            for sample in item.get("samples", []) if isinstance(item.get("samples"), list) else []:
+                if not isinstance(sample, dict):
+                    continue
+                ts = self._float(sample.get("ts"))
+                samples.append(
+                    {
+                        "time": self.plugin._format_timestamp_elapsed(ts) if ts else self._single_line(sample.get("time"), 40),
+                        "session": self._single_line(sample.get("session"), 120),
+                        "sender_id": self._single_line(sample.get("sender_id"), 80),
+                        "inbound": self._single_line(sample.get("inbound"), 120),
+                        "detail": self._single_line(sample.get("detail"), 160),
+                        "reply_preview": self._single_line(sample.get("reply_preview"), 140),
+                        "ts": ts,
+                    }
+                )
+            last_ts = self._float(item.get("last_ts"))
+            items.append(
+                {
+                    "key": self._single_line(item.get("key"), 32),
+                    "level": self._single_line(item.get("level"), 12) or "info",
+                    "source": self._single_line(item.get("source"), 40) or "被动未回复",
+                    "reason": self._single_line(item.get("reason"), 120) or "未说明原因",
+                    "count": self._int(item.get("count")),
+                    "first_ts": self._float(item.get("first_ts")),
+                    "last_ts": last_ts,
+                    "last_time": self.plugin._format_timestamp_elapsed(last_ts) if last_ts else "",
+                    "last_session": self._single_line(item.get("last_session"), 120),
+                    "last_sender_id": self._single_line(item.get("last_sender_id"), 80),
+                    "last_inbound": self._single_line(item.get("last_inbound"), 120),
+                    "last_detail": self._single_line(item.get("last_detail"), 160),
+                    "last_action": self._single_line(item.get("last_action"), 120),
+                    "last_reply_preview": self._single_line(item.get("last_reply_preview"), 140),
+                    "samples": samples[:5],
+                }
+            )
+        items.sort(key=lambda item: self._float(item.get("last_ts")), reverse=True)
+        total = self._int(raw.get("total")) or sum(self._int(item.get("count")) for item in items)
+        return {
+            "total": total,
+            "last_ts": self._float(raw.get("last_ts")),
+            "items": items[:80],
+        }
 
     def _active_token_failures(
         self,
@@ -5377,10 +5678,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         except Exception:
             bilibili_available = False
         try:
-            qzone_available = bool(getattr(self.plugin, "_qzone_available", lambda: False)())
-        except Exception:
-            qzone_available = False
-        try:
             screen_companion_available = bool(self._screen_companion_available())
         except Exception:
             screen_companion_available = False
@@ -5391,18 +5688,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         values["enable_livingmemory_integration"] = bool(livingmemory_available and getattr(self.plugin, "enable_livingmemory_integration", False))
         values["enable_bilibili_integration"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_integration", False))
         values["enable_bilibili_boredom_watch"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_boredom_watch", False))
-        values["enable_qzone_integration"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_integration", False))
-        values["enable_qzone_life_publish"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_life_publish", False))
-        values["enable_qzone_generated_image_publish"] = bool(
-            qzone_available
-            and getattr(self.plugin, "enable_qzone_generated_image_publish", False)
-        )
-        values["enable_qzone_comment_inbox"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_comment_inbox", False))
-        values["enable_qzone_emotional_vent_publish"] = bool(
-            qzone_available
-            and getattr(self.plugin, "enable_emotion_simulation", False)
-            and getattr(self.plugin, "enable_qzone_emotional_vent_publish", False)
-        )
+        values["enable_qzone_integration"] = bool(getattr(self.plugin, "enable_qzone_integration", False))
+        values["enable_qzone_life_publish"] = bool(getattr(self.plugin, "enable_qzone_life_publish", False))
+        values["enable_qzone_generated_image_publish"] = bool(getattr(self.plugin, "enable_qzone_generated_image_publish", False))
+        values["enable_qzone_comment_inbox"] = bool(getattr(self.plugin, "enable_qzone_comment_inbox", False))
+        values["enable_qzone_emotional_vent_publish"] = bool(getattr(self.plugin, "enable_qzone_emotional_vent_publish", False))
         values["enable_yesterday_screen_diary_context"] = bool(screen_companion_available and getattr(self.plugin, "enable_yesterday_screen_diary_context", False))
         values["enable_private_reading_integration"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_integration", False))
         values["enable_private_reading_boredom_read"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_boredom_read", False))
@@ -5460,6 +5750,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "DETAIL_ENHANCEMENT_PROVIDER_ID",
             "DREAM_DIARY_PROVIDER_ID",
             "CREATIVE_PROVIDER_ID",
+            "CREATIVE_OUTLINE_PROVIDER_ID",
+            "CREATIVE_REVIEW_PROVIDER_ID",
             "VOICE_PROMPT_PROVIDER_ID",
             "tts_conversion_provider_id",
             "PHOTO_PROMPT_PROVIDER_ID",
@@ -7131,6 +7423,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "DETAIL_ENHANCEMENT_PROVIDER_ID": "detail_enhancement_provider_id",
             "DREAM_DIARY_PROVIDER_ID": "dream_diary_provider_id",
             "CREATIVE_PROVIDER_ID": "creative_provider_id",
+            "CREATIVE_OUTLINE_PROVIDER_ID": "creative_outline_provider_id",
+            "CREATIVE_REVIEW_PROVIDER_ID": "creative_review_provider_id",
             "VOICE_PROMPT_PROVIDER_ID": "voice_prompt_provider_id",
             "PHOTO_PROMPT_PROVIDER_ID": "photo_prompt_provider_id",
             "NARRATION_PROVIDER_ID": "narration_provider_id",
@@ -7539,6 +7833,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "DETAIL_ENHANCEMENT_PROVIDER_ID",
             "DREAM_DIARY_PROVIDER_ID",
             "CREATIVE_PROVIDER_ID",
+            "CREATIVE_OUTLINE_PROVIDER_ID",
+            "CREATIVE_REVIEW_PROVIDER_ID",
             "VOICE_PROMPT_PROVIDER_ID",
             "tts_conversion_provider_id",
             "PHOTO_PROMPT_PROVIDER_ID",
@@ -9369,16 +9665,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
     def _qzone_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         state = data.get("qzone_integration") if isinstance(data.get("qzone_integration"), dict) else {}
-        try:
-            available = bool(getattr(self.plugin, "_qzone_available", lambda: False)())
-        except Exception:
-            available = False
+        available = bool(
+            callable(getattr(self.plugin, "_qzone_get_cookies", None))
+            and callable(getattr(self.plugin, "_qzone_query_feeds", None))
+        )
+        enabled = bool(available and getattr(self.plugin, "enable_qzone_integration", False))
         return {
-            "enabled": bool(available and getattr(self.plugin, "enable_qzone_integration", False)),
-            "life_publish_enabled": bool(available and getattr(self.plugin, "enable_qzone_life_publish", False)),
-            "comment_inbox_enabled": bool(available and getattr(self.plugin, "enable_qzone_comment_inbox", False)),
+            "enabled": enabled,
+            "life_publish_enabled": bool(enabled and getattr(self.plugin, "enable_qzone_life_publish", False)),
+            "comment_inbox_enabled": bool(enabled and getattr(self.plugin, "enable_qzone_comment_inbox", False)),
             "emotional_vent_enabled": bool(
-                available
+                enabled
                 and getattr(self.plugin, "enable_emotion_simulation", False)
                 and getattr(self.plugin, "enable_qzone_emotional_vent_publish", False)
             ),
@@ -9623,6 +9920,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "progress": progress,
                     "content": full_text or self._single_line(chunks[-1].get("text") if chunks else "", 2000) or "这本书还没有正文。",
                     "chunks": chunk_entries,
+                    "outline_count": len(item.get("outline") or []) if isinstance(item.get("outline"), list) else 0,
+                    "character_count": len(item.get("characters") or []) if isinstance(item.get("characters"), list) else 0,
+                    "review_count": len(item.get("quality_reviews") or []) if isinstance(item.get("quality_reviews"), list) else 0,
+                    "manual_edit_count": len(item.get("manual_edits") or []) if isinstance(item.get("manual_edits"), list) else 0,
+                    "has_story_bible": bool(item.get("story_bible")) if isinstance(item.get("story_bible"), dict) else False,
+                    "last_manual_edit_summary": self._single_line(item.get("last_manual_edit_summary"), 120),
                     "created": self.plugin._format_timestamp_elapsed(item.get("created_at", 0)),
                 }
             )
@@ -10521,6 +10824,305 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             },
         }
 
+    # ============================================================
+    # Creative Project Management Endpoints
+    # ============================================================
+
+    def _creative_project_payload(self, project: dict[str, Any]) -> dict[str, Any]:
+        chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+        chunk_items = []
+        for idx, chunk in enumerate(chunks):
+            if not isinstance(chunk, dict):
+                continue
+            chunk_ts = chunk.get("at", 0) or chunk.get("created_at", 0) or chunk.get("created_ts", 0)
+            chunk_items.append(
+                {
+                    "index": idx,
+                    "text": self._single_line(chunk.get("text"), 8000),
+                    "chars": self._int(chunk.get("chars")),
+                    "at": chunk_ts,
+                    "created": self.plugin._format_timestamp_elapsed(chunk_ts),
+                    "manually_edited": bool(chunk.get("manually_edited")),
+                }
+            )
+        return {
+            "id": self._single_line(project.get("id"), 32),
+            "title": self._single_line(project.get("title"), 80),
+            "work_type": self._single_line(project.get("work_type"), 40) or "短篇小说",
+            "premise": self._single_line(project.get("premise"), 500),
+            "tone": self._single_line(project.get("tone"), 80),
+            "point_of_view": self._single_line(project.get("point_of_view"), 60),
+            "source": self._single_line(project.get("source"), 40),
+            "source_text": self._single_line(project.get("source_text"), 500),
+            "status": self._single_line(project.get("status"), 24),
+            "current_chars": self._int(project.get("current_chars")),
+            "target_chars": self._int(project.get("target_chars")),
+            "next_hint": self._single_line(project.get("next_hint"), 240),
+            "outline": project.get("outline") if isinstance(project.get("outline"), list) else [],
+            "characters": project.get("characters") if isinstance(project.get("characters"), list) else [],
+            "story_bible": project.get("story_bible") if isinstance(project.get("story_bible"), dict) else {},
+            "revision_notes": self._limited_list(project.get("revision_notes"), 20),
+            "quality_reviews": self._limited_list(project.get("quality_reviews"), 20),
+            "manual_edits": self._limited_list(project.get("manual_edits"), 30),
+            "creative_memory_pool": self._limited_list(project.get("creative_memory_pool"), 50),
+            "last_manual_edit_at": self.plugin._format_timestamp_elapsed(project.get("last_manual_edit_at", 0)),
+            "last_manual_edit_summary": self._single_line(project.get("last_manual_edit_summary"), 160),
+            "chunks": chunk_items,
+            "chunk_count": len(chunk_items),
+            "milestones": project.get("disclosed_milestones") if isinstance(project.get("disclosed_milestones"), list) else [],
+            "created_at": self.plugin._format_timestamp_elapsed(project.get("created_at", 0)),
+            "last_advanced": self.plugin._format_timestamp_elapsed(project.get("last_advanced_at", 0)),
+            "next_advance": self.plugin._format_timestamp_elapsed(project.get("next_advance_at", 0)),
+        }
+
+    async def get_creative_project(self) -> dict[str, Any]:
+        project_id = str(request.args.get("id", "")).strip()
+        if not project_id:
+            return self._error("缺少 id")
+        try:
+            async with self.plugin._data_lock:
+                projects = self.plugin.data.get("creative_projects") if isinstance(self.plugin.data.get("creative_projects"), list) else []
+                project = next((p for p in projects if isinstance(p, dict) and p.get("id") == project_id), None)
+                if not project:
+                    return self._error("作品不存在")
+                snapshot = deepcopy(project)
+            return self._ok(self._creative_project_payload(snapshot))
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 获取创作项目详情失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def update_creative_project(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        project_id = str(payload.get("id", "")).strip()
+        if not project_id:
+            return self._error("缺少 id")
+        try:
+            changed_notes: list[str] = []
+            async with self.plugin._data_lock:
+                projects = self.plugin.data.get("creative_projects") if isinstance(self.plugin.data.get("creative_projects"), list) else []
+                project = next((p for p in projects if isinstance(p, dict) and p.get("id") == project_id), None)
+                if not project:
+                    return self._error("作品不存在")
+                for key, limit in (
+                    ("title", 80),
+                    ("work_type", 40),
+                    ("premise", 500),
+                    ("tone", 80),
+                    ("point_of_view", 60),
+                    ("next_hint", 240),
+                    ("source_text", 500),
+                ):
+                    if key not in payload:
+                        continue
+                    value = self._single_line(payload.get(key), limit)
+                    if value != self._single_line(project.get(key), limit):
+                        project[key] = value
+                        changed_notes.append(f"{key}: {value}")
+                if "status" in payload:
+                    status = self._single_line(payload.get("status"), 24)
+                    if status in ("drafting", "finished", "paused") and status != project.get("status"):
+                        project["status"] = status
+                        changed_notes.append(f"status: {status}")
+                if "target_chars" in payload:
+                    target_chars = _safe_int(payload.get("target_chars"), 2000, 300, 5200)
+                    if target_chars != self._int(project.get("target_chars")):
+                        project["target_chars"] = target_chars
+                        changed_notes.append(f"target_chars: {target_chars}")
+                if changed_notes:
+                    story_bible_getter = getattr(self.plugin, "_get_or_create_story_bible", None)
+                    if callable(story_bible_getter):
+                        story_bible = story_bible_getter(project)
+                        if "premise" in payload:
+                            story_bible["mainline_direction"] = self._single_line(project.get("premise"), 160)
+                        if "next_hint" in payload:
+                            story_bible["next_direction"] = self._single_line(project.get("next_hint"), 160)
+                    edits = project.setdefault("manual_edits", [])
+                    if not isinstance(edits, list):
+                        edits = []
+                        project["manual_edits"] = edits
+                    now = time.time()
+                    note = "；".join(changed_notes)
+                    edits.append(
+                        {
+                            "id": secrets.token_hex(6),
+                            "type": "project_meta",
+                            "title": "更新作品信息",
+                            "content": note[:2000],
+                            "chunk_index": -1,
+                            "created_at": now,
+                        }
+                    )
+                    del edits[:-10]
+                    project["last_manual_edit_at"] = now
+                    project["last_manual_edit_summary"] = "更新作品信息"
+                    pool_getter = getattr(self.plugin, "_get_or_create_memory_pool", None)
+                    add_memory = getattr(self.plugin, "_add_memory_entry", None)
+                    extract_keywords = getattr(self.plugin, "_extract_creative_keywords", None)
+                    if callable(pool_getter) and callable(add_memory):
+                        keywords = extract_keywords(note, limit=8) if callable(extract_keywords) else ["作品信息"]
+                        add_memory(
+                            pool_getter(project),
+                            project_id,
+                            "revision",
+                            f"更新作品信息: {self._single_line(note, 180)}",
+                            keywords or ["作品信息"],
+                            importance=5,
+                        )
+                self.plugin._save_data_sync()
+            return self._ok({"project_id": project_id, "changed": bool(changed_notes), "message": "作品已更新"})
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 更新创作项目失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def update_creative_chunk(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        project_id = str(payload.get("id", "")).strip()
+        chunk_index = _safe_int(payload.get("chunk_index"), -1, -1)
+        text = str(payload.get("text", "")).strip()
+        if not project_id:
+            return self._error("缺少 id")
+        if chunk_index < 0:
+            return self._error("缺少 chunk_index")
+        if not text:
+            return self._error("缺少 text")
+        try:
+            apply_edit = getattr(self.plugin, "_apply_creative_manual_edit", None)
+            if not callable(apply_edit):
+                return self._error("创作编辑能力不可用")
+            result = await apply_edit(project_id, "chunk_text", text, f"修改第{chunk_index + 1}段", chunk_index)
+            if not result.get("success"):
+                return self._error(result.get("error") or "片段更新失败")
+            return self._ok({"project_id": project_id, "chunk_index": chunk_index, "message": "片段已更新"})
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 更新创作片段失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def update_creative_outline(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        project_id = str(payload.get("id", "")).strip()
+        outline_text = str(payload.get("outline", "")).strip()
+        if not project_id:
+            return self._error("缺少 id")
+        try:
+            apply_edit = getattr(self.plugin, "_apply_creative_manual_edit", None)
+            if not callable(apply_edit):
+                return self._error("创作编辑能力不可用")
+            result = await apply_edit(project_id, "outline", outline_text, "更新大纲", -1)
+            if not result.get("success"):
+                return self._error(result.get("error") or "大纲更新失败")
+            return self._ok({"project_id": project_id, "message": "大纲已更新"})
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 更新创作大纲失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def update_creative_characters(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        project_id = str(payload.get("id", "")).strip()
+        raw_characters = payload.get("characters")
+        if not project_id:
+            return self._error("缺少 id")
+        if not isinstance(raw_characters, list):
+            return self._error("角色必须是数组")
+        try:
+            characters = [item for item in raw_characters if isinstance(item, dict)]
+            apply_edit = getattr(self.plugin, "_apply_creative_manual_edit", None)
+            if not callable(apply_edit):
+                return self._error("创作编辑能力不可用")
+            result = await apply_edit(
+                project_id,
+                "characters",
+                json.dumps(characters, ensure_ascii=False),
+                "更新角色表",
+                -1,
+            )
+            if not result.get("success"):
+                return self._error(result.get("error") or "角色更新失败")
+            return self._ok({"project_id": project_id, "message": "角色已更新"})
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 更新创作角色失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def reanalyze_creative_project(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        project_id = str(payload.get("id", "")).strip()
+        if not project_id:
+            return self._error("缺少 id")
+        try:
+            async with self.plugin._data_lock:
+                projects = self.plugin.data.get("creative_projects") if isinstance(self.plugin.data.get("creative_projects"), list) else []
+                project = next((p for p in projects if isinstance(p, dict) and p.get("id") == project_id), None)
+                if not project:
+                    return self._error("作品不存在")
+                snapshot = deepcopy(project)
+            chunks = snapshot.get("draft_chunks") if isinstance(snapshot.get("draft_chunks"), list) else []
+            latest = next((c for c in reversed(chunks) if isinstance(c, dict) and self._single_line(c.get("text"), 80)), None)
+            if not latest:
+                return self._error("还没有正文片段，无法分析")
+            story_bible = snapshot.get("story_bible") if isinstance(snapshot.get("story_bible"), dict) else {}
+            outline = "\n".join(snapshot.get("outline", [])) if isinstance(snapshot.get("outline"), list) else ""
+            safe_recent_chunks = [c for c in chunks[-5:] if isinstance(c, dict)]
+            reviewer = getattr(self.plugin, "_review_creative_chunk", None)
+            if not callable(reviewer):
+                return self._error("创作审校能力不可用")
+            review = await reviewer(snapshot, story_bible, outline, latest.get("text", ""), safe_recent_chunks)
+            if not isinstance(review, dict):
+                review = {}
+            async with self.plugin._data_lock:
+                projects = self.plugin.data.get("creative_projects") if isinstance(self.plugin.data.get("creative_projects"), list) else []
+                project = next((p for p in projects if isinstance(p, dict) and p.get("id") == project_id), None)
+                if not project:
+                    return self._error("作品不存在")
+                review["id"] = secrets.token_hex(6)
+                review["chunk_index"] = len(project.get("draft_chunks") or []) - 1
+                review["created_at"] = time.time()
+                reviews = project.setdefault("quality_reviews", [])
+                if not isinstance(reviews, list):
+                    reviews = []
+                    project["quality_reviews"] = reviews
+                reviews.append(review)
+                del reviews[:-20]
+                self.plugin._save_data_sync()
+            return self._ok({"project_id": project_id, "review": review})
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 创作项目质量分析失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def rebuild_creative_memory(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        project_id = str(payload.get("id", "")).strip()
+        if not project_id:
+            return self._error("缺少 id")
+        try:
+            rebuild = getattr(self.plugin, "_rebuild_creative_memory_from_project", None)
+            if not callable(rebuild):
+                return self._error("创作记忆重建能力不可用")
+            result = await rebuild(project_id)
+            if not result.get("success"):
+                return self._error(result.get("error") or "重建失败")
+            return self._ok(result)
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 重建创作记忆失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def delete_creative_project(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        project_id = str(payload.get("id", "")).strip()
+        if not project_id:
+            return self._error("缺少 id")
+        try:
+            async with self.plugin._data_lock:
+                projects = self.plugin.data.get("creative_projects") if isinstance(self.plugin.data.get("creative_projects"), list) else []
+                before = len(projects)
+                self.plugin.data["creative_projects"] = [
+                    p for p in projects if not (isinstance(p, dict) and p.get("id") == project_id)
+                ]
+                removed = before - len(self.plugin.data["creative_projects"])
+                self.plugin._save_data_sync()
+            return self._ok({"project_id": project_id, "removed": removed})
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 删除创作项目失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
     def _creative_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         projects = data.get("creative_projects") if isinstance(data.get("creative_projects"), list) else []
         items = [item for item in projects if isinstance(item, dict)]
@@ -10550,6 +11152,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "current_chars": self._int(item.get("current_chars")),
                     "target_chars": self._int(item.get("target_chars")),
                     "chunk_count": len(item.get("draft_chunks") or []) if isinstance(item.get("draft_chunks"), list) else 0,
+                    "outline_count": len(item.get("outline") or []) if isinstance(item.get("outline"), list) else 0,
+                    "character_count": len(item.get("characters") or []) if isinstance(item.get("characters"), list) else 0,
+                    "has_story_bible": bool(item.get("story_bible")) if isinstance(item.get("story_bible"), dict) else False,
+                    "review_count": len(item.get("quality_reviews") or []) if isinstance(item.get("quality_reviews"), list) else 0,
+                    "manual_edit_count": len(item.get("manual_edits") or []) if isinstance(item.get("manual_edits"), list) else 0,
                     "latest_snippet": self._single_line(
                         (item.get("draft_chunks") or [])[-1].get("text") if isinstance(item.get("draft_chunks"), list) and item.get("draft_chunks") else "",
                         260,

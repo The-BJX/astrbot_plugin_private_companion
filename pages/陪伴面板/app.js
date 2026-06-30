@@ -15,6 +15,7 @@ const state = {
   bookshelfAccessToken: "",
   selectedBook: null,
   bookshelfPage: "shelf",
+  creativeEditing: false,
   selectedBookSpreadIndex: 0,
   selectedDiaryDate: "",
   selectedBrowsingIndex: 0,
@@ -71,6 +72,8 @@ const providerLabels = {
   DETAIL_ENHANCEMENT_PROVIDER_ID: "日程细化",
   DREAM_DIARY_PROVIDER_ID: "日记与梦境",
   CREATIVE_PROVIDER_ID: "私下创作",
+  CREATIVE_OUTLINE_PROVIDER_ID: "创作大纲",
+  CREATIVE_REVIEW_PROVIDER_ID: "创作审校/分析",
   VOICE_PROMPT_PROVIDER_ID: "主动语音文案文本",
   tts_conversion_provider_id: "TTS 转换文本",
   PHOTO_PROMPT_PROVIDER_ID: "生图提示词",
@@ -214,10 +217,10 @@ const pluginIntegrationAvailabilityRules = {
   enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.available),
   enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
-  enable_qzone_integration: () => Boolean(state.overview?.qzone?.available),
-  enable_qzone_life_publish: () => Boolean(state.overview?.qzone?.available),
-  enable_qzone_generated_image_publish: () => Boolean(state.overview?.qzone?.available),
-  enable_qzone_comment_inbox: () => Boolean(state.overview?.qzone?.available),
+  enable_qzone_integration: () => true,
+  enable_qzone_life_publish: () => true,
+  enable_qzone_generated_image_publish: () => true,
+  enable_qzone_comment_inbox: () => true,
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
 };
 
@@ -282,6 +285,20 @@ const providerGuides = {
     purpose: "生成私下创作项目设定，以及闲暇时的小说、诗、随笔、剧本等正文片段。",
     fit: "适合文风稳定、有创作能力、能遵守角色身份边界的模型。",
     fallback: "留空时跟随陪伴通用模型。",
+  },
+  CREATIVE_OUTLINE_PROVIDER_ID: {
+    preference: "speed",
+    passiveImpact: "async",
+    purpose: "每次续写前整理本段短大纲，帮助作品沿着项目设定推进。",
+    fit: "适合便宜、低延迟、结构化短输出稳定的模型。",
+    fallback: "留空时跟随私下创作模型。",
+  },
+  CREATIVE_REVIEW_PROVIDER_ID: {
+    preference: "quality",
+    passiveImpact: "async",
+    purpose: "检查创作片段是否重复、是否推进、是否违背人工大纲/角色表，并抽取故事档案。",
+    fit: "适合 JSON 稳定、审稿判断可靠的模型。",
+    fallback: "留空时跟随私下创作模型。",
   },
   VOICE_PROMPT_PROVIDER_ID: {
     preference: "speed",
@@ -465,7 +482,7 @@ const providerGroups = [
     id: "daily",
     title: "日程与表达",
     desc: "决定 Bot 每天做什么、怎么把生活片段和主动表达写出来。",
-    keys: ["DAILY_PLAN_PROVIDER_ID", "DETAIL_ENHANCEMENT_PROVIDER_ID", "DREAM_DIARY_PROVIDER_ID", "CREATIVE_PROVIDER_ID", "VOICE_PROMPT_PROVIDER_ID", "tts_conversion_provider_id", "PHOTO_PROMPT_PROVIDER_ID"],
+    keys: ["DAILY_PLAN_PROVIDER_ID", "DETAIL_ENHANCEMENT_PROVIDER_ID", "DREAM_DIARY_PROVIDER_ID", "CREATIVE_PROVIDER_ID", "CREATIVE_OUTLINE_PROVIDER_ID", "CREATIVE_REVIEW_PROVIDER_ID", "VOICE_PROMPT_PROVIDER_ID", "tts_conversion_provider_id", "PHOTO_PROMPT_PROVIDER_ID"],
   },
   {
     id: "memory",
@@ -2232,7 +2249,10 @@ const tokenTaskLabels = {
   external_event_self_link: "外界信息关联",
   news_digest: "新闻整理",
   creative_project: "创作立项",
+  creative_outline: "创作大纲",
   creative_writing: "文本创作",
+  creative_review: "创作审校",
+  creative_extract: "创作抽取",
   photo_prompt: "生图提示",
   screen_narration: "识屏转述",
   forward_message: "合并转发转述",
@@ -3435,7 +3455,12 @@ function renderTroubleshooting() {
       </section>
     `).join("")
     : `<div class="empty small">没有检测到候选 SQLite 数据库文件</div>`;
-  chainEl.innerHTML = troubleshootingChainTestMarkup(data.chain_tests || {}, data.recent_photo_generations || []);
+  chainEl.innerHTML = troubleshootingChainTestMarkup(
+    data.chain_tests || {},
+    data.recent_photo_generations || [],
+    data.screen_companion || state.overview?.screen_companion || {},
+    data.qzone || state.overview?.qzone || {},
+  );
   injectionsEl.innerHTML = troubleshootingPromptInjectionMarkup(data.prompt_injections || {});
   if (faqEl) faqEl.innerHTML = troubleshootingFaqMarkup(data);
   if (debounceEl) {
@@ -3625,7 +3650,7 @@ function troubleshootingFaqMarkup(data = {}) {
   `).join("");
 }
 
-function troubleshootingChainTestMarkup(results, recentPhotoGenerations = []) {
+function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], screenCompanion = {}, qzone = {}) {
   const tests = [
     {
       type: "image_generation_text2img",
@@ -3646,6 +3671,20 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = []) {
       title: "TTS 生成",
       text: "实际调用当前会话 TTS provider 并检查音频文件",
       button: "测试 TTS 生成",
+    },
+    ...(screenCompanion?.available ? [{
+      type: "screen_peek",
+      title: "窥屏",
+      text: "实际调用 screen_companion 识屏入口，确认屏幕观察链路可用",
+      button: "测试窥屏",
+    }] : []),
+    {
+      type: "qzone_integration",
+      title: "QQ 空间",
+      text: qzone?.enabled
+        ? "检查 Cookie、读取链路、发布工具空参数模拟和评论收件箱状态；不会真实发布或回复评论"
+        : "检查 QQ 空间配置状态；未启用时会显示缺失原因，不会真实发布或回复评论",
+      button: "测试 QQ 空间",
     },
     {
       type: "proactive_message",
@@ -3674,6 +3713,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = []) {
       result.image_model ? `模型 ${result.image_model}` : "",
       result.workflow_kind ? `类型 ${result.workflow_kind}` : "",
       result.used_reference ? "已带参考图" : "",
+      result.context_chars ? `摘要 ${result.context_chars} 字` : "",
       result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
       result.file_size ? `${formatBytes(result.file_size)}` : "",
       result.ran_at_text || "",
@@ -3726,6 +3766,24 @@ function troubleshootingChainStepsMarkup(stepsRaw) {
 }
 
 function troubleshootingChainPreviewMarkup(type, result) {
+  if (type === "screen_peek") {
+    if (!result.text_preview) return "";
+    return `
+      <details class="chain-test-steps chain-test-preview">
+        <summary>查看识屏摘要</summary>
+        <p>${escapeHtml(result.text_preview || "")}</p>
+      </details>
+    `;
+  }
+  if (type === "qzone_integration") {
+    if (!result.text_preview) return "";
+    return `
+      <details class="chain-test-steps chain-test-preview">
+        <summary>查看 QQ 空间测试摘要</summary>
+        <p>${escapeHtml(result.text_preview || "")}</p>
+      </details>
+    `;
+  }
   if (type === "skill_similarity" || type === "model_diagnostics") {
     const sections = Array.isArray(result.sections) ? result.sections.filter(Boolean) : [];
     const suggestions = Array.isArray(result.suggestions) ? result.suggestions.filter(Boolean) : [];
@@ -7136,6 +7194,31 @@ function bookshelfBookId(item) {
   return `${item.kind || "book"}:${item.id || item.title || ""}`;
 }
 
+async function ensureCreativeProjectDetail(book, force = false) {
+  if (!book || book.kind !== "creative" || !book.id) return book;
+  if (book.project_detail_loaded && !force) return book;
+  if (book.project_loading && !force) return book;
+  book.project_loading = true;
+  book.project_error = "";
+  try {
+    const detail = await fetchJson(`/creative/project?id=${encodeURIComponent(book.id)}`);
+    Object.assign(book, detail || {}, { project_detail_loaded: true, project_loading: false, kind: "creative" });
+    if (state.selectedBook && state.selectedBook.id === book.id && state.selectedBook.kind === "creative") {
+      state.selectedBook = book;
+      renderBookDetailPanel();
+    }
+    return book;
+  } catch (error) {
+    book.project_loading = false;
+    book.project_error = error.message || String(error || "读取失败");
+    if (state.selectedBook && state.selectedBook.id === book.id && state.selectedBook.kind === "creative") {
+      state.selectedBook = book;
+      renderBookDetailPanel();
+    }
+    return book;
+  }
+}
+
 function renderBookCoverInner(book, kindLabel, title, progress = "") {
   const coverSrc = book.kind === "jm_album" ? String(book.cover_src || "") : "";
   const image = coverSrc ? bookshelfImageTag(coverSrc, `${title || "私密阅读"}封面`) : "";
@@ -7144,6 +7227,238 @@ function renderBookCoverInner(book, kindLabel, title, progress = "") {
     <span>${escapeHtml(kindLabel)}</span>
     <b>${escapeHtml(title || "未命名")}</b>
     ${progress ? `<small>${escapeHtml(progress)}</small>` : ""}
+  `;
+}
+
+function renderCreativeStoryBible(book) {
+  const sb = book.story_bible && typeof book.story_bible === "object" ? book.story_bible : {};
+  const list = (items) => Array.isArray(items) && items.length
+    ? `<ul>${items.map((item) => `<li>${escapeHtml(String(item || ""))}</li>`).join("")}</ul>`
+    : `<div class="empty small">暂无</div>`;
+  return `
+    <section class="creative-manager-card">
+      <h3>故事档案</h3>
+      <div class="creative-meta-grid">
+        <div><b>主线</b><span>${escapeHtml(sb.mainline_direction || "") || "未建立"}</span></div>
+        <div><b>下一步</b><span>${escapeHtml(sb.next_direction || book.next_hint || "") || "未指定"}</span></div>
+      </div>
+      <div class="creative-columns">
+        <div><b>主题</b>${list(sb.active_themes)}</div>
+        <div><b>未解决线索</b>${list(sb.unresolved_threads)}</div>
+        <div><b>已解决线索</b>${list(sb.resolved_threads)}</div>
+        <div><b>重要事实</b>${list(sb.important_facts)}</div>
+      </div>
+    </section>
+  `;
+}
+
+function renderCreativeOutlineEditor(book) {
+  const rows = Array.isArray(book.outline) ? book.outline : [];
+  return `
+    <section class="creative-manager-card">
+      <div class="creative-card-head">
+        <h3>大纲</h3>
+        <span>${rows.length} 条</span>
+      </div>
+      <form data-creative-outline-form data-project-id="${escapeHtml(book.id || "")}">
+        <textarea name="outline" rows="10" placeholder="一行一条大纲">${escapeHtml(rows.join("\n"))}</textarea>
+        <div class="creative-form-actions">
+          <button type="submit">保存大纲</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function renderCreativeCharactersEditor(book) {
+  const chars = Array.isArray(book.characters) ? book.characters : [];
+  return `
+    <section class="creative-manager-card">
+      <div class="creative-card-head">
+        <h3>角色</h3>
+        <span>${chars.length} 个</span>
+      </div>
+      <form data-creative-characters-form data-project-id="${escapeHtml(book.id || "")}">
+        <textarea name="characters" rows="12" placeholder='[{"name":"角色名","role":"身份","description":"描述"}]'>${escapeHtml(JSON.stringify(chars, null, 2))}</textarea>
+        <div class="creative-form-actions">
+          <button type="submit">保存角色</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function renderCreativeQualityPanel(book) {
+  const reviews = Array.isArray(book.quality_reviews) ? book.quality_reviews : [];
+  const latest = reviews[reviews.length - 1] || {};
+  const score = (name) => Number(latest?.[`${name}_score`] ?? latest?.scores?.[name] ?? 0) || 0;
+  const issues = Array.isArray(latest.issues) ? latest.issues : [];
+  return `
+    <section class="creative-manager-card">
+      <div class="creative-card-head">
+        <h3>质量分析</h3>
+        <div class="creative-inline-actions">
+          <button type="button" data-creative-reanalyze="${escapeHtml(book.id || "")}">重新分析</button>
+          <button type="button" data-creative-rebuild-memory="${escapeHtml(book.id || "")}">重建记忆</button>
+        </div>
+      </div>
+      <div class="creative-meta-grid quality">
+        <div><b>人格一致</b><span>${escapeHtml(score("persona"))}/10</span></div>
+        <div><b>推进度</b><span>${escapeHtml(score("progress"))}/10</span></div>
+        <div><b>重复度</b><span>${escapeHtml(score("repetition"))}/10</span></div>
+      </div>
+      ${issues.length ? `<ul class="creative-issues">${issues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<div class="empty small">暂无分析结果</div>`}
+    </section>
+  `;
+}
+
+function renderCreativeChunkEditors(book) {
+  const chunks = Array.isArray(book.chunks) ? book.chunks : [];
+  if (!chunks.length) {
+    return `<section class="creative-manager-card"><h3>正文片段</h3><div class="empty small">暂无正文片段</div></section>`;
+  }
+  return `
+    <section class="creative-manager-card">
+      <h3>正文片段</h3>
+      <div class="creative-chunk-editor-list">
+        ${chunks.map((chunk) => `
+          <form class="creative-chunk-editor" data-creative-chunk-form data-project-id="${escapeHtml(book.id || "")}" data-chunk-index="${escapeHtml(chunk.index)}">
+            <header>
+              <b>片段 ${escapeHtml(Number(chunk.index) + 1)}</b>
+              <span>${escapeHtml(chunk.chars || String((chunk.text || "").length))} 字${chunk.manually_edited ? " · 已手改" : ""}</span>
+            </header>
+            <textarea name="text" rows="8">${escapeHtml(chunk.text || "")}</textarea>
+            <div class="creative-form-actions">
+              <button type="submit">保存本段</button>
+            </div>
+          </form>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCreativeManager(book, kindLabel, displayTitle, displayIntro) {
+  if (book.project_loading) {
+    return `<article class="book-preview subpage creative"><div class="empty">正在加载作品详情...</div></article>`;
+  }
+  if (book.project_error) {
+    return `<article class="book-preview subpage creative"><div class="empty">作品详情加载失败：${escapeHtml(book.project_error)}</div></article>`;
+  }
+  return `
+    <article class="book-preview subpage creative creative-manager-page">
+      <div class="book-preview-cover ${book.cover_src ? "has-cover-image" : ""}">
+        ${renderBookCoverInner(book, kindLabel, book.title || "未命名")}
+      </div>
+      <div class="book-preview-info creative-manager-info">
+        <nav class="book-breadcrumb">
+          <button type="button" data-book-close>书柜</button>
+          <span>/ ${escapeHtml(kindLabel)}</span>
+        </nav>
+        <div class="reader-toolbar">
+          <span>${escapeHtml(kindLabel)}</span>
+          <button type="button" data-book-close>收回书柜</button>
+        </div>
+        <h2>${escapeHtml(book.title || displayTitle || "未命名")}</h2>
+        <p>${escapeHtml(book.premise || displayIntro || "这本作品还没有简介。")}</p>
+        <form class="inline-form creative-project-basic-form" data-creative-project-form data-project-id="${escapeHtml(book.id || "")}">
+          <label>标题 <input name="title" value="${escapeHtml(book.title || "")}" /></label>
+          <label>类型 <input name="work_type" value="${escapeHtml(book.work_type || "")}" /></label>
+          <label>气质 <input name="tone" value="${escapeHtml(book.tone || "")}" /></label>
+          <label>视角 <input name="point_of_view" value="${escapeHtml(book.point_of_view || "")}" /></label>
+          <label>目标字数 <input name="target_chars" type="number" min="300" max="5200" value="${escapeHtml(book.target_chars || 2000)}" /></label>
+          <label class="wide">核心设定 <textarea name="premise" rows="3">${escapeHtml(book.premise || "")}</textarea></label>
+          <label class="wide">下一步提示 <textarea name="next_hint" rows="2">${escapeHtml(book.next_hint || "")}</textarea></label>
+          <div class="creative-form-actions wide">
+            <button type="submit">保存作品信息</button>
+            <button type="button" class="read-button" data-book-read>进入阅读页</button>
+          </div>
+        </form>
+        <div class="creative-form-actions">
+          <button type="button" class="danger-outline" data-creative-exit-edit>返回预览</button>
+          <button type="button" class="danger-outline" data-book-delete data-book-kind="creative" data-book-id="${escapeHtml(book.id || "")}" data-book-title="${escapeHtml(book.title || displayTitle || "")}">删除作品</button>
+        </div>
+        ${renderCreativeStoryBible(book)}
+        ${renderCreativeOutlineEditor(book)}
+        ${renderCreativeCharactersEditor(book)}
+        ${renderCreativeQualityPanel(book)}
+        ${renderCreativeChunkEditors(book)}
+      </div>
+    </article>
+  `;
+}
+
+function renderCreativeBookPreview(book, kindLabel, displayTitle, displayIntro, displayContent) {
+  if (book.project_loading) {
+    return `<article class="book-preview subpage creative"><div class="empty">正在加载作品详情...</div></article>`;
+  }
+  if (book.project_error) {
+    return `<article class="book-preview subpage creative"><div class="empty">作品详情加载失败：${escapeHtml(book.project_error)}</div></article>`;
+  }
+  const sb = book.story_bible && typeof book.story_bible === "object" ? book.story_bible : {};
+  const outline = Array.isArray(book.outline) ? book.outline : [];
+  const characters = Array.isArray(book.characters) ? book.characters : [];
+  const reviews = Array.isArray(book.quality_reviews) ? book.quality_reviews : [];
+  const latestReview = reviews[reviews.length - 1] || {};
+  const latestSnippet = Array.isArray(book.chunks) && book.chunks.length ? book.chunks[book.chunks.length - 1].text || "" : displayContent || "";
+  const score = (name) => Number(latestReview?.[`${name}_score`] ?? latestReview?.scores?.[name] ?? 0) || 0;
+  return `
+    <article class="book-preview subpage creative creative-preview-card">
+      <div class="book-preview-cover ${book.cover_src ? "has-cover-image" : ""}">
+        ${renderBookCoverInner(book, kindLabel, book.title || displayTitle || "未命名")}
+      </div>
+      <div class="book-preview-info creative-manager-info">
+        <nav class="book-breadcrumb">
+          <button type="button" data-book-close>书柜</button>
+          <span>/ ${escapeHtml(kindLabel)}</span>
+        </nav>
+        <div class="reader-toolbar">
+          <span>${escapeHtml(kindLabel)}</span>
+          <button type="button" data-book-close>收回书柜</button>
+        </div>
+        <h2>${escapeHtml(book.title || displayTitle || "未命名")}</h2>
+        <p>${escapeHtml(book.premise || displayIntro || "这本作品还没有简介。")}</p>
+        <dl>
+          ${book.status ? `<div><dt>状态</dt><dd>${escapeHtml(book.status)}</dd></div>` : ""}
+          ${book.tone ? `<div><dt>气质</dt><dd>${escapeHtml(book.tone)}</dd></div>` : ""}
+          ${book.point_of_view ? `<div><dt>视角</dt><dd>${escapeHtml(book.point_of_view)}</dd></div>` : ""}
+          ${book.progress ? `<div><dt>进度</dt><dd>${escapeHtml(book.progress)}</dd></div>` : ""}
+          ${book.created ? `<div><dt>入柜</dt><dd>${escapeHtml(book.created)}</dd></div>` : ""}
+        </dl>
+        <section class="creative-manager-card">
+          <h3>故事档案</h3>
+          <div class="creative-meta-grid">
+            <div><b>主线</b><span>${escapeHtml(sb.mainline_direction || "") || "未建立"}</span></div>
+            <div><b>下一步</b><span>${escapeHtml(sb.next_direction || book.next_hint || "") || "未指定"}</span></div>
+          </div>
+        </section>
+        <section class="creative-manager-card">
+          <h3>大纲预览</h3>
+          ${outline.length ? `<ul class="creative-issues">${outline.slice(0, 8).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<div class="empty small">暂无大纲</div>`}
+        </section>
+        <section class="creative-manager-card">
+          <h3>角色预览</h3>
+          ${characters.length ? `<ul class="creative-issues">${characters.slice(0, 6).map((item) => `<li><b>${escapeHtml(item.name || "未命名角色")}</b>${item.role ? ` · ${escapeHtml(item.role)}` : ""}</li>`).join("")}</ul>` : `<div class="empty small">暂无角色</div>`}
+        </section>
+        <section class="creative-manager-card">
+          <h3>最近质量分析</h3>
+          <div class="creative-meta-grid quality">
+            <div><b>人格一致</b><span>${escapeHtml(score("persona"))}/10</span></div>
+            <div><b>推进度</b><span>${escapeHtml(score("progress"))}/10</span></div>
+            <div><b>重复度</b><span>${escapeHtml(score("repetition"))}/10</span></div>
+          </div>
+        </section>
+        <section class="creative-manager-card">
+          <h3>最新片段</h3>
+          <div class="reader-content creative-content ${escapeHtml(creativeReadingMode(book))}">${formatCreativeContentByMode(latestSnippet || "这本书还没有正文。", creativeReadingMode(book))}</div>
+        </section>
+        <div class="creative-form-actions">
+          <button type="button" data-creative-enter-edit>编辑作品</button>
+          <button type="button" class="read-button" data-book-read>进入阅读页</button>
+          <button type="button" class="danger-outline" data-book-delete data-book-kind="creative" data-book-id="${escapeHtml(book.id || "")}" data-book-title="${escapeHtml(book.title || displayTitle || "")}">删除作品</button>
+        </div>
+      </div>
+    </article>
   `;
 }
 
@@ -7239,6 +7554,7 @@ function selectBookshelfBook(bookId) {
   if (!book) return;
   state.selectedBook = book;
   state.bookshelfPage = "detail";
+  state.creativeEditing = false;
   state.selectedBookSpreadIndex = 0;
   if (book.kind === "diary") {
     const entries = Array.isArray(book.entries) ? book.entries : [];
@@ -7249,6 +7565,9 @@ function selectBookshelfBook(bookId) {
     state.selectedBrowsingIndex = Math.max(0, entries.length - 1);
   }
   renderBookDetailPanel();
+  if (book.kind === "creative") {
+    void ensureCreativeProjectDetail(book);
+  }
   const panel = $("#bookDetailPanel");
   if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -7353,6 +7672,12 @@ function renderBookDetailPanel() {
   }
   if (state.bookshelfPage === "reader" && book.kind === "creative") {
     panel.innerHTML = renderCreativeBookReader(book, kindLabel, displayTitle, displayIntro, displayContent);
+    return;
+  }
+  if (book.kind === "creative" && state.bookshelfPage === "detail") {
+    panel.innerHTML = state.creativeEditing
+      ? renderCreativeManager(book, kindLabel, displayTitle, displayIntro)
+      : renderCreativeBookPreview(book, kindLabel, displayTitle, displayIntro, displayContent);
     return;
   }
   panel.innerHTML = state.bookshelfPage === "reader"
@@ -12820,6 +13145,30 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("click", async (event) => {
   const element = event.target instanceof Element ? event.target : null;
+  const creativeReanalyze = element?.closest("[data-creative-reanalyze]");
+  if (creativeReanalyze) {
+    const projectId = creativeReanalyze.dataset.creativeReanalyze || "";
+    await runAction(async () => {
+      const result = await postJson("/creative/project/reanalyze", { id: projectId });
+      if (state.selectedBook?.kind === "creative" && state.selectedBook.id === projectId) {
+        await ensureCreativeProjectDetail(state.selectedBook, true);
+      }
+      return result;
+    }, "已完成质量分析", creativeReanalyze);
+    return;
+  }
+  const creativeRebuildMemory = element?.closest("[data-creative-rebuild-memory]");
+  if (creativeRebuildMemory) {
+    const projectId = creativeRebuildMemory.dataset.creativeRebuildMemory || "";
+    await runAction(async () => {
+      const result = await postJson("/creative/project/rebuild_memory", { id: projectId });
+      if (state.selectedBook?.kind === "creative" && state.selectedBook.id === projectId) {
+        await ensureCreativeProjectDetail(state.selectedBook, true);
+      }
+      return result;
+    }, "已重建创作记忆", creativeRebuildMemory);
+    return;
+  }
   const deleteButton = element?.closest("[data-book-delete]");
   if (deleteButton) {
     void deleteSelectedBookshelfItem(deleteButton);
@@ -12828,6 +13177,16 @@ document.addEventListener("click", async (event) => {
   const bookButton = element?.closest("[data-book-id]");
   if (bookButton) {
     selectBookshelfBook(bookButton.dataset.bookId);
+    return;
+  }
+  if (element?.closest("[data-creative-enter-edit]")) {
+    state.creativeEditing = true;
+    renderBookDetailPanel();
+    return;
+  }
+  if (element?.closest("[data-creative-exit-edit]")) {
+    state.creativeEditing = false;
+    renderBookDetailPanel();
     return;
   }
   if (element?.closest("[data-book-read]")) {
@@ -12881,12 +13240,14 @@ document.addEventListener("click", async (event) => {
   }
   if (element?.closest("[data-book-back]")) {
     state.bookshelfPage = "detail";
+    state.creativeEditing = false;
     renderBookDetailPanel();
     return;
   }
   if (element?.closest("[data-book-close]")) {
     state.selectedBook = null;
     state.bookshelfPage = "shelf";
+    state.creativeEditing = false;
     renderBookshelf();
   }
 });
@@ -12911,6 +13272,37 @@ async function deleteSelectedBookshelfItem(button = null) {
   }
   showToast("正在从书柜移除...");
   try {
+    if (kind === "creative") {
+      const result = await postJson("/creative/project/delete", { id: itemId });
+      if (!result.removed) {
+        showToast("没有找到要删除的创作项目，请刷新拓展页后再试。", "error");
+        if (button) {
+          button.disabled = false;
+          button.textContent = "删除作品";
+        }
+        return;
+      }
+      const removeCreative = (shelf) => {
+        if (!shelf || !Array.isArray(shelf.public_books)) return;
+        shelf.public_books = shelf.public_books.filter((item) => !(item.kind === "creative" && String(item.id || "") === String(itemId)));
+        shelf.public_count = shelf.public_books.length;
+      };
+      removeCreative(state.overview?.bookshelf);
+      removeCreative(state.bookshelfUnlocked);
+      if (state.overview?.creative) {
+        const items = Array.isArray(state.overview.creative.items) ? state.overview.creative.items : [];
+        state.overview.creative.items = items.filter((item) => String(item.id || "") !== String(itemId));
+        state.overview.creative.project_count = state.overview.creative.items.length;
+        state.overview.creative.active_projects = state.overview.creative.items.filter((item) => item.status === "drafting").length;
+      }
+      state.selectedBook = null;
+      state.bookshelfPage = "shelf";
+      state.creativeEditing = false;
+      state.selectedBookSpreadIndex = 0;
+      renderBookshelf();
+      showToast("创作项目已删除。");
+      return;
+    }
     const result = await postJson("/bookshelf/delete", {
       kind,
       id: itemId,
@@ -13048,6 +13440,91 @@ document.addEventListener("submit", (event) => {
 
 document.addEventListener("submit", async (event) => {
   const form = event.target instanceof HTMLFormElement ? event.target : null;
+  if (form?.matches("[data-creative-project-form]")) {
+    event.preventDefault();
+    const submit = form.querySelector('button[type="submit"]');
+    const formData = new FormData(form);
+    const projectId = form.dataset.projectId || "";
+    await runAction(async () => {
+      const result = await postJson("/creative/project/update", {
+        id: projectId,
+        title: formData.get("title"),
+        work_type: formData.get("work_type"),
+        tone: formData.get("tone"),
+        point_of_view: formData.get("point_of_view"),
+        target_chars: Number(formData.get("target_chars") || 0),
+        premise: formData.get("premise"),
+        next_hint: formData.get("next_hint"),
+      });
+      if (state.selectedBook?.kind === "creative" && state.selectedBook.id === projectId) {
+        await ensureCreativeProjectDetail(state.selectedBook, true);
+      }
+      return result;
+    }, "已保存作品信息", submit);
+    return;
+  }
+  if (form?.matches("[data-creative-outline-form]")) {
+    event.preventDefault();
+    const submit = form.querySelector('button[type="submit"]');
+    const projectId = form.dataset.projectId || "";
+    const formData = new FormData(form);
+    await runAction(async () => {
+      const result = await postJson("/creative/project/outline/update", {
+        id: projectId,
+        outline: formData.get("outline"),
+      });
+      if (state.selectedBook?.kind === "creative" && state.selectedBook.id === projectId) {
+        await ensureCreativeProjectDetail(state.selectedBook, true);
+      }
+      return result;
+    }, "已保存大纲", submit);
+    return;
+  }
+  if (form?.matches("[data-creative-characters-form]")) {
+    event.preventDefault();
+    const submit = form.querySelector('button[type="submit"]');
+    const projectId = form.dataset.projectId || "";
+    const formData = new FormData(form);
+    let characters = [];
+    try {
+      const raw = String(formData.get("characters") || "").trim();
+      characters = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(characters)) throw new Error("角色必须是 JSON 数组");
+    } catch (error) {
+      showToast(`角色格式错误：${error.message}`, "error");
+      return;
+    }
+    await runAction(async () => {
+      const result = await postJson("/creative/project/characters/update", {
+        id: projectId,
+        characters,
+      });
+      if (state.selectedBook?.kind === "creative" && state.selectedBook.id === projectId) {
+        await ensureCreativeProjectDetail(state.selectedBook, true);
+      }
+      return result;
+    }, "已保存角色", submit);
+    return;
+  }
+  if (form?.matches("[data-creative-chunk-form]")) {
+    event.preventDefault();
+    const submit = form.querySelector('button[type="submit"]');
+    const projectId = form.dataset.projectId || "";
+    const chunkIndex = Number(form.dataset.chunkIndex || -1);
+    const formData = new FormData(form);
+    await runAction(async () => {
+      const result = await postJson("/creative/project/chunk/update", {
+        id: projectId,
+        chunk_index: chunkIndex,
+        text: formData.get("text"),
+      });
+      if (state.selectedBook?.kind === "creative" && state.selectedBook.id === projectId) {
+        await ensureCreativeProjectDetail(state.selectedBook, true);
+      }
+      return result;
+    }, "已保存正文片段", submit);
+    return;
+  }
   if (!form || !form.matches("[data-image-cache-editor]")) return;
   event.preventDefault();
   const key = form.dataset.imageCacheEditor || "";

@@ -70,6 +70,7 @@ _DATA_STORE_KEYS = (
     "important_dates",
     "qq_presence_state",
     "creative_projects",
+    "creative_memory_pool",
     "proactive_candidate_pool",
     "external_proactive_abilities",
     "worldbook_entries",
@@ -329,4 +330,96 @@ _DEFAULT_GROUP_TEMPLATE = {
     "last_summary_at": 0,
     "last_episode_refresh_at": 0,
     "last_slang_summary_at": 0,
+}
+
+# ---------- 创作系统数据结构 ----------
+
+CREATIVE_STORY_BIBLE_TEMPLATE = {
+    "mainline_direction": "",
+    "active_themes": [],
+    "resolved_threads": [],
+    "unresolved_threads": [],
+    "important_facts": [],
+    "next_direction": "",
+    "recent_keywords": [],
+    "recent_outlines": [],
+    "last_updated_chunk": 0,
+}
+
+CREATIVE_MEMORY_MAX_ENTRIES = 50
+CREATIVE_SIMILARITY_THRESHOLD = 0.72
+CREATIVE_SIMILARITY_RETRIES = 2
+CREATIVE_REVIEW_MIN_SCORE = 7
+CREATIVE_MAX_REVISION_HISTORY = 10
+CREATIVE_FALLBACK_CHUNKS = [
+    "她把那句话写到一半,忽然停住。窗外的声音很轻,像有人把另一个世界折起来,塞进了玻璃杯底。",
+    "她把那个念头又往后推了一小步,像把一枚很轻的纸片压进书页里,等下次再翻开。",
+    "笔尖在纸上停了一秒,又继续往下走。风从窗缝里挤进来,翻动了桌角的便签。",
+    "她忽然想到一个画面,远处的灯塔在雾里一闪一闪,像在给谁打暗号。",
+    "这段话写了又删,删了又写。最后她叹了口气,把手机屏幕朝下扣在桌上。",
+]
+
+DEFAULT_CREATIVE_PROJECT_TEMPLATE = {
+    "id": "",
+    "title": "",
+    "work_type": "短篇小说",
+    "premise": "",
+    "tone": "",
+    "point_of_view": "第三人称有限视角",
+    "source": "life",
+    "source_text": "",
+    "target_chars": 2000,
+    "current_chars": 0,
+    "status": "drafting",
+    "draft_chunks": [],
+    "disclosed_milestones": [],
+    "story_bible": {},
+    "creative_memory_pool": [],
+    "outline": [],
+    "characters": [],
+    "revision_notes": [],
+    "quality_reviews": [],
+    "manual_edits": [],
+    "last_manual_edit_at": 0,
+    "last_manual_edit_summary": "",
+    "writing_provider_id": "",
+    "review_provider_id": "",
+    "next_hint": "",
+    "created_at": 0,
+    "last_advanced_at": 0,
+    "next_advance_at": 0,
+    "last_share_at": 0,
+    "share_count": 0,
+}
+
+DEFAULT_CREATIVE_CHARACTER_TEMPLATE = {
+    "id": "",
+    "name": "",
+    "role": "",
+    "description": "",
+    "appearance": "",
+    "personality": "",
+    "background": "",
+    "relationships": [],
+    "must_keep_traits": [],
+    "status": "alive",
+    "created_at": 0,
+    "updated_at": 0,
+}
+
+DEFAULT_CREATIVE_REVIEW_TEMPLATE = {
+    "id": "",
+    "chunk_index": -1,
+    "scores": {
+        "persona": 0,
+        "progress": 0,
+        "repetition": 0,
+        "continuity": 0,
+        "coherence": 0,
+    },
+    "overall": 0,
+    "issues": [],
+    "suggestions": [],
+    "provider_id": "",
+    "created_at": 0,
 }

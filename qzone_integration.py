@@ -678,8 +678,10 @@ class QzoneMixin(QzoneMediaMixin):
         pos: int = 0,
         num: int = 1,
         with_detail: bool = False,
+        cookie_header: str | None = None,
     ) -> list[Any]:
-        cookie_header = await self._qzone_get_cookies(event)
+        if cookie_header is None:
+            cookie_header = await self._qzone_get_cookies(event)
         ctx = self._qzone_context_from_cookies(cookie_header)
         target = _single_line(target_id, 40)
         if not target:
@@ -1483,7 +1485,7 @@ class QzoneMixin(QzoneMediaMixin):
         lines.append("结果：模拟完成。若要真实发布,请使用 `陪伴 发说说 <正文>` 或让模型调用带 text 的 `pc_qzone_publish_feed`。")
         return "\n".join(lines)
 
-    async def _test_qzone_integration(self, event: AstrMessageEvent, target_id: str = "") -> str:
+    async def _test_qzone_integration(self, event: AstrMessageEvent | None, target_id: str = "") -> str:
         lines = ["QQ 空间测试："]
 
         lines.append(f"- 整合开关：{'开启' if self.enable_qzone_integration else '关闭'}")
@@ -1496,13 +1498,21 @@ class QzoneMixin(QzoneMediaMixin):
 
         target = _single_line(target_id, 40)
         try:
-            ctx = self._qzone_context_from_cookies(await self._qzone_get_cookies(event))
+            cookie_header = await self._qzone_get_cookies(event)
+            ctx = self._qzone_context_from_cookies(cookie_header)
             target = target or str(ctx.get("uin") or "")
             lines.append(f"- Cookie：已获取，登录 QQ {ctx.get('uin')}")
             lines.append("- 读取动态：可用")
             lines.append("- 发布说说：可用")
             lines.append("- 点赞/评论：可用")
-            posts = await self._qzone_query_feeds(event, target_id=target or None, pos=0, num=1, with_detail=True)
+            posts = await self._qzone_query_feeds(
+                event,
+                target_id=target or None,
+                pos=0,
+                num=1,
+                with_detail=True,
+                cookie_header=cookie_header,
+            )
             if not posts:
                 lines.append(f"- 查询目标：{target or '默认'}")
                 lines.append("- 查询结果：空")

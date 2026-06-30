@@ -8281,6 +8281,129 @@ button:disabled {
   background: var(--surface);
 }
 
+.creative-manager-page,
+.creative-preview-card {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 18px;
+}
+
+.creative-manager-info {
+  display: grid;
+  gap: 16px;
+}
+
+.creative-manager-card {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: var(--shadow-soft);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.creative-manager-card h3 {
+  margin: 0;
+  color: var(--plum);
+}
+
+.creative-manager-card .creative-card-head,
+.creative-form-actions,
+.creative-inline-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.creative-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.creative-meta-grid > div,
+.creative-columns > div {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.creative-meta-grid b,
+.creative-columns b,
+.creative-chunk-editor header b {
+  color: var(--plum);
+}
+
+.creative-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.creative-chunk-editor-list {
+  display: grid;
+  gap: 12px;
+}
+
+.creative-chunk-editor {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface);
+  display: grid;
+  gap: 10px;
+}
+
+.creative-chunk-editor header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.creative-chunk-editor textarea,
+.creative-manager-page textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.creative-manager-page .inline-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.creative-manager-page .inline-form .wide {
+  grid-column: 1 / -1;
+}
+
+.creative-issues {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+@media (max-width: 1080px) {
+  .creative-manager-page,
+  .creative-preview-card {
+    grid-template-columns: 1fr;
+  }
+
+  .creative-columns,
+  .creative-meta-grid,
+  .creative-manager-page .inline-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 .life-hero {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
