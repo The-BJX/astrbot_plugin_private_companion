@@ -2814,13 +2814,48 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         events.sort(key=lambda item: self._float(item.get("ts")), reverse=True)
         return events
 
+    def _passive_no_reply_item_is_obsolete_fixed_error(self, item: dict[str, Any]) -> bool:
+        checker = getattr(self.plugin, "_proactive_audit_note_is_obsolete_fixed_error", None)
+        texts = [
+            item.get("reason"),
+            item.get("last_detail"),
+            item.get("last_action"),
+            item.get("last_reply_preview"),
+        ]
+        samples = item.get("samples") if isinstance(item.get("samples"), list) else []
+        for sample in samples[:5]:
+            if not isinstance(sample, dict):
+                continue
+            texts.extend([sample.get("detail"), sample.get("reply_preview")])
+        joined = "\n".join(str(value or "") for value in texts)
+        if callable(checker) and checker(joined):
+            return True
+        return "NameError" in joined and any(
+            token in joined
+            for token in (
+                "name 'topic' is not defined",
+                "name 'name' is not defined",
+            )
+        )
+
     def _passive_no_reply_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         raw = data.get("passive_no_reply_records")
         if not isinstance(raw, dict):
             return {"total": 0, "items": []}
         items: list[dict[str, Any]] = []
+        now = time.time()
+        max_age_seconds = 2 * 60 * 60
+        hidden_stale = 0
+        hidden_obsolete = 0
         for item in raw.get("items", []):
             if not isinstance(item, dict):
+                continue
+            last_ts = self._float(item.get("last_ts"))
+            if self._passive_no_reply_item_is_obsolete_fixed_error(item):
+                hidden_obsolete += 1
+                continue
+            if last_ts > 0 and now - last_ts > max_age_seconds:
+                hidden_stale += 1
                 continue
             samples = []
             for sample in item.get("samples", []) if isinstance(item.get("samples"), list) else []:
@@ -2838,7 +2873,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         "ts": ts,
                     }
                 )
-            last_ts = self._float(item.get("last_ts"))
             items.append(
                 {
                     "key": self._single_line(item.get("key"), 32),
@@ -2864,6 +2898,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "total": total,
             "last_ts": self._float(raw.get("last_ts")),
             "items": items[:80],
+            "hidden_stale": hidden_stale,
+            "hidden_obsolete": hidden_obsolete,
+            "max_age_seconds": max_age_seconds,
         }
 
     def _active_token_failures(
@@ -5125,9 +5162,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "updated": self.plugin._format_timestamp_elapsed(fatigue.get("updated_ts", 0)),
             "high_intensity": {
                 "active": bool(high_intensity.get("active")) if isinstance(high_intensity, dict) else False,
+                "merge_active": bool(high_intensity.get("merge_active")) if isinstance(high_intensity, dict) else False,
                 "reason": self._single_line(high_intensity.get("reason"), 40) if isinstance(high_intensity, dict) else "",
                 "recent_wakeups": self._int(high_intensity.get("recent_wakeups")) if isinstance(high_intensity, dict) else 0,
                 "threshold": self._int(high_intensity.get("threshold")) if isinstance(high_intensity, dict) else 0,
+                "merge_recent_floor": self._int(high_intensity.get("merge_recent_floor")) if isinstance(high_intensity, dict) else 0,
                 "remaining_seconds": self._float(high_intensity.get("remaining_seconds")) if isinstance(high_intensity, dict) else 0.0,
                 "merge_seconds": self._float(getattr(self.plugin, "group_high_intensity_merge_seconds", 8)),
                 "max_merge_messages": self._int(getattr(self.plugin, "group_high_intensity_max_merge_messages", 8)),

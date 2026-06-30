@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
 import os
 import base64
 import re
@@ -12,7 +13,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
-from .helpers import _now_ts, _safe_float, _safe_int, _set_into_config, _single_line
+from .helpers import _flat_get, _now_ts, _safe_float, _safe_int, _set_into_config, _single_line
 
 
 _PHOTO_REFERENCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -20,6 +21,1627 @@ _PHOTO_REFERENCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 class CommandHandlersMixin:
     """Implementation bodies for command handlers registered in main.py."""
+
+    def _feature_on_text(self, value: Any) -> str:
+        return "开启" if bool(value) else "关闭"
+
+    def _companion_manual_clean_multiline(self, value: Any, limit: int = 1800) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+        text = re.sub(r"```(?:json|text|markdown)?\s*", "", text, flags=re.I)
+        text = text.replace("```", "")
+        text = re.sub(r"\r\n?", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text[:limit].strip()
+
+    def _companion_manual_current_group_note(self, event: AstrMessageEvent | None = None) -> str:
+        group_id = ""
+        if event is not None:
+            try:
+                group_id = self._extract_group_id_from_event(event)
+            except Exception:
+                group_id = ""
+        if not group_id:
+            return ""
+        allowed = False
+        try:
+            allowed = bool(self._group_enabled_for_event(group_id))
+        except Exception:
+            allowed = False
+        mode = _single_line(getattr(self, "group_access_mode", ""), 20) or "unknown"
+        return f"当前群：{group_id}｜群聊陪伴：{self._feature_on_text(getattr(self, 'enable_group_companion', False))}｜名单模式：{mode}｜本群可用：{self._feature_on_text(allowed)}"
+
+    def _companion_manual_setting_snapshot(self) -> list[str]:
+        return [
+            f"群聊连续对话：{self._feature_on_text(getattr(self, 'enable_group_conversation_followup', False))}，窗口 {getattr(self, 'group_conversation_followup_seconds', 0)} 秒，最多 {getattr(self, 'group_conversation_followup_max_turns', 0)} 轮",
+            f"高强度收口：{self._feature_on_text(getattr(self, 'enable_group_high_intensity_mode', False))}，{getattr(self, 'group_high_intensity_wakeup_window_seconds', 0)} 秒内 {getattr(self, 'group_high_intensity_wakeup_threshold', 0)} 次唤醒后持续 {getattr(self, 'group_high_intensity_cooldown_seconds', 0)} 秒",
+            f"高强度合并：等待 {getattr(self, 'group_high_intensity_merge_seconds', 0)} 秒，范围 {getattr(self, 'group_high_intensity_merge_scope', 'group')}，最多 {getattr(self, 'group_high_intensity_max_merge_messages', 0)} 条",
+            f"消息收口：{self._feature_on_text(getattr(self, 'enable_message_debounce', False))}，智能文本收口 {self._feature_on_text(getattr(self, 'enable_smart_message_debounce', False))}，文本最长等待 {getattr(self, 'text_message_debounce_max_wait_seconds', 0)} 秒",
+            f"群聊唤醒增强：{self._feature_on_text(getattr(self, 'enable_group_wakeup_enhancement', False))}，短唤醒补话等待 {getattr(self, 'group_wakeup_short_text_wait_seconds', 0)} 秒",
+        ]
+
+    def _companion_manual_runtime_snapshot(self, event: AstrMessageEvent | None = None) -> str:
+        lines: list[str] = []
+        group_id = ""
+        sender_id = ""
+        if event is not None:
+            try:
+                group_id = self._extract_group_id_from_event(event)
+            except Exception:
+                group_id = ""
+            try:
+                sender_id = str(event.get_sender_id())
+            except Exception:
+                sender_id = ""
+        data = getattr(self, "data", {}) if isinstance(getattr(self, "data", {}), dict) else {}
+        if group_id:
+            groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+            group = groups.get(group_id) if isinstance(groups, dict) else None
+            if isinstance(group, dict):
+                try:
+                    intensity = self._group_high_intensity_state(group, mutate=False)
+                except Exception:
+                    intensity = {}
+                if isinstance(intensity, dict):
+                    lines.append(
+                        "当前群高强度："
+                        f"{self._feature_on_text(intensity.get('active'))}"
+                        f"｜原因={_single_line(intensity.get('reason'), 40) or '-'}"
+                        f"｜近窗唤醒={_safe_int(intensity.get('recent_wakeups'), 0)}"
+                        f"/{_safe_int(intensity.get('threshold'), 0)}"
+                        f"｜剩余={_safe_float(intensity.get('remaining_seconds'), 0):.1f}s"
+                    )
+                active = group.get("active_bot_conversation") if isinstance(group.get("active_bot_conversation"), dict) else {}
+                if active:
+                    lines.append(
+                        "当前群连续对话锚点："
+                        f"sender={_single_line(active.get('sender_id'), 40) or '-'}"
+                        f"｜turns={_safe_int(active.get('contextual_followups'), 0)}"
+                        f"｜expires_in={max(0.0, _safe_float(active.get('expires_at'), 0) - _now_ts()):.1f}s"
+                        f"｜last={_single_line(active.get('last_text'), 80) or '-'}"
+                    )
+                last_wakeup = group.get("last_group_wakeup") if isinstance(group.get("last_group_wakeup"), dict) else {}
+                if last_wakeup:
+                    lines.append(
+                        "最近群唤醒："
+                        f"{_single_line(last_wakeup.get('type'), 30) or '-'}"
+                        f"｜{_single_line(last_wakeup.get('reason_label'), 60) or _single_line(last_wakeup.get('reason'), 60) or '-'}"
+                        f"｜sender={_single_line(last_wakeup.get('sender_id'), 40) or '-'}"
+                        f"｜text={_single_line(last_wakeup.get('text'), 80) or '-'}"
+                    )
+                recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
+                recent_lines = []
+                for item in recent[-5:]:
+                    if not isinstance(item, dict):
+                        continue
+                    who = _single_line(item.get("identity_name") or item.get("name") or item.get("sender_id"), 24)
+                    msg = _single_line(item.get("text"), 80)
+                    if msg:
+                        recent_lines.append(f"{who or '?'}: {msg}")
+                if recent_lines:
+                    lines.append("最近群消息：" + " / ".join(recent_lines))
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        user = users.get(sender_id) if sender_id and isinstance(users, dict) else None
+        if isinstance(user, dict):
+            lines.append(
+                "当前用户状态："
+                f"enabled={self._feature_on_text(user.get('enabled', True))}"
+                f"｜role={_single_line(user.get('role'), 30) or '-'}"
+                f"｜ignored={_safe_int(user.get('ignored_streak'), 0)}"
+                f"｜last_seen={self._format_timestamp_elapsed(user.get('last_seen')) if callable(getattr(self, '_format_timestamp_elapsed', None)) else _single_line(user.get('last_seen'), 30)}"
+            )
+        debounce = data.get("smart_message_debounce") if isinstance(data.get("smart_message_debounce"), dict) else {}
+        logs = debounce.get("recent_logs") if isinstance(debounce.get("recent_logs"), list) else []
+        if logs:
+            compact_logs = []
+            for item in logs[-4:]:
+                if not isinstance(item, dict):
+                    continue
+                compact_logs.append(
+                    f"{_single_line(item.get('chat'), 10) or '-'}:{_single_line(item.get('decision'), 20) or '-'}"
+                    f"/{_single_line(item.get('outcome'), 24) or '-'}"
+                    f"({_single_line(item.get('reason'), 40) or '-'})"
+                )
+            if compact_logs:
+                lines.append("最近智能收口：" + " / ".join(compact_logs))
+        passive = data.get("passive_no_reply_records") if isinstance(data.get("passive_no_reply_records"), dict) else {}
+        if passive:
+            reasons = []
+            passive_items = passive.get("items") if isinstance(passive.get("items"), list) else []
+            for item in passive_items[:5]:
+                if isinstance(item, dict):
+                    reasons.append(f"{_single_line(item.get('reason'), 40)}×{_safe_int(item.get('count'), 1)}")
+            if reasons:
+                lines.append("最近被动未回复：" + " / ".join(reasons))
+        return "\n".join(lines)
+
+    def _companion_manual_config_specs(self) -> dict[str, dict[str, Any]]:
+        return {
+            "enable_group_companion": {"type": "bool", "label": "群聊陪伴总开关"},
+            "enable_group_conversation_followup": {"type": "bool", "label": "群聊连续对话保持"},
+            "group_conversation_followup_seconds": {"type": "int", "min": 0, "max": 600, "label": "群聊续接窗口秒数"},
+            "group_conversation_followup_max_turns": {"type": "int", "min": 0, "max": 10, "label": "群聊连续续接上限"},
+            "enable_group_high_intensity_mode": {"type": "bool", "label": "群聊高强度收口"},
+            "group_high_intensity_wakeup_window_seconds": {"type": "int", "min": 15, "max": 600, "label": "高强度统计窗口秒数"},
+            "group_high_intensity_wakeup_threshold": {"type": "int", "min": 2, "max": 20, "label": "高强度唤醒阈值"},
+            "group_high_intensity_cooldown_seconds": {"type": "int", "min": 30, "max": 1800, "label": "高强度收口持续秒数"},
+            "group_high_intensity_merge_seconds": {"type": "int", "min": 1, "max": 30, "label": "高强度合并等待秒数"},
+            "group_high_intensity_max_merge_messages": {"type": "int", "min": 0, "max": 50, "label": "高强度最大合并消息数"},
+            "group_high_intensity_merge_scope": {
+                "type": "select",
+                "choices": {"group", "same_user"},
+                "aliases": {
+                    "sender": "same_user",
+                    "same_sender": "same_user",
+                    "user": "same_user",
+                    "同一用户": "same_user",
+                    "同一发送者": "same_user",
+                    "全群": "group",
+                },
+                "label": "高强度合并范围",
+            },
+            "enable_message_debounce": {"type": "bool", "label": "消息收口"},
+            "enable_smart_message_debounce": {"type": "bool", "label": "智能文本收口"},
+            "smart_message_debounce_wait_seconds": {"type": "float", "min": 0.0, "max": 30.0, "label": "智能收口等待秒数"},
+            "text_message_debounce_seconds": {"type": "float", "min": 0.0, "max": 15.0, "label": "文本补话等待秒数"},
+            "text_message_debounce_max_wait_seconds": {"type": "float", "min": 0.0, "max": 30.0, "label": "文本最长等待秒数"},
+            "message_debounce_max_merge_messages": {"type": "int", "min": 0, "max": 30, "label": "最大合并消息数"},
+            "enable_group_wakeup_question": {"type": "bool", "label": "群聊解惑唤醒"},
+            "group_wakeup_question_threshold": {"type": "int", "min": 0, "max": 100, "label": "解惑强度阈值"},
+            "group_wakeup_short_text_wait_seconds": {"type": "float", "min": 0.0, "max": 30.0, "label": "短唤醒补话等待秒数"},
+            "group_wakeup_cooldown_seconds": {"type": "int", "min": 0, "max": 3600, "label": "群聊唤醒冷却秒数"},
+            "enable_natural_language_photo_generation": {"type": "bool", "label": "自然语言生图/改图"},
+            "natural_language_photo_generation_max_daily": {"type": "int", "min": 0, "max": 10, "label": "自然语言生图每日上限"},
+            "enable_qzone_comment_inbox": {"type": "bool", "label": "QQ 空间评论收件箱"},
+            "qzone_comment_inbox_interval_minutes": {"type": "int", "min": 5, "max": 1440, "label": "空间评论检查间隔"},
+            "qzone_comment_inbox_recent_posts": {"type": "int", "min": 1, "max": 20, "label": "空间评论扫描说说数"},
+            "qzone_comment_inbox_max_replies_per_tick": {"type": "int", "min": 1, "max": 5, "label": "空间评论每轮最多回复"},
+        }
+
+    def _companion_manual_config_label(self, key: str) -> str:
+        spec = self._companion_manual_config_specs().get(str(key or ""))
+        if isinstance(spec, dict):
+            return str(spec.get("label") or key)
+        meta = self._companion_manual_config_display_meta().get(str(key or ""))
+        return str(meta.get("label") or key) if isinstance(meta, dict) else str(key or "")
+
+    def _companion_manual_config_display_meta(self) -> dict[str, dict[str, str]]:
+        return {
+            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": {"label": "群聊连续对话判断模型", "location": "拓展页 -> 模型/Provider -> GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"},
+            "LLM_PROVIDER_ID": {"label": "插件主模型 Provider", "location": "拓展页 -> 模型/Provider -> LLM_PROVIDER_ID"},
+            "MAI_STYLE_PROVIDER_ID": {"label": "风格/轻量任务模型", "location": "拓展页 -> 模型/Provider -> MAI_STYLE_PROVIDER_ID"},
+            "PHOTO_MODEL_PROVIDER_ID": {"label": "生图模型感知 Provider", "location": "拓展页 -> 模型/Provider -> PHOTO_MODEL_PROVIDER_ID"},
+            "PHOTO_PROMPT_PROVIDER_ID": {"label": "生图提示词模型", "location": "拓展页 -> 模型/Provider -> PHOTO_PROMPT_PROVIDER_ID"},
+            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": {"label": "主动人格判定模型", "location": "拓展页 -> 模型/Provider -> PROACTIVE_PERSONA_JUDGE_PROVIDER_ID"},
+            "RESPONSE_REVIEW_PROVIDER_ID": {"label": "回复复核模型", "location": "拓展页 -> 模型/Provider -> RESPONSE_REVIEW_PROVIDER_ID"},
+            "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": {"label": "智能收口小模型", "location": "拓展页 -> 模型/Provider -> SMART_MESSAGE_DEBOUNCE_PROVIDER_ID；也可在 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 智能文本收口 查看"},
+            "TROUBLESHOOTING_PROVIDER_ID": {"label": "排障/答疑模型", "location": "拓展页 -> 模型/Provider -> TROUBLESHOOTING_PROVIDER_ID"},
+            "enable_group_wakeup_enhancement": {"label": "群聊唤醒增强", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强"},
+            "group_access_mode": {"label": "群聊访问模式", "location": "拓展页 -> 用户与群聊 -> 群聊名单/访问模式"},
+            "group_wakeup_context_words": {"label": "群聊弱相关唤醒词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 唤醒词"},
+            "group_wakeup_direct_words": {"label": "群聊强唤醒词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 唤醒词"},
+            "group_wakeup_interest_keywords": {"label": "群聊兴趣唤醒关键词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 兴趣唤醒"},
+            "enable_photo_text_action": {"label": "生图/拍照能力", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力"},
+            "photo_generation_backend": {"label": "生图后端", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 后端选择"},
+            "photo_persona_reference_image_path": {"label": "人设参考图路径", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 本地 ComfyUI；也可用命令 陪伴 参考图 设置"},
+            "photo_prompt_prefix": {"label": "生图提示词前缀", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格/提示词"},
+            "enable_qzone_integration": {"label": "QQ 空间联动", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动"},
+            "enable_qzone_life_publish": {"label": "QQ 空间生活说说", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 生活说说"},
+            "max_daily_messages": {"label": "主动消息每日上限", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
+            "min_interval_minutes": {"label": "主动消息最小间隔", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
+            "proactive_review_strength": {"label": "主动发送前复核强度", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情"},
+            "quiet_hours": {"label": "主动免打扰时间", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
+            "target_user_ids": {"label": "目标用户 QQ 列表", "location": "拓展页 -> 用户与群聊 -> 私聊对象/目标用户"},
+        }
+
+    def _companion_manual_config_location(self, key: str) -> str:
+        key = str(key or "").strip()
+        locations = {
+            "enable_group_companion": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊陪伴总开关",
+            "enable_group_conversation_followup": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊陪伴总开关详情 -> 场景与续接",
+            "group_conversation_followup_seconds": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊陪伴总开关详情 -> 场景与续接",
+            "group_conversation_followup_max_turns": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊陪伴总开关详情 -> 场景与续接",
+            "enable_group_high_intensity_mode": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊高强度收口",
+            "group_high_intensity_wakeup_window_seconds": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊高强度收口详情 -> 关联参数",
+            "group_high_intensity_wakeup_threshold": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊高强度收口详情 -> 关联参数",
+            "group_high_intensity_cooldown_seconds": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊高强度收口详情 -> 关联参数",
+            "group_high_intensity_merge_seconds": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊高强度收口详情 -> 关联参数",
+            "group_high_intensity_max_merge_messages": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊高强度收口详情 -> 关联参数",
+            "group_high_intensity_merge_scope": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊高强度收口详情 -> 关联参数",
+            "enable_message_debounce": "拓展页 -> 功能开关 -> 通用能力 -> 消息收口防抖",
+            "enable_smart_message_debounce": "拓展页 -> 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 智能文本收口",
+            "smart_message_debounce_wait_seconds": "拓展页 -> 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 智能文本收口",
+            "text_message_debounce_seconds": "拓展页 -> 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 补话等待",
+            "text_message_debounce_max_wait_seconds": "拓展页 -> 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 补话等待",
+            "message_debounce_max_merge_messages": "拓展页 -> 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 补话等待",
+            "enable_group_wakeup_question": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 解惑与冷群",
+            "group_wakeup_question_threshold": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 解惑与冷群",
+            "group_wakeup_short_text_wait_seconds": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 节流与拟人感",
+            "group_wakeup_cooldown_seconds": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 节流与拟人感",
+            "enable_natural_language_photo_generation": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 自然语言生图/改图",
+            "natural_language_photo_generation_max_daily": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 自然语言生图/改图",
+            "enable_qzone_comment_inbox": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 评论收件箱",
+            "qzone_comment_inbox_interval_minutes": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 评论收件箱",
+            "qzone_comment_inbox_recent_posts": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 评论收件箱",
+            "qzone_comment_inbox_max_replies_per_tick": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 评论收件箱",
+        }
+        meta = self._companion_manual_config_display_meta().get(key)
+        if isinstance(meta, dict) and meta.get("location"):
+            return str(meta.get("location"))
+        return locations.get(key, "拓展页 -> 功能开关，搜索参数名或中文名")
+
+    def _companion_manual_config_ref(self, key: str, *, include_location: bool = True) -> str:
+        key = str(key or "").strip()
+        if not key:
+            return ""
+        label = self._companion_manual_config_label(key)
+        text = f"{label}（{key}）" if label and label != key else key
+        if include_location:
+            text = f"{text}｜位置：{self._companion_manual_config_location(key)}"
+        return text
+
+    def _companion_manual_mentioned_config_keys(self, text: str) -> list[str]:
+        source = str(text or "")
+        if not source:
+            return []
+        found: list[str] = []
+        keys = set(self._companion_manual_config_specs()) | set(self._companion_manual_config_display_meta())
+        for key in sorted(keys, key=len, reverse=True):
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])", source):
+                found.append(key)
+        labels: list[tuple[str, str]] = []
+        for key in keys:
+            label = self._companion_manual_config_label(key)
+            if label and label != key:
+                labels.append((key, label))
+        for key, label in sorted(labels, key=lambda item: len(item[1]), reverse=True):
+            if key not in found and label in source:
+                found.append(key)
+        return found
+
+    def _companion_manual_config_aliases(self) -> dict[str, str]:
+        aliases = {
+            "群聊陪伴": "enable_group_companion",
+            "连续对话保持": "enable_group_conversation_followup",
+            "续接窗口": "group_conversation_followup_seconds",
+            "连续对话窗口": "group_conversation_followup_seconds",
+            "群聊续接窗口": "group_conversation_followup_seconds",
+            "续接轮数": "group_conversation_followup_max_turns",
+            "连续对话轮数": "group_conversation_followup_max_turns",
+            "续接上限": "group_conversation_followup_max_turns",
+            "高强度收口": "enable_group_high_intensity_mode",
+            "高强度阈值": "group_high_intensity_wakeup_threshold",
+            "高强度唤醒阈值": "group_high_intensity_wakeup_threshold",
+            "高强度持续": "group_high_intensity_cooldown_seconds",
+            "收口持续": "group_high_intensity_cooldown_seconds",
+            "高强度合并等待": "group_high_intensity_merge_seconds",
+            "合并等待": "group_high_intensity_merge_seconds",
+            "高强度合并范围": "group_high_intensity_merge_scope",
+            "合并范围": "group_high_intensity_merge_scope",
+            "文本等待": "text_message_debounce_seconds",
+            "文本补话等待": "text_message_debounce_seconds",
+            "智能等待": "smart_message_debounce_wait_seconds",
+            "智能收口等待": "smart_message_debounce_wait_seconds",
+            "文本最长等待": "text_message_debounce_max_wait_seconds",
+            "最大合并数": "message_debounce_max_merge_messages",
+            "求助阈值": "group_wakeup_question_threshold",
+            "解惑阈值": "group_wakeup_question_threshold",
+            "短唤醒等待": "group_wakeup_short_text_wait_seconds",
+            "自然语言生图": "enable_natural_language_photo_generation",
+            "自然语言改图": "enable_natural_language_photo_generation",
+            "自然生图上限": "natural_language_photo_generation_max_daily",
+            "空间评论收件箱": "enable_qzone_comment_inbox",
+            "空间评论间隔": "qzone_comment_inbox_interval_minutes",
+            "空间评论扫描数": "qzone_comment_inbox_recent_posts",
+            "空间每轮回复数": "qzone_comment_inbox_max_replies_per_tick",
+        }
+        for key in self._companion_manual_config_specs():
+            aliases[key] = key
+            label = self._companion_manual_config_label(key)
+            if label:
+                aliases[label] = key
+        return aliases
+
+    def _companion_manual_config_key_from_alias(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if text in self._companion_manual_config_specs():
+            return text
+        compact = re.sub(r"\s+", "", text).lower()
+        for alias, key in self._companion_manual_config_aliases().items():
+            if re.sub(r"\s+", "", str(alias or "")).lower() == compact:
+                return key
+        return ""
+
+    def _companion_manual_current_config_value(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        return _flat_get(getattr(self, "config", None), key, None)
+
+    def _companion_manual_parse_bool(self, value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"}:
+            return True
+        if text in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否"}:
+            return False
+        return None
+
+    def _companion_manual_normalize_config_value(self, key: str, value: Any) -> tuple[bool, Any, str]:
+        spec = self._companion_manual_config_specs().get(str(key or ""))
+        if not isinstance(spec, dict):
+            return False, None, f"不允许通过答疑命令修改配置项：{key}"
+        kind = str(spec.get("type") or "string")
+        try:
+            if kind == "bool":
+                parsed = self._companion_manual_parse_bool(value)
+                if parsed is None:
+                    return False, None, "布尔值请使用 开启/关闭、true/false、1/0。"
+                return True, parsed, ""
+            if kind == "int":
+                parsed = int(float(str(value).strip()))
+                parsed = max(int(spec.get("min", 0)), min(int(spec.get("max", parsed)), parsed))
+                return True, parsed, ""
+            if kind == "float":
+                parsed = float(str(value).strip())
+                parsed = max(float(spec.get("min", 0.0)), min(float(spec.get("max", parsed)), parsed))
+                return True, parsed, ""
+            if kind == "select":
+                text = str(value or "").strip().lower()
+                aliases = spec.get("aliases") if isinstance(spec.get("aliases"), dict) else {}
+                text = str(aliases.get(text, text))
+                choices = spec.get("choices") if isinstance(spec.get("choices"), set) else set()
+                if text not in choices:
+                    return False, None, f"可选值只有：{', '.join(sorted(str(item) for item in choices))}"
+                return True, text, ""
+        except (TypeError, ValueError):
+            return False, None, f"{self._companion_manual_config_label(key)} 的值格式不对。"
+        return False, None, f"不支持的配置类型：{kind}"
+
+    def _companion_manual_values_equal(self, left: Any, right: Any) -> bool:
+        if isinstance(left, bool) or isinstance(right, bool):
+            return bool(left) == bool(right)
+        try:
+            return abs(float(left) - float(right)) < 0.0001
+        except (TypeError, ValueError):
+            return str(left) == str(right)
+
+    def _companion_manual_format_config_value(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return "开启" if value else "关闭"
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    def _companion_manual_confidence_label(self, confidence: Any) -> str:
+        score = _safe_float(confidence, 0.0, 0.0)
+        if score >= 0.78:
+            return "高"
+        if score >= 0.55:
+            return "中"
+        return "低"
+
+    def _companion_manual_add_proposal(
+        self,
+        proposals: list[dict[str, Any]],
+        key: str,
+        value: Any,
+        reason: str,
+        *,
+        evidence: list[str] | None = None,
+        strength: str = "可尝试",
+        confidence: float = 0.62,
+    ) -> None:
+        if any(item.get("key") == key for item in proposals):
+            return
+        ok, normalized, error = self._companion_manual_normalize_config_value(key, value)
+        if not ok:
+            logger.debug("[PrivateCompanion] 答疑可执行建议被跳过: key=%s error=%s", key, _single_line(error, 120))
+            return
+        old = self._companion_manual_current_config_value(key)
+        if self._companion_manual_values_equal(old, normalized):
+            return
+        evidence_lines = [
+            _single_line(item, 150)
+            for item in (evidence or [])
+            if _single_line(item, 150)
+        ]
+        current_evidence = f"当前 {key}={self._companion_manual_format_config_value(old)}"
+        if not any(str(item).startswith(f"当前 {key}=") for item in evidence_lines):
+            evidence_lines.insert(0, current_evidence)
+        proposals.append(
+            {
+                "key": key,
+                "label": self._companion_manual_config_label(key),
+                "old": old,
+                "value": normalized,
+                "reason": _single_line(reason, 160),
+                "evidence": evidence_lines[:4],
+                "strength": _single_line(strength, 20) or "可尝试",
+                "confidence": max(0.0, min(1.0, _safe_float(confidence, 0.0, 0.0))),
+            }
+        )
+
+    def _companion_manual_build_config_proposals(
+        self,
+        question: str,
+        selected: list[dict[str, Any]],
+        event: AstrMessageEvent | None = None,
+    ) -> list[dict[str, Any]]:
+        query = str(question or "")
+        compact = re.sub(r"\s+", "", query).lower()
+        titles = " ".join(str(item.get("title") or "") for item in selected)
+        proposals: list[dict[str, Any]] = []
+        runtime = self._companion_manual_runtime_snapshot(event) if event is not None else ""
+
+        def runtime_evidence(*patterns: str) -> list[str]:
+            lines = []
+            for line in runtime.splitlines():
+                if not line:
+                    continue
+                if any(pattern and pattern in line for pattern in patterns):
+                    lines.append(line)
+            return lines[:2]
+
+        def current_number(key: str, default: float = 0.0) -> float:
+            return _safe_float(self._companion_manual_current_config_value(key), default, 0.0)
+
+        def current_int(key: str, default: int = 0) -> int:
+            return _safe_int(self._companion_manual_current_config_value(key), default, 0)
+
+        def current_bool(key: str, default: bool = False) -> bool:
+            value = self._companion_manual_current_config_value(key)
+            parsed = self._companion_manual_parse_bool(value)
+            return bool(default) if parsed is None else parsed
+
+        group_slow = any(word in compact for word in ("群聊不回复", "没回复", "回复慢", "好久才回复", "不理", "老是不回复")) or "群聊老是不回复" in titles
+        followup = any(word in compact for word in ("连续对话", "续接", "接话", "没@", "没at")) or "连续对话" in titles
+        high_intensity = any(word in compact for word in ("高强度", "收口", "合并", "压制")) or "高强度收口" in titles
+        debounce = any(word in compact for word in ("防抖", "智能收口", "补话", "等待", "合并消息")) or "智能防抖" in titles or "消息收口" in titles
+        wakeup_mistouch = any(word in compact for word in ("误触", "碰瓷", "插话", "乱回复", "抢话"))
+        wakeup_mistouch = wakeup_mistouch or any(word in compact for word in ("太敏感", "过于敏感", "容易触发", "乱触发"))
+        photo_mistouch = any(word in compact for word in ("生图误触", "画图误触", "改图误触", "自然语言生图怎么关闭")) or (
+            "生图" in compact and any(word in compact for word in ("误触", "太敏感", "过于敏感", "容易触发", "乱触发"))
+        )
+        qzone_repeat = any(word in compact for word in ("空间重复", "一直回复", "重复回复", "评论重复")) or ("QQ 空间" in titles and "重复" in query)
+
+        def propose(
+            key: str,
+            value: Any,
+            reason: str,
+            scene: str,
+            *,
+            condition: str = "",
+            strength: str = "可尝试",
+            confidence: float = 0.62,
+            runtime_patterns: tuple[str, ...] = (),
+        ) -> None:
+            evidence = [f"命中场景：{scene}"]
+            if condition:
+                evidence.append(condition)
+            evidence.extend(runtime_evidence(*runtime_patterns))
+            self._companion_manual_add_proposal(
+                proposals,
+                key,
+                value,
+                reason,
+                evidence=evidence,
+                strength=strength,
+                confidence=confidence,
+            )
+
+        if group_slow or followup:
+            if not current_bool("enable_group_conversation_followup", True):
+                propose(
+                    "enable_group_conversation_followup",
+                    True,
+                    "开启后，明确叫过 Bot 的同一用户在短窗口内不用每句都 @。",
+                    "群聊不回复/连续对话续接",
+                    condition="连续对话当前关闭，未 @ 的后续消息更容易断开。",
+                    strength="强建议",
+                    confidence=0.82,
+                    runtime_patterns=("当前群连续对话锚点", "最近群唤醒"),
+                )
+            seconds = current_int("group_conversation_followup_seconds", 120)
+            if seconds < 90 or seconds > 240:
+                propose(
+                    "group_conversation_followup_seconds",
+                    120,
+                    "把续接窗口收在 120 秒左右，既不太迟钝，也不容易很久后误认。",
+                    "群聊不回复/连续对话续接",
+                    condition=f"当前续接窗口 {seconds} 秒不在推荐观察区间 90-240 秒。",
+                    strength="强建议" if seconds <= 0 or seconds > 360 else "可尝试",
+                    confidence=0.76 if seconds <= 0 or seconds > 360 else 0.66,
+                    runtime_patterns=("当前群连续对话锚点", "最近群消息"),
+                )
+            turns = current_int("group_conversation_followup_max_turns", 1)
+            if turns < 1:
+                propose(
+                    "group_conversation_followup_max_turns",
+                    1,
+                    "至少允许无 @ 续接一轮，能改善“叫过之后马上不回”的体感。",
+                    "群聊不回复/连续对话续接",
+                    condition="当前无 @ 续接轮数为 0，明确叫过 Bot 后也不会自然续接。",
+                    strength="强建议",
+                    confidence=0.8,
+                    runtime_patterns=("当前群连续对话锚点",),
+                )
+            elif group_slow and turns == 1 and "更容易" in compact:
+                propose(
+                    "group_conversation_followup_max_turns",
+                    2,
+                    "如果目标是更容易接住同一人的后续补话，可以临时放到 2 轮观察。",
+                    "用户明确希望更容易接话",
+                    condition="当前最多续接 1 轮，调到 2 会增加对同一用户补话的承接。",
+                    strength="可尝试",
+                    confidence=0.58,
+                    runtime_patterns=("当前群连续对话锚点",),
+                )
+
+        if group_slow or high_intensity:
+            if not current_bool("enable_group_high_intensity_mode", True):
+                propose(
+                    "enable_group_high_intensity_mode",
+                    True,
+                    "开启后连续叫 Bot 会先合并，避免多次 LLM 并发挤爆主链。",
+                    "群聊高频唤醒/回复慢",
+                    condition="高强度收口当前关闭，连续 @ 时更容易形成多轮并发。",
+                    strength="可尝试",
+                    confidence=0.6,
+                    runtime_patterns=("当前群高强度", "最近群唤醒"),
+                )
+            if current_int("group_high_intensity_wakeup_threshold", 3) < 4:
+                propose(
+                    "group_high_intensity_wakeup_threshold",
+                    4,
+                    "阈值从 3 提到 4，可以减少普通连续对话过早进入高强度压制。",
+                    "高强度收口过早/回复慢",
+                    condition="当前阈值低于 4，普通连续互动也可能较早进入收口。",
+                    strength="可尝试",
+                    confidence=0.66,
+                    runtime_patterns=("当前群高强度", "最近群唤醒"),
+                )
+            if current_int("group_high_intensity_cooldown_seconds", 150) > 90:
+                propose(
+                    "group_high_intensity_cooldown_seconds",
+                    90,
+                    "收口持续时间缩短到 90 秒，能让群聊更快回到正常续接判断。",
+                    "高强度收口持续过久",
+                    condition="当前持续时间超过 90 秒，容易让一段时间内的续接判断偏保守。",
+                    strength="可尝试",
+                    confidence=0.65,
+                    runtime_patterns=("当前群高强度",),
+                )
+            if current_int("group_high_intensity_merge_seconds", 8) > 5:
+                propose(
+                    "group_high_intensity_merge_seconds",
+                    5,
+                    "高强度合并等待降到 5 秒，能少一点“好久才回”的体感。",
+                    "高强度合并等待偏长",
+                    condition="当前合并等待超过 5 秒，会直接增加高强度期间首条回复等待。",
+                    strength="可尝试",
+                    confidence=0.7,
+                    runtime_patterns=("当前群高强度",),
+                )
+            if str(self._companion_manual_current_config_value("group_high_intensity_merge_scope") or "group") == "group":
+                propose(
+                    "group_high_intensity_merge_scope",
+                    "same_user",
+                    "只合并同一发送者的补话，避免别人接话时被全群收口卷进去。",
+                    "高强度合并范围过宽",
+                    condition="当前按全群合并，其他人接话也可能被并入同一轮。",
+                    strength="可尝试",
+                    confidence=0.68,
+                    runtime_patterns=("最近群消息", "当前群高强度"),
+                )
+
+        if group_slow or debounce:
+            if current_number("text_message_debounce_seconds", 0.0) > 2:
+                propose(
+                    "text_message_debounce_seconds",
+                    2,
+                    "普通文本固定等待降到 2 秒，能减少完整发言后的无谓等待。",
+                    "消息收口导致回复慢",
+                    condition="当前普通文本固定等待超过 2 秒。",
+                    strength="强建议",
+                    confidence=0.78,
+                    runtime_patterns=("最近智能收口",),
+                )
+            if current_bool("enable_smart_message_debounce", False) and current_number("smart_message_debounce_wait_seconds", 3.0) > 2:
+                propose(
+                    "smart_message_debounce_wait_seconds",
+                    2,
+                    "智能收口的总等待预算降到 2 秒，保留补话感但不拖太久。",
+                    "智能收口等待偏长",
+                    condition="智能收口已开启，且等待预算超过 2 秒。",
+                    strength="可尝试",
+                    confidence=0.69,
+                    runtime_patterns=("最近智能收口",),
+                )
+            if current_number("text_message_debounce_max_wait_seconds", 12.0) > 10:
+                propose(
+                    "text_message_debounce_max_wait_seconds",
+                    10,
+                    "滑动收口最长等待压到 10 秒，避免用户连续补话时一直拖住回复。",
+                    "收口最长等待偏长",
+                    condition="当前文本最长等待超过 10 秒。",
+                    strength="可尝试",
+                    confidence=0.64,
+                    runtime_patterns=("最近智能收口",),
+                )
+
+        if wakeup_mistouch and not photo_mistouch:
+            if current_bool("enable_group_wakeup_question", True) and current_int("group_wakeup_question_threshold", 65) < 75:
+                propose(
+                    "group_wakeup_question_threshold",
+                    75,
+                    "提高公共求助阈值，能减少普通闲聊被当成“需要 Bot 答疑”。",
+                    "群聊答疑/解惑误触",
+                    condition="用户问题包含误触/碰瓷/乱插话意图，且当前求助阈值低于 75。",
+                    strength="强建议",
+                    confidence=0.76,
+                    runtime_patterns=("最近群唤醒", "最近被动未回复"),
+                )
+            if current_number("group_wakeup_short_text_wait_seconds", 15.0) < 5:
+                propose(
+                    "group_wakeup_short_text_wait_seconds",
+                    5,
+                    "短唤醒多等几秒补话，能减少一两个字就触发回复。",
+                    "短文本唤醒误触",
+                    condition="短唤醒补话等待低于 5 秒，碎片消息更容易提前触发。",
+                    strength="可尝试",
+                    confidence=0.64,
+                    runtime_patterns=("最近群唤醒",),
+                )
+
+        if photo_mistouch:
+            if current_bool("enable_natural_language_photo_generation", False):
+                propose(
+                    "enable_natural_language_photo_generation",
+                    False,
+                    "自然语言生图关闭后，只保留主动拍照/自拍链路，能避免和普通聊天或其他生图插件抢触发。",
+                    "自然语言生图误触",
+                    condition="用户问题明确提到生图/改图误触，且自然语言生图入口当前开启。",
+                    strength="强建议",
+                    confidence=0.84,
+                )
+
+        if qzone_repeat:
+            if current_bool("enable_qzone_comment_inbox", False):
+                propose(
+                    "enable_qzone_comment_inbox",
+                    False,
+                    "先暂停评论收件箱，避免排障前继续对同一条评论公开回复。",
+                    "QQ 空间评论重复回复",
+                    condition="用户问题明确提到空间评论重复/一直回复，先关入口可止血。",
+                    strength="强建议",
+                    confidence=0.83,
+                )
+            if current_int("qzone_comment_inbox_interval_minutes", 60) < 60:
+                propose(
+                    "qzone_comment_inbox_interval_minutes",
+                    60,
+                    "评论检查间隔至少 60 分钟，降低重复扫描带来的二次回复风险。",
+                    "QQ 空间评论重复回复",
+                    condition="当前评论检查间隔小于 60 分钟，重复扫描频率偏高。",
+                    strength="可尝试",
+                    confidence=0.62,
+                )
+            if current_int("qzone_comment_inbox_max_replies_per_tick", 1) > 1:
+                propose(
+                    "qzone_comment_inbox_max_replies_per_tick",
+                    1,
+                    "每轮最多回复 1 条，排障时更容易定位是哪条评论触发。",
+                    "QQ 空间评论重复回复",
+                    condition="当前每轮可回复多条，排障时不容易定位触发源。",
+                    strength="可尝试",
+                    confidence=0.6,
+                )
+
+        return proposals[:6]
+
+    def _companion_manual_pending_key(self, event: AstrMessageEvent) -> str:
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        group_id = ""
+        try:
+            group_id = self._extract_group_id_from_event(event)
+        except Exception:
+            group_id = ""
+        return f"group:{group_id}:{sender_id}" if group_id else f"private:{sender_id}"
+
+    def _companion_manual_pending_store(self) -> dict[str, Any]:
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return {}
+        store = data.setdefault("manual_diagnosis_pending_config", {})
+        if not isinstance(store, dict):
+            store = {}
+            data["manual_diagnosis_pending_config"] = store
+        return store
+
+    def _companion_manual_prune_pending_store(self, store: dict[str, Any]) -> None:
+        if not isinstance(store, dict):
+            return
+        now = _now_ts()
+        for key, item in list(store.items()):
+            ts = _safe_float(item.get("ts") if isinstance(item, dict) else 0.0, 0.0, 0.0)
+            if ts <= 0 or now - ts > 1800:
+                store.pop(key, None)
+        if len(store) <= 80:
+            return
+        ranked = sorted(
+            store.items(),
+            key=lambda pair: _safe_float(pair[1].get("ts") if isinstance(pair[1], dict) else 0.0, 0.0, 0.0),
+            reverse=True,
+        )
+        keep = {key for key, _ in ranked[:80]}
+        for key in list(store.keys()):
+            if key not in keep:
+                store.pop(key, None)
+
+    def _companion_manual_store_pending_config(
+        self,
+        event: AstrMessageEvent,
+        question: str,
+        proposals: list[dict[str, Any]],
+    ) -> str:
+        store = self._companion_manual_pending_store()
+        self._companion_manual_prune_pending_store(store)
+        key = self._companion_manual_pending_key(event)
+        if not proposals:
+            if key in store:
+                store.pop(key, None)
+                self._save_data_sync()
+            return ""
+        token = uuid.uuid4().hex[:6]
+        store[key] = {
+            "token": token,
+            "ts": _now_ts(),
+            "question": _single_line(question, 260),
+            "changes": proposals,
+        }
+        self._save_data_sync()
+        return token
+
+    def _companion_manual_recent_context_store(self) -> dict[str, Any]:
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return {}
+        store = data.setdefault("manual_diagnosis_recent_context", {})
+        if not isinstance(store, dict):
+            store = {}
+            data["manual_diagnosis_recent_context"] = store
+        now = _now_ts()
+        for key, item in list(store.items()):
+            if not isinstance(item, dict) or now - _safe_float(item.get("ts"), 0.0, 0.0) > 20 * 60:
+                store.pop(key, None)
+        if len(store) > 80:
+            ranked = sorted(
+                store.items(),
+                key=lambda pair: _safe_float(pair[1].get("ts") if isinstance(pair[1], dict) else 0.0, 0.0, 0.0),
+                reverse=True,
+            )
+            keep = {key for key, _ in ranked[:80]}
+            for key in list(store.keys()):
+                if key not in keep:
+                    store.pop(key, None)
+        return store
+
+    def _companion_manual_recent_context_text(self, event: AstrMessageEvent) -> str:
+        store = self._companion_manual_recent_context_store()
+        item = store.get(self._companion_manual_pending_key(event))
+        if not isinstance(item, dict):
+            return ""
+        question = _single_line(item.get("question"), 180)
+        answer = _single_line(item.get("answer"), 360)
+        configs = item.get("configs") if isinstance(item.get("configs"), list) else []
+        config_text = "；".join(_single_line(value, 120) for value in configs[:4] if _single_line(value, 120))
+        parts = []
+        if question:
+            parts.append(f"上一轮问题：{question}")
+        if answer:
+            parts.append(f"上一轮答复摘要：{answer}")
+        if config_text:
+            parts.append(f"上一轮涉及配置：{config_text}")
+        return "\n".join(parts)
+
+    def _companion_manual_store_recent_context(
+        self,
+        event: AstrMessageEvent,
+        *,
+        question: str,
+        answer: str,
+        proposals: list[dict[str, Any]],
+    ) -> None:
+        store = self._companion_manual_recent_context_store()
+        key = self._companion_manual_pending_key(event)
+        configs = [
+            self._companion_manual_config_ref(_single_line(item.get("key"), 80), include_location=False)
+            for item in proposals[:6]
+            if isinstance(item, dict) and _single_line(item.get("key"), 80)
+        ]
+        store[key] = {
+            "ts": _now_ts(),
+            "question": _single_line(question, 260),
+            "answer": _single_line(answer, 600),
+            "configs": configs,
+        }
+        self._companion_manual_recent_context_store()
+        try:
+            self._schedule_data_save()
+        except Exception:
+            try:
+                self._save_data_sync()
+            except Exception:
+                pass
+
+    def _companion_manual_format_config_proposals(self, token: str, proposals: list[dict[str, Any]]) -> str:
+        if not proposals:
+            return ""
+        lines = ["可执行建议（现在还没改配置）："]
+        for idx, item in enumerate(proposals, start=1):
+            confidence = _safe_float(item.get("confidence"), 0.0, 0.0)
+            key = _single_line(item.get("key"), 80)
+            evidence = [
+                _single_line(part, 120)
+                for part in (item.get("evidence") if isinstance(item.get("evidence"), list) else [])
+                if _single_line(part, 120)
+            ]
+            lines.append(
+                f"{idx}. {self._companion_manual_config_ref(key)}："
+                f"建议由 {self._companion_manual_format_config_value(item.get('old'))} "
+                f"改为 {self._companion_manual_format_config_value(item.get('value'))}；"
+                f"{item.get('strength') or '可尝试'}｜置信度{self._companion_manual_confidence_label(confidence)}；"
+                f"{item.get('reason')}"
+            )
+            if evidence:
+                lines.append("   依据：" + "；".join(evidence[:3]))
+        lines.append("")
+        lines.append("确认执行：陪伴 答疑确认")
+        lines.append("取消建议：陪伴 答疑取消")
+        lines.append("手动改一项：陪伴 答疑设置 <配置项> <值>")
+        if token:
+            lines.append(f"本次建议编号：{token}")
+        return "\n".join(lines)
+
+    def _companion_manual_format_config_proposals_brief(self, token: str, proposals: list[dict[str, Any]]) -> str:
+        if not proposals:
+            return ""
+        lines = ["可直接调整的项（还没改）："]
+        for idx, item in enumerate(proposals[:3], start=1):
+            key = _single_line(item.get("key"), 80)
+            if not key:
+                continue
+            lines.append(
+                f"{idx}. {self._companion_manual_config_ref(key)}："
+                f"建议由 {self._companion_manual_format_config_value(item.get('old'))} "
+                f"改为 {self._companion_manual_format_config_value(item.get('value'))}"
+            )
+        if not lines[1:]:
+            return ""
+        lines.append("要我直接应用的话发：陪伴 答疑确认；不想改就发：陪伴 答疑取消。")
+        if token:
+            lines.append(f"建议编号：{token}")
+        return "\n".join(lines)
+
+    def _companion_manual_fallback_answer(
+        self,
+        event: AstrMessageEvent,
+        question: str,
+        selected: list[dict[str, Any]],
+        proposals: list[dict[str, Any]],
+    ) -> str:
+        query = _single_line(question, 180)
+        if not selected:
+            return (
+                "这句我还没抓准你想查哪块功能。你可以直接说具体一点，比如“刚才为什么没回复”、"
+                "“为什么等了几秒”、或“某个配置在哪里改”，我就能按当前会话状态接着查。"
+            )
+        primary = selected[0] if isinstance(selected[0], dict) else {}
+        title = _single_line(primary.get("title"), 60) or "相关功能"
+        summary = _single_line(primary.get("summary"), 220) or "这类情况需要结合当前运行状态判断。"
+        group_note = self._companion_manual_current_group_note(event)
+        checks = [str(item) for item in primary.get("checks", []) if str(item or "").strip()]
+        suggestions = [str(item) for item in primary.get("suggestions", []) if str(item or "").strip()]
+        lines = []
+        lines.append(f"我先按“{title}”看，{summary}")
+        if group_note:
+            lines.append(_single_line(group_note, 180))
+        if checks:
+            lines.append("最先看这一点：" + _single_line(checks[0], 180))
+        if suggestions:
+            lines.append("可以先试：" + _single_line(suggestions[0], 180))
+        if proposals:
+            item = proposals[0]
+            key = _single_line(item.get("key"), 80)
+            if key:
+                lines.append(
+                    f"如果要调配置，优先看 {self._companion_manual_config_ref(key, include_location=False)}，"
+                    f"建议由 {self._companion_manual_format_config_value(item.get('old'))} "
+                    f"改为 {self._companion_manual_format_config_value(item.get('value'))}。"
+                )
+        return "\n".join(line for line in lines if line)
+
+
+    def _companion_manual_format_diagnostic_evidence(
+        self,
+        event: AstrMessageEvent,
+        selected: list[dict[str, Any]],
+        proposals: list[dict[str, Any]],
+    ) -> str:
+        lines: list[str] = []
+        titles = [_single_line(item.get("title"), 50) for item in selected if isinstance(item, dict)]
+        titles = [item for item in titles if item]
+        if titles:
+            lines.append("匹配说明书：" + " / ".join(titles[:3]))
+        runtime = self._companion_manual_runtime_snapshot(event)
+        runtime_lines = [
+            _single_line(line, 180)
+            for line in runtime.splitlines()
+            if _single_line(line, 180)
+        ]
+        if runtime_lines:
+            lines.extend(runtime_lines[:5])
+        if proposals:
+            config_lines = []
+            for item in proposals[:6]:
+                if not isinstance(item, dict):
+                    continue
+                key = _single_line(item.get("key"), 80)
+                if key:
+                    config_lines.append(
+                        f"{self._companion_manual_config_ref(key, include_location=False)}="
+                        f"{self._companion_manual_format_config_value(item.get('old'))}"
+                    )
+            if config_lines:
+                lines.append("涉及可改配置：" + "、".join(config_lines))
+        if not lines:
+            return ""
+        return "诊断依据：\n" + "\n".join(f"- {line}" for line in lines[:8])
+
+    def _companion_manual_can_apply_config(self, event: AstrMessageEvent) -> bool:
+        is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        return self._can_manage_private_companion(event) if is_private else self._can_manage_group_companion(event)
+
+    def _companion_manual_get_pending_config(self, event: AstrMessageEvent) -> dict[str, Any] | None:
+        store = self._companion_manual_pending_store()
+        key = self._companion_manual_pending_key(event)
+        pending = store.get(key)
+        if not isinstance(pending, dict):
+            return None
+        if _now_ts() - _safe_float(pending.get("ts"), 0.0, 0.0) > 1800:
+            store.pop(key, None)
+            self._save_data_sync()
+            return None
+        return pending
+
+    def _companion_manual_apply_config_value(self, key: str, value: Any) -> tuple[bool, str, Any, Any]:
+        ok, normalized, error = self._companion_manual_normalize_config_value(key, value)
+        if not ok:
+            return False, error, None, None
+        old = self._companion_manual_current_config_value(key)
+        setattr(self, key, normalized)
+        extra_config_updates: dict[str, Any] = {}
+        if key == "enable_message_debounce":
+            self.enable_semantic_message_debounce = bool(normalized)
+            extra_config_updates["enable_semantic_message_debounce"] = bool(normalized)
+        if key == "text_message_debounce_seconds":
+            self.semantic_message_debounce_seconds = normalized
+            extra_config_updates["semantic_message_debounce_seconds"] = normalized
+        saved = False
+        config = getattr(self, "config", None)
+        if config is not None:
+            try:
+                saved = _set_into_config(config, key, normalized, allow_flat_fallback=False)
+            except TypeError:
+                saved = _set_into_config(config, key, normalized)
+            if not saved:
+                saved = _set_into_config(config, key, normalized)
+            for extra_key, extra_value in extra_config_updates.items():
+                try:
+                    _set_into_config(config, extra_key, extra_value, allow_flat_fallback=False)
+                except TypeError:
+                    _set_into_config(config, extra_key, extra_value)
+            self._save_config_if_possible()
+        if not saved:
+            logger.debug("[PrivateCompanion] 答疑设置只更新运行态,未找到可写配置项: key=%s", key)
+        return True, "", old, normalized
+
+    def _companion_manual_apply_pending_config(self, event: AstrMessageEvent) -> str:
+        if not self._companion_manual_can_apply_config(event):
+            return self._management_denied_text()
+        pending = self._companion_manual_get_pending_config(event)
+        if not pending:
+            return "没有待确认的答疑配置建议。先用：陪伴 答疑 <问题>"
+        changes = pending.get("changes") if isinstance(pending.get("changes"), list) else []
+        if not changes:
+            return "这次答疑没有可执行配置建议。"
+        lines = ["已按刚才的答疑建议修改配置："]
+        applied = 0
+        for item in changes:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            ok, error, old, new = self._companion_manual_apply_config_value(key, item.get("value"))
+            if not ok:
+                lines.append(f"- {key}：跳过，{error}")
+                continue
+            applied += 1
+            lines.append(
+                f"- {key}（{self._companion_manual_config_label(key)}）："
+                f"由 {self._companion_manual_format_config_value(old)} 改为 {self._companion_manual_format_config_value(new)}"
+                f"；{_single_line(item.get('reason'), 120) or '按答疑建议调整'}"
+            )
+        self._companion_manual_pending_store().pop(self._companion_manual_pending_key(event), None)
+        self._save_data_sync()
+        if applied <= 0:
+            return "没有成功应用的配置项。"
+        lines.append("已保存到插件配置；如果 AstrBot 配置对象不支持同步保存，日志里会提示。")
+        return "\n".join(lines)
+
+    def _companion_manual_cancel_pending_config(self, event: AstrMessageEvent) -> str:
+        store = self._companion_manual_pending_store()
+        key = self._companion_manual_pending_key(event)
+        existed = key in store
+        store.pop(key, None)
+        self._save_data_sync()
+        return "已取消刚才的答疑配置建议。" if existed else "当前没有待确认的答疑配置建议。"
+
+    def _companion_manual_parse_setting_text(self, text: str) -> tuple[str, str]:
+        raw = re.sub(r"^(?:把|将)\s*", "", str(text or "").strip())
+        if not raw:
+            return "", ""
+        match = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:|：|设为|设置为|改成|调到)\s*([^\s，。]+)", raw)
+        if match:
+            key = self._companion_manual_config_key_from_alias(match.group(1).strip())
+            return key, match.group(2).strip()
+        for alias, key in sorted(self._companion_manual_config_aliases().items(), key=lambda item: len(str(item[0])), reverse=True):
+            alias_text = str(alias or "").strip()
+            if not alias_text:
+                continue
+            if raw.lower().startswith(alias_text.lower()):
+                tail = raw[len(alias_text):].strip()
+                tail = re.sub(r"^(?:=|:|：|设为|设置为|改成|调到|调整为|调为)\s*", "", tail).strip()
+                if tail:
+                    return key, tail
+        parts = raw.split(maxsplit=1)
+        if len(parts) >= 2:
+            key = self._companion_manual_config_key_from_alias(parts[0].strip())
+            return key, parts[1].strip()
+        return "", ""
+
+    def _companion_manual_apply_setting_command(self, event: AstrMessageEvent, text: str) -> str:
+        if not self._companion_manual_can_apply_config(event):
+            return self._management_denied_text()
+        key, value = self._companion_manual_parse_setting_text(text)
+        if not key or not value:
+            allowed = "、".join(sorted(self._companion_manual_config_specs().keys())[:12])
+            return (
+                "请这样写：陪伴 答疑设置 <配置项> <值>\n"
+                "例如：陪伴 答疑设置 group_high_intensity_wakeup_threshold 5\n"
+                "也可以：陪伴 答疑设置 高强度阈值 5\n"
+                f"可改配置很多，前几个是：{allowed} ..."
+            )
+        ok, error, old, new = self._companion_manual_apply_config_value(key, value)
+        if not ok:
+            return error
+        self._companion_manual_pending_store().pop(self._companion_manual_pending_key(event), None)
+        self._save_data_sync()
+        if self._companion_manual_values_equal(old, new):
+            return (
+                "配置没有变化：\n"
+                f"{key}（{self._companion_manual_config_label(key)}）本来就是 "
+                f"{self._companion_manual_format_config_value(new)}"
+            )
+        return (
+            "已修改并保存配置：\n"
+            f"{key}（{self._companion_manual_config_label(key)}）："
+            f"由 {self._companion_manual_format_config_value(old)} 改为 {self._companion_manual_format_config_value(new)}"
+        )
+
+    def _companion_manual_entries(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "title": "群聊老是不回复或好久才回复",
+                "keywords": ["群聊", "群内", "群里", "不活跃", "活跃", "不回复", "没回复", "好久", "回复慢", "没反应", "不理", "卡住", "延迟"],
+                "summary": "群聊回复不是所有消息都接管，通常要被 @、引用、命中唤醒、或处在连续对话窗口内。慢回复多半来自收口等待、高强度合并、模型超时或主链排队。",
+                "checks": [
+                    "先确认目标群启用了群聊陪伴，并且白名单/黑名单没有挡住。",
+                    "如果没有 @/引用 Bot，只有“群聊连续对话保持”窗口内的同一用户后续发言才可能续接。",
+                    "如果短时间连续叫 Bot，高强度收口会合并多条消息后再回复，看起来会慢几秒。",
+                    "如果开启智能文本收口，短引子、逗号结尾、疑似没说完的话会先等补话。",
+                    "如果日志里有主链会话锁、Provider timeout、休息回复闸门或智能沉默，回复也可能被延后或取消。",
+                ],
+                "settings": [
+                    "enable_group_companion",
+                    "group_access_mode",
+                    "enable_group_conversation_followup",
+                    "enable_group_high_intensity_mode",
+                    "enable_message_debounce",
+                    "enable_smart_message_debounce",
+                    "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
+                ],
+                "suggestions": [
+                    "想更容易接话：打开群聊连续对话，并把窗口设为 90-180 秒。",
+                    "想少等：降低文本/短唤醒等待，或关闭智能文本收口。",
+                    "高强度群里想减少误压制：阈值调到 4-5，持续时间调到 60-90 秒，合并范围改 same_user。",
+                ],
+            },
+            {
+                "title": "群聊连续对话在哪里设置",
+                "keywords": ["连续对话", "续接", "上下文续接", "followup", "接话", "没at", "没@", "设置在哪"],
+                "summary": "配置项是 enable_group_conversation_followup。开启后，群里同一用户明确 @/引用 Bot 之后，短时间内没继续 @ 的后续消息也会判断是否仍在和 Bot 对话。",
+                "checks": [
+                    "设置入口：配置页搜索“群聊连续对话保持”或 enable_group_conversation_followup。",
+                    "窗口：group_conversation_followup_seconds，决定多久内还能续接。",
+                    "轮数：group_conversation_followup_max_turns，决定不继续 @ 时最多自动续几轮。",
+                    "模型：GROUP_FOLLOWUP_JUDGE_PROVIDER_ID 只在规则不确定时使用；留空时只走规则判断。",
+                ],
+                "settings": [
+                    "enable_group_conversation_followup",
+                    "group_conversation_followup_seconds",
+                    "group_conversation_followup_max_turns",
+                    "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
+                ],
+                "suggestions": [
+                    "推荐：窗口 120 秒，最多 1-2 轮，小模型可填低延迟分类模型。",
+                    "如果经常碰瓷回复，把最大轮数设为 1，并填写续接判断模型。",
+                ],
+            },
+            {
+                "title": "群聊高强度收口和连续对话的关系",
+                "keywords": ["高强度", "收口", "合并", "冲突", "连续对话", "压制", "高强度收口"],
+                "summary": "两者不是硬冲突，但高强度收口优先级更高。近期连续叫到 Bot 时会合并明确消息，并暂停不确定的续接模型判断；冷却残留只降载，不再延迟单条明确 @。",
+                "checks": [
+                    "触发条件：group_high_intensity_wakeup_window_seconds 内唤醒次数达到 group_high_intensity_wakeup_threshold；唤醒疲劳只会在近期已有连续唤醒时辅助触发。",
+                    "持续时间：group_high_intensity_cooldown_seconds。",
+                    "合并范围：group 表示全群叫 Bot 合并；same_user 表示只合并同一用户补话。",
+                    "高强度冷却期间明确 @/引用仍会处理；只有近期仍在连续叫 Bot 时才进入合并等待。",
+                ],
+                "settings": [
+                    "enable_group_high_intensity_mode",
+                    "group_high_intensity_wakeup_window_seconds",
+                    "group_high_intensity_wakeup_threshold",
+                    "group_high_intensity_cooldown_seconds",
+                    "group_high_intensity_merge_seconds",
+                    "group_high_intensity_merge_scope",
+                ],
+                "suggestions": [
+                    "想保留对话感：阈值 4-5、持续 60-90 秒、合并范围 same_user。",
+                    "想极限省 token：保持默认 group 合并，并接受高强度期间续接变保守。",
+                ],
+            },
+            {
+                "title": "消息收口/智能防抖是什么",
+                "keywords": ["防抖", "收口", "智能收口", "补话", "等补充", "等待", "合并消息"],
+                "summary": "消息收口会给用户留一点补充时间，把连续几句话合并成同一轮；智能收口会先判断这句话是不是完整，只有像“问你个事/你猜/等等/逗号结尾”才等待。",
+                "checks": [
+                    "总开关：enable_message_debounce。",
+                    "智能文本收口：enable_smart_message_debounce。",
+                    "固定文本等待：text_message_debounce_seconds；智能收口开启时主要看 smart_message_debounce_wait_seconds。",
+                    "最长等待：text_message_debounce_max_wait_seconds，避免一直补话拖住。",
+                    "最大合并：message_debounce_max_merge_messages，达到后立刻进入回复链。",
+                ],
+                "settings": [
+                    "enable_message_debounce",
+                    "enable_smart_message_debounce",
+                    "text_message_debounce_seconds",
+                    "smart_message_debounce_wait_seconds",
+                    "text_message_debounce_max_wait_seconds",
+                    "message_debounce_max_merge_messages",
+                ],
+                "suggestions": [
+                    "觉得慢：文本等待设 0-2 秒，智能等待设 1-2 秒。",
+                    "用户常先发图/转发再补字：图片/转发等待可以保留 5-8 秒。",
+                ],
+            },
+            {
+                "title": "群聊唤醒、@ 和答疑误触",
+                "keywords": ["唤醒", "@", "at", "艾特", "答疑", "误触", "碰瓷", "为什么插话"],
+                "summary": "群聊默认不会每句话都回复。明确 @/引用最强；名字、弱唤醒词、兴趣词、公共求助问题会按规则和概率进入回复链。答疑类回复发送前还有碰瓷复核。",
+                "checks": [
+                    "强触发：@ Bot、引用 Bot、直接叫 Bot 名字。",
+                    "弱触发：group_wakeup_context_words、group_wakeup_interest_keywords、公共求助问题。",
+                    "公共求助由 enable_group_wakeup_question 和 group_wakeup_question_threshold 控制。",
+                    "答疑误触可看日志里的“群聊答疑回复发送前复核”。",
+                ],
+                "settings": [
+                    "enable_group_wakeup_enhancement",
+                    "group_wakeup_direct_words",
+                    "group_wakeup_context_words",
+                    "group_wakeup_interest_keywords",
+                    "enable_group_wakeup_question",
+                    "group_wakeup_question_threshold",
+                    "RESPONSE_REVIEW_PROVIDER_ID",
+                ],
+                "suggestions": [
+                    "误触多：提高求助阈值，删掉泛化弱唤醒词，保留 Bot 名字和明确 @。",
+                    "不回复多：检查是否被冷却/疲劳/高强度压制。",
+                ],
+            },
+            {
+                "title": "模型和 Provider 配置",
+                "keywords": ["llm", "LLM", "模型", "provider", "Provider", "配置模型", "没配置", "子模型", "小模型", "默认模型"],
+                "summary": "插件多数能力默认跟随 AstrBot 当前会话模型；部分功能可以单独指定 Provider。未单独配置时通常不是没模型，而是会回退到主模型或相关默认模型。",
+                "checks": [
+                    "主聊天回复通常使用 AstrBot 当前会话选择的人格和 Provider。",
+                    "陪伴答疑优先使用 TROUBLESHOOTING_PROVIDER_ID，未填时依次回退到 RESPONSE_REVIEW_PROVIDER_ID、MAI_STYLE_PROVIDER_ID、LLM_PROVIDER_ID。",
+                    "智能收口使用 SMART_MESSAGE_DEBOUNCE_PROVIDER_ID；留空时跟随插件主模型。",
+                    "生图模型不等于聊天模型，需要在生图平台/后端配置里单独确认。",
+                    "如果提示 Provider 不可用、模型超时或空回复，再看对应功能的 Provider ID 和 Token 页错误。",
+                ],
+                "settings": [
+                    "LLM_PROVIDER_ID",
+                    "TROUBLESHOOTING_PROVIDER_ID",
+                    "RESPONSE_REVIEW_PROVIDER_ID",
+                    "MAI_STYLE_PROVIDER_ID",
+                    "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+                    "PHOTO_MODEL_PROVIDER_ID",
+                    "PHOTO_PROMPT_PROVIDER_ID",
+                ],
+                "suggestions": [
+                    "只想先跑通：保留子模型为空，让它跟随主模型。",
+                    "想降低延迟：答疑、智能收口、复核类功能可填低延迟小模型。",
+                    "生图失败时优先检查生图平台和图片模型，不要填普通聊天模型。",
+                ],
+            },
+            {
+                "title": "主动消息不发或很少发",
+                "keywords": ["主动", "不主动", "不发消息", "很久没发", "主动消息", "私聊主动"],
+                "summary": "主动消息会受目标用户、每日上限、最小间隔、免打扰、休息状态、用户很久没回、主动价值复核和发送失败重试影响。",
+                "checks": [
+                    "确认用户在 target_user_ids 或私聊页已启用。",
+                    "检查 max_daily_messages、min_interval_minutes、quiet_hours。",
+                    "如果用户长期不回，主动会变短、变少，甚至延后。",
+                    "如果开启主动消息价值复核，低价值或像打扰的消息会被改写/拦截。",
+                ],
+                "settings": [
+                    "target_user_ids",
+                    "max_daily_messages",
+                    "min_interval_minutes",
+                    "quiet_hours",
+                    "proactive_review_strength",
+                    "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
+                ],
+                "suggestions": [
+                    "先用“陪伴 查看主动判定”和扩展页排障看最近一次跳过原因。",
+                    "调试期把每日上限设 2-5，间隔不要太短，更容易观察真实行为。",
+                ],
+            },
+            {
+                "title": "生图/自拍/参考图问题",
+                "keywords": ["生图", "自拍", "参考图", "图片", "画图", "改图", "不出图", "脸", "分辨率"],
+                "summary": "生图链路会优先使用配置的在线 API，失败后按配置回退；参考图支持本地路径或 URL。自然语言生图默认关闭，避免和其他生图插件冲突。",
+                "checks": [
+                    "确认 enable_photo_text_action 和生图后端配置可用。",
+                    "自然语言生图/改图要单独打开 enable_natural_language_photo_generation。",
+                    "参考图命令：陪伴 参考图 <本地图片路径|图片URL|清空>，也可带图或回复图片。",
+                    "排障页可看最近生图提示词和后端错误。",
+                ],
+                "settings": [
+                    "enable_photo_text_action",
+                    "enable_natural_language_photo_generation",
+                    "photo_persona_reference_image_path",
+                    "photo_generation_backend",
+                    "photo_prompt_prefix",
+                ],
+                "suggestions": [
+                    "如果误触多，关闭自然语言生图，只保留主动拍照/自拍。",
+                    "在线 API 报模型错误时，确认图片模型不是普通聊天模型。",
+                ],
+            },
+            {
+                "title": "QQ 空间评论或说说链路",
+                "keywords": ["qq空间", "空间", "说说", "评论", "回复评论", "一直回复", "onebot", "cookie"],
+                "summary": "QQ 空间功能依赖 OneBot/Cookie 能力，评论收件箱默认应谨慎开启，并记录已见评论 ID 防止重复回复。",
+                "checks": [
+                    "确认 enable_qzone_integration 和对应子功能开启。",
+                    "如果日志提示没有可用 OneBot 连接，通常是当前适配器没有暴露可取 Cookie 的连接。",
+                    "重复回复同一评论时，重点看 comment_inbox_seen_ids / replied_ids 是否保存。",
+                    "可在排障页跑 QQ 空间测试。",
+                ],
+                "settings": [
+                    "enable_qzone_integration",
+                    "enable_qzone_life_publish",
+                    "enable_qzone_comment_inbox",
+                    "qzone_comment_inbox_interval_minutes",
+                    "qzone_comment_inbox_recent_posts",
+                    "qzone_comment_inbox_max_replies_per_tick",
+                ],
+                "suggestions": [
+                    "评论回复建议低概率、长间隔、默认关闭，先用测试链路确认不会重复回复。",
+                ],
+            },
+        ]
+
+    def _companion_manual_select_entries(self, query: str) -> list[dict[str, Any]]:
+        compact = re.sub(r"\s+", "", query).lower()
+        entries = self._companion_manual_entries()
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for entry in entries:
+            score = 0
+            for keyword in entry.get("keywords", []):
+                key = re.sub(r"\s+", "", str(keyword or "")).lower()
+                if key and key in compact:
+                    score += max(2, min(8, len(key)))
+            title = re.sub(r"\s+", "", str(entry.get("title") or "")).lower()
+            if title and any(part and part in compact for part in re.split(r"[、/ ]+", title)):
+                score += 2
+            if score > 0:
+                scored.append((score, entry))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [item for _, item in scored[:3]]
+
+    def _companion_manual_context_text(self, selected: list[dict[str, Any]] | None = None) -> str:
+        entries = self._companion_manual_entries()
+        selected_titles = {
+            _single_line(item.get("title"), 80)
+            for item in (selected or [])
+            if isinstance(item, dict) and _single_line(item.get("title"), 80)
+        }
+        ordered: list[dict[str, Any]] = []
+        if selected:
+            ordered.extend(item for item in selected if isinstance(item, dict))
+        ordered.extend(
+            item
+            for item in entries
+            if isinstance(item, dict) and _single_line(item.get("title"), 80) not in selected_titles
+        )
+        blocks: list[str] = []
+        for entry in ordered:
+            title = _single_line(entry.get("title"), 80)
+            if not title:
+                continue
+            checks = "；".join(str(item) for item in entry.get("checks", [])[:6] if str(item or "").strip())
+            suggestions = "；".join(str(item) for item in entry.get("suggestions", [])[:4] if str(item or "").strip())
+            settings = "；".join(
+                self._companion_manual_config_ref(str(item), include_location=True)
+                for item in entry.get("settings", [])[:12]
+                if str(item or "").strip()
+            )
+            blocks.append(
+                "\n".join(
+                    [
+                        f"【{title}】",
+                        f"逻辑：{entry.get('summary') or ''}",
+                        f"检查：{checks or '无'}",
+                        f"建议：{suggestions or '无'}",
+                        f"配置键：{settings or '无'}",
+                    ]
+                )
+            )
+        return "\n\n".join(blocks)
+
+    def _companion_manual_local_answer(self, event: AstrMessageEvent, question: str) -> tuple[str, list[dict[str, Any]]]:
+        query = _single_line(question, 260)
+        if not query:
+            return (
+                "可以这样问：\n"
+                "陪伴 答疑 群聊里面老是不回复或者好久才回复是什么情况\n"
+                "陪伴 答疑 群连续对话在哪里进行设置\n"
+                "陪伴 答疑 高强度收口和连续对话会不会冲突\n"
+                "陪伴 答疑 智能收口为什么会等几秒\n"
+                "陪伴 答疑 自然语言生图怎么关闭"
+            ), []
+        selected = self._companion_manual_select_entries(query)
+        if not selected:
+            return (
+                "这句我不太确定你想查哪一块功能。\n"
+                "你可以直接问具体场景，比如：群聊不回复、连续对话、高强度收口、智能收口、主动消息、生图、模型配置、QQ 空间。\n"
+                "如果是在查刚刚那次异常，问“为什么刚才没回复/为什么等了几秒/为什么没生图”会更准。"
+            ), []
+        lines = [f"问题：{query}", ""]
+        group_note = self._companion_manual_current_group_note(event)
+        if group_note:
+            lines.extend([group_note, ""])
+        lines.append("大概结论：")
+        for idx, entry in enumerate(selected, start=1):
+            lines.append(f"{idx}. {entry.get('title')}：{entry.get('summary')}")
+        lines.append("")
+        primary = selected[0]
+        checks = [str(item) for item in primary.get("checks", []) if str(item or "").strip()]
+        if checks:
+            lines.append("优先检查：")
+            lines.extend(f"- {item}" for item in checks[:6])
+        suggestions = [str(item) for item in primary.get("suggestions", []) if str(item or "").strip()]
+        if suggestions:
+            lines.append("")
+            lines.append("建议：")
+            lines.extend(f"- {item}" for item in suggestions[:4])
+        settings = [str(item) for item in primary.get("settings", []) if str(item or "").strip()]
+        if settings:
+            lines.append("")
+            lines.append("相关配置：")
+            lines.extend(f"- {self._companion_manual_config_ref(item)}" for item in settings[:10])
+        lines.append("")
+        lines.append("当前关键配置：")
+        lines.extend(f"- {item}" for item in self._companion_manual_setting_snapshot())
+        return "\n".join(lines), selected
+
+    def _companion_manual_local_hint_text(self, event: AstrMessageEvent, selected: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        group_note = self._companion_manual_current_group_note(event)
+        if group_note:
+            lines.append(group_note)
+        if selected:
+            titles = [
+                _single_line(item.get("title"), 50)
+                for item in selected[:3]
+                if isinstance(item, dict) and _single_line(item.get("title"), 50)
+            ]
+            if titles:
+                lines.append("本地初筛：" + " / ".join(titles))
+            primary = selected[0] if isinstance(selected[0], dict) else {}
+            checks_source = primary.get("checks") if isinstance(primary.get("checks"), list) else []
+            suggestions_source = primary.get("suggestions") if isinstance(primary.get("suggestions"), list) else []
+            checks = [
+                _single_line(item, 120)
+                for item in checks_source[:3]
+                if _single_line(item, 120)
+            ]
+            suggestions = [
+                _single_line(item, 120)
+                for item in suggestions_source[:2]
+                if _single_line(item, 120)
+            ]
+            if checks:
+                lines.append("优先核对：" + "；".join(checks))
+            if suggestions:
+                lines.append("可参考建议：" + "；".join(suggestions))
+        else:
+            lines.append("本地关键词没有稳定定位，需根据完整说明书和运行状态自行判断。")
+        snapshot = [
+            _single_line(item, 120)
+            for item in self._companion_manual_setting_snapshot()[:5]
+            if _single_line(item, 120)
+        ]
+        if snapshot:
+            lines.append("关键配置概览：" + "；".join(snapshot))
+        return "\n".join(line for line in lines if line)
+
+    async def _companion_manual_model_answer(
+        self,
+        event: AstrMessageEvent,
+        question: str,
+        local_answer: str,
+        selected: list[dict[str, Any]],
+    ) -> str:
+        caller = getattr(self, "_llm_call", None)
+        if not callable(caller):
+            return ""
+        provider_selector = getattr(self, "_task_provider", None)
+        if callable(provider_selector):
+            provider_id = provider_selector(
+                getattr(self, "troubleshooting_provider_id", ""),
+                getattr(self, "response_review_provider_id", ""),
+                getattr(self, "mai_style_provider_id", ""),
+                getattr(self, "llm_provider_id", ""),
+            )
+        else:
+            provider_id = str(
+                getattr(self, "troubleshooting_provider_id", "")
+                or getattr(self, "response_review_provider_id", "")
+                or getattr(self, "mai_style_provider_id", "")
+                or getattr(self, "llm_provider_id", "")
+                or ""
+            )
+        if not provider_id:
+            return ""
+        manual_context = self._companion_manual_context_text(selected)
+        local_hint = self._companion_manual_local_hint_text(event, selected) or self._companion_manual_clean_multiline(local_answer, limit=900)
+        selected_hint = (
+            "关键词初筛命中：" + " / ".join(_single_line(item.get("title"), 60) for item in selected if isinstance(item, dict))
+            if selected
+            else "关键词初筛未命中；请直接阅读完整说明书判断，不要把“未命中”当成答案。"
+        )
+        mentioned_keys = self._companion_manual_mentioned_config_keys(question)
+        mentioned_config_text = (
+            "\n".join(f"- {self._companion_manual_config_ref(key)}" for key in mentioned_keys)
+            if mentioned_keys
+            else "无"
+        )
+        recent_context = self._companion_manual_recent_context_text(event) or "没有同一会话内的上一轮答疑上下文。"
+        persona_text = ""
+        refresher = getattr(self, "_refresh_default_persona_prompt", None)
+        if callable(refresher):
+            try:
+                await asyncio.wait_for(refresher(str(getattr(event, "unified_msg_origin", "") or "")), timeout=1.5)
+            except Exception:
+                pass
+        getter = getattr(self, "_get_default_persona_prompt", None)
+        if callable(getter):
+            try:
+                persona_text = _single_line(getter(), 700)
+            except Exception:
+                persona_text = ""
+        runtime = self._companion_manual_runtime_snapshot(event)
+        prompt = f"""
+你是 AstrBot 陪伴插件当前人格下的答疑助手。用户不是在闲聊,是在问插件功能为什么这样运行。
+
+要求：
+- 根据“完整功能说明书”和“当前运行状态”判断最可能原因,不要泛泛复述所有可能性。
+- 如果证据不足,明确说“更像是/需要看日志确认”,不要装作确定。
+- 回复要像当前人格在群里解释,不是后台报告；保留人格语气,但不要编造事实、不要撒娇过头影响清晰度。
+- 默认 4-8 行内说清楚：先一句结论,再说明关键原因,最后给 1-2 条最有用建议。
+- 不要输出“问题/大概结论/优先检查/相关配置/当前关键配置/诊断依据”这种报告标题。
+- 不要把完整配置快照逐条贴给用户；只有真正要调的配置才提。
+- 只能使用“完整功能说明书”里出现过的配置项；不要编造不存在的配置项。
+- 提到配置时必须同时写中文名和参数名,格式类似“高强度唤醒阈值（group_high_intensity_wakeup_threshold）”。
+- 如果“用户明确提到的配置项”不是“无”,回答里要告诉用户它在拓展页配置页的具体位置。
+- 涉及调参时不要只说“改成/设为 X”；必须尽量写成“由 当前值 改为 目标值”。当前值不知道时,写“由当前值确认后改为 X”。
+- 可执行改配置由本地白名单规则另行生成；你只负责解释和建议,不要声称已经修改配置。
+- 语气口语化,像插件作者在排障,不要写客服套话,不要输出表格。
+- 不要说“内置说明书没匹配到”“关键词没命中”“去扩展页排障中心”这类暴露实现的话；如果不确定,就自然说明需要更具体的现象或日志。
+- 不要要求用户复制文件；用户和你在同一机器上。
+
+【用户问题】
+{_single_line(question, 260)}
+
+【当前人格/说话风格参考】
+{persona_text or '未读取到人格；保持简洁、自然、温和。'}
+
+【同一会话上一轮答疑上下文】
+{recent_context}
+
+【检索提示】
+{selected_hint}
+
+【完整功能说明书】
+{manual_context}
+
+【用户明确提到的配置项】
+{mentioned_config_text}
+
+【当前运行状态快照】
+{runtime or '没有拿到当前会话专项状态,只能按配置和说明书判断。'}
+
+【本地规则初判】
+{local_hint}
+
+请输出：
+一段自然答复。可以有很短的分行,但不要写成长报告。
+""".strip()
+        try:
+            raw = await asyncio.wait_for(
+                caller(
+                    prompt,
+                    max_tokens=700,
+                    provider_id=provider_id,
+                    task="companion_manual_diagnosis",
+                ),
+                timeout=6.0,
+            )
+        except asyncio.TimeoutError:
+            logger.info("[PrivateCompanion] 陪伴答疑模型诊断超时,回退本地说明: question=%s", _single_line(question, 120))
+            return ""
+        except Exception as exc:
+            logger.info("[PrivateCompanion] 陪伴答疑模型诊断失败,回退本地说明: %s", _single_line(exc, 120))
+            return ""
+        return self._companion_manual_clean_multiline(raw, limit=1800)
+
+    async def _companion_manual_answer(self, event: AstrMessageEvent, question: str) -> str:
+        local_answer, selected = self._companion_manual_local_answer(event, question)
+        query = _single_line(question, 260)
+        if not query:
+            self._companion_manual_store_pending_config(event, query, [])
+            return local_answer
+        proposals = self._companion_manual_build_config_proposals(query, selected, event)
+        token = self._companion_manual_store_pending_config(event, query, proposals)
+        proposal_text = self._companion_manual_format_config_proposals_brief(token, proposals)
+        model_answer = await self._companion_manual_model_answer(event, query, local_answer, selected)
+        if model_answer:
+            answer = model_answer
+        else:
+            answer = self._companion_manual_fallback_answer(event, query, selected, proposals)
+        if proposal_text:
+            answer = f"{answer}\n\n{proposal_text}"
+        self._companion_manual_store_recent_context(event, question=query, answer=answer, proposals=proposals)
+        return answer
 
     def _photo_reference_image_dir(self) -> Path:
         target_dir = Path(self.data_dir) / "photo_reference_images"

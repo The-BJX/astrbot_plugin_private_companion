@@ -2872,7 +2872,15 @@ class ProactiveEngineMixin:
     @staticmethod
     def _proactive_audit_note_is_obsolete_fixed_error(note: Any) -> bool:
         text = str(note or "")
-        return "NameError" in text and "name 'topic' is not defined" in text
+        if "NameError" not in text:
+            return False
+        return any(
+            token in text
+            for token in (
+                "name 'topic' is not defined",
+                "name 'name' is not defined",
+            )
+        )
 
     def _compact_proactive_audit_log(self) -> None:
         log = self._proactive_audit_log()

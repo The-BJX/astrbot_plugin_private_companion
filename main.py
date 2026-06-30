@@ -426,7 +426,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.4.5",
+    "5.6.0",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -4308,12 +4308,32 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         compact = re.sub(r"\s+", "", str(text or ""))
         if not compact:
             return 0, "empty"
+        no_reply_boundary = r"(?:了|啦|吧|我|这(?:个|条|句|段)(?:消息|话|话题|内容|问题)?|这(?:条)?消息|本条消息|消息|哈|噢|哦|$|[，。！？,.!?])"
+        if re.search(
+            r"(?:不用|不必|无需|别|不要|先别|暂时别|今晚别|今天别)(?:再)?(?:回(?:复)?|理我|搭理我|接话|说话|出声)"
+            + no_reply_boundary,
+            compact,
+        ):
+            return -100, "user_asks_no_reply"
+        proactive_only_quiet = bool(
+            re.search(r"(?:别|不要|先别|暂时别|今晚别|今天别).{0,10}主动.{0,8}(?:打扰|吵|发消息|找我|回(?:复)?|理我|搭理我|接话|说话)", compact)
+        )
         if re.search(r"你.{0,6}(没睡|没在睡|不是在睡|不是睡|不在睡|还没睡|醒着|清醒|没休息|没在休息|不是在休息|不是休息|不在休息)|别装睡|别装休息|装睡|装睡觉|明明醒着|明明没睡|明明没休息|又没睡|又没休息", compact):
             return 100, "user_corrects_not_resting"
         if re.search(r"快醒|醒醒|醒一醒|醒来|醒过来|别睡了?|别睡啦|别睡嘛|先别睡|别睡别睡|起床|起来|快起|回我一下|快回|马上回", compact):
             return 100, "explicit_wakeup_request"
-        if re.search(r"别(回|理|吵|发|找)|不要(回|理|吵|发|找)|安静|闭嘴|先别|别醒|继续睡|不用回|不用理", compact):
+        quiet_pattern = (
+            r"(?:不用|不必|无需|别|不要|先别|暂时别|今晚别|今天别)(?:再)?(?:回(?:复)?|理我|搭理我|接话|说话|出声)"
+            + no_reply_boundary
+            + r"|(?:别|不要|先别|暂时别|今晚别|今天别).{0,10}(?:打扰|吵我|叫我|主动|发消息|找我)"
+            r"|(?:安静点|闭嘴|别说话|不要说话|别醒|继续睡)"
+        )
+        if not proactive_only_quiet and re.search(quiet_pattern, compact):
             return -100, "user_asks_quiet"
+        if re.search(r"(?:晚安|好梦|早点睡|早点休息|睡个好觉)", compact):
+            return 100, "goodnight_ack"
+        if proactive_only_quiet:
+            return 0, "user_asks_no_proactive"
         if re.search(r"救命|出事|急|紧急|重要|不舒服|难受|害怕|崩溃|报警|医院|摔|痛", compact):
             return 100, "urgent_or_explicit_wakeup"
         if re.search(r"醒了吗|睡了吗|在吗|能不能回|可以回吗|想你|陪我|听我说|还睡吗|还在睡吗", compact):
@@ -4542,14 +4562,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     def _stop_private_reply_after_user_rest_signal(self, event: AstrMessageEvent, user_id: str, text: str) -> None:
         logger.info(
-            "[PrivateCompanion] 用户休息静默已前置拦截本轮私聊回复: user=%s text=%s",
+            "[PrivateCompanion] 用户明确勿扰/不用回复,已前置拦截本轮私聊回复: user=%s text=%s",
             _single_line(user_id, 80),
             _single_line(text, 120),
         )
         self._record_passive_no_reply(
             event,
             source="休息静默",
-            reason="用户表达休息后本轮私聊静默",
+            reason="用户明确要求勿扰或不用回复",
             detail=text,
             level="info",
         )
@@ -5981,6 +6001,33 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         args = raw_text.replace("\u3000", " ").split(maxsplit=2)
         action = args[1].strip() if len(args) >= 2 else "帮助"
         value = args[2].strip() if len(args) >= 3 else ""
+        companion_manual_query_actions = {"答疑", "排障", "诊断", "说明"}
+        companion_manual_confirm_actions = {"答疑确认", "排障确认", "诊断确认", "应用答疑建议", "应用建议"}
+        companion_manual_cancel_actions = {"答疑取消", "排障取消", "诊断取消", "取消答疑建议", "取消建议"}
+        companion_manual_setting_actions = {"答疑设置", "排障设置", "诊断设置", "答疑修改", "排障修改", "诊断修改"}
+        if action in companion_manual_query_actions:
+            inline_value = value.strip()
+            if inline_value in {"确认", "应用", "执行", "确认执行", "应用建议"}:
+                action = "答疑确认"
+                value = ""
+            elif inline_value in {"取消", "取消建议", "放弃"}:
+                action = "答疑取消"
+                value = ""
+            else:
+                inline_parts = inline_value.split(maxsplit=1)
+                if len(inline_parts) >= 2 and inline_parts[0] in {"设置", "修改", "set", "Set", "SET"}:
+                    action = "答疑设置"
+                    value = inline_parts[1].strip()
+                elif re.search(r"^[A-Za-z_][A-Za-z0-9_]*\s*(?:=|:|：|设为|设置为|改成|调到)\s*\S+", inline_value):
+                    action = "答疑设置"
+                    value = inline_value
+                else:
+                    maybe_key, maybe_value = self._companion_manual_parse_setting_text(inline_value)
+                    if maybe_key and maybe_value:
+                        ok, _, _ = self._companion_manual_normalize_config_value(maybe_key, maybe_value)
+                        if ok:
+                            action = "答疑设置"
+                            value = inline_value
         bookshelf_password_reset_actions = {
             "重置夹层密码", "重设夹层密码", "重新生成夹层密码", "刷新夹层密码", "生成夹层密码",
             "重置书柜密码", "重设书柜密码", "重新生成书柜密码", "刷新书柜密码", "生成书柜密码",
@@ -6016,10 +6063,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI日报", "ai日报", "日报", "AI早报", "ai早报", "早报",
             "TTS语种", "tts语种", "语音语种", "TTS", "tts",
+            *companion_manual_query_actions,
         }
 
         is_private = bool(getattr(event, "is_private_chat", lambda: False)())
-        if self.require_private_opt_in and not is_private:
+        public_safe_actions = {
+            *companion_manual_query_actions,
+            *companion_manual_confirm_actions,
+            *companion_manual_cancel_actions,
+            *companion_manual_setting_actions,
+        }
+        if self.require_private_opt_in and not is_private and action not in public_safe_actions:
             await self._reply(event, self._private_only_text())
             event.stop_event()
             return
@@ -6100,6 +6154,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     if tts_parts and tts_parts[0].strip().lower() in {"语种", "语言", "language", "lang"}:
                         tts_value = tts_parts[1].strip() if len(tts_parts) >= 2 else ""
                 response = self._set_tts_voice_language_from_command(tts_value)
+            elif action in companion_manual_confirm_actions:
+                response = self._companion_manual_apply_pending_config(event)
+            elif action in companion_manual_cancel_actions:
+                response = self._companion_manual_cancel_pending_config(event)
+            elif action in companion_manual_setting_actions:
+                response = self._companion_manual_apply_setting_command(event, value)
+            elif action in companion_manual_query_actions:
+                response = "正在结合说明书和当前运行状态做诊断。"
             elif action in {"参考图", "人设参考图", "自拍参考图"}:
                 response = await self._photo_reference_command_text(event, user_id, value)
             elif action in {"查看主动判定", "主动判定", "判定"}:
@@ -6225,6 +6287,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response_image_path,
                 extra_components=response_extra_components,
             )
+        if action in companion_manual_query_actions:
+            await self._reply(event, await self._companion_manual_answer(event, value))
+            event.stop_event()
+            return
         if action in {"发说说", "发QQ空间", "发布说说", "空间发布", "发布空间"}:
             image_sources = await self._qzone_image_sources_from_event(event)
             image_sources, image_select_message = self._qzone_select_image_sources(value, image_sources)
@@ -6578,7 +6644,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if fast_user_is_owner and self._apply_interaction_warmth_to_state(text, fast_user):
                 fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
             self._schedule_data_save()
-            if rest_silence_applied and _safe_float(fast_user.get("user_rest_until"), 0) > received_ts:
+            if (
+                rest_silence_applied
+                and _safe_float(fast_user.get("user_rest_until"), 0) > received_ts
+                and self._user_rest_signal_should_block_current_reply(safe_text or text)
+            ):
                 self._stop_private_reply_after_user_rest_signal(event, user_id, safe_text or text)
                 return
             await self._acquire_framework_session_lock_for_event(event, label="private_event_pipeline")
@@ -6847,8 +6917,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user["last_user_message_at"] = received_ts
                 rest_silence_applied = self._apply_user_rest_silence_from_message(user, safe_text or text, now=received_ts)
                 if rest_silence_applied and _safe_float(user.get("user_rest_until"), 0) > received_ts:
-                    rest_silence_early_block = bool(is_target_user)
-                    rest_silence_early_text = safe_text or text
+                    if self._user_rest_signal_should_block_current_reply(safe_text or text):
+                        rest_silence_early_block = bool(is_target_user)
+                        rest_silence_early_text = safe_text or text
                 self._apply_private_image_vision_negative_feedback(user, safe_text or text)
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
                 self._update_expression_profile_from_message(user, safe_text or text)
@@ -7254,6 +7325,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             high_intensity_state = self._group_high_intensity_state(group)
             if high_intensity_state.get("active"):
                 setattr(event, "private_companion_group_high_intensity", dict(high_intensity_state))
+            high_intensity_merge_active = bool(high_intensity_state.get("merge_active"))
             setattr(event, "private_companion_group_scene", dict(scene))
             setattr(event, "private_companion_group_sender_name", sender_name)
             setattr(event, "private_companion_group_text", text)
@@ -7270,7 +7342,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         sender_id,
                         _single_line(text, 80),
                     )
-            if high_intensity_state.get("active") and talking_to_bot and not group_reference_media_with_text:
+            if high_intensity_merge_active and talking_to_bot and not group_reference_media_with_text:
                 high_key = self._group_high_intensity_buffer_key(group_id, sender_id)
                 if self._note_semantic_message_buffer(
                     high_key,
@@ -7291,11 +7363,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                     self._save_data_sync()
                     logger.info(
-                        "[PrivateCompanion] 群聊高强度消息已合并等待: group=%s sender=%s scope=%s recent_wakeups=%s wait=%ss text=%s",
+                        "[PrivateCompanion] 群聊高强度消息已合并等待: group=%s sender=%s scope=%s recent_wakeups=%s floor=%s reason=%s wait=%ss text=%s",
                         group_id,
                         sender_id,
                         getattr(self, "group_high_intensity_merge_scope", "group"),
                         high_intensity_state.get("recent_wakeups"),
+                        high_intensity_state.get("merge_recent_floor"),
+                        high_intensity_state.get("reason"),
                         self._group_high_intensity_merge_wait_seconds(),
                         _single_line(text, 80),
                     )
@@ -7303,7 +7377,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     return
             group_smart_wait = 0.0
             group_buffer_key = self._semantic_buffer_key(f"group:{group_id}", sender_id)
-            if talking_to_bot and not high_intensity_state.get("active") and not group_reference_media_with_text:
+            if talking_to_bot and not high_intensity_merge_active and not group_reference_media_with_text:
                 self._maybe_record_smart_message_debounce_followup(
                     scope=f"group:{group_id}",
                     sender_id=sender_id,
@@ -7322,7 +7396,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             group_smart_decision = str(group_smart_result.get("decision") or "") if isinstance(group_smart_result, dict) else ""
             group_smart_handled = group_smart_decision in {"complete", "incomplete"}
             short_wait = 0.0
-            if not high_intensity_state.get("active"):
+            if not high_intensity_merge_active:
                 short_wait = self._group_short_wakeup_wait_seconds(event, text, smart_result=group_smart_result)
             if short_wait > 0:
                 group_smart_wait = max(group_smart_wait, short_wait)
@@ -7330,13 +7404,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 group_smart_handled = True
             if (
                 talking_to_bot
-                and not high_intensity_state.get("active")
+                and not high_intensity_merge_active
                 and not group_reference_media_with_text
+                and group_smart_decision == "incomplete"
                 and self._note_semantic_message_buffer(
                     group_buffer_key,
                     text,
                     sender_name=sender_name,
-                    wait_seconds=group_smart_wait if group_smart_handled else None,
+                    wait_seconds=group_smart_wait,
                     smart_debounce={"enabled": group_smart_handled, "decision": group_smart_decision or "fixed"},
                     kind="group_short_wakeup" if short_wait > 0 else "group_text",
                 )
@@ -7385,10 +7460,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             await self._maybe_group_interject(event, group_snapshot, text)
         else:
             logger.info(
-                "[PrivateCompanion] 群聊高强度收口生效: group=%s recent_wakeups=%s threshold=%s reason=%s merge_scope=%s merge_wait=%ss skip=followup-refresh/interject",
+                "[PrivateCompanion] 群聊高强度收口生效: group=%s recent_wakeups=%s threshold=%s merge_active=%s floor=%s reason=%s merge_scope=%s merge_wait=%ss skip=followup-refresh/interject",
                 group_id,
                 group_snapshot_high_intensity.get("recent_wakeups"),
                 group_snapshot_high_intensity.get("threshold"),
+                group_snapshot_high_intensity.get("merge_active"),
+                group_snapshot_high_intensity.get("merge_recent_floor"),
                 group_snapshot_high_intensity.get("reason"),
                 getattr(self, "group_high_intensity_merge_scope", "group"),
                 self._group_high_intensity_merge_wait_seconds(),

@@ -562,7 +562,7 @@ const featureMeta = {
   enable_group_scene_awareness: ["群聊场景感知", "推断当前消息是在对 Bot、某个群友还是整个群说话，减少误以为别人都在问自己。"],
   enable_group_reality_promise_guard: ["阻止群聊现实承诺", "群聊里避免承诺自己能拉人、修网、开房间或操作现实设备；私聊扮演不受影响。"],
   enable_group_wakeup_enhancement: ["群聊唤醒强化", "通过强唤醒词、弱相关唤醒词和兴趣关键词，让 Bot 在群里被自然叫到或碰到感兴趣话题时进入回复链。"],
-  enable_group_high_intensity_mode: ["群聊高强度收口", "短时间连续被 @、引用或增强唤醒后，按配置合并后续唤醒消息，并暂停非必要群聊后台任务，减少 LLM 过载。"],
+  enable_group_high_intensity_mode: ["群聊高强度收口", "短时间连续被 @、引用或增强唤醒后，按配置合并后续唤醒消息；冷却残留只降载，不延迟单条明确消息。"],
   enable_group_conversation_followup: ["连续对话保持", "群里叫过 Bot 后，短时间内判断同一用户没继续 @ 的话是否仍在对 Bot 说。"],
   enable_group_interjection: ["群主动插话", "允许 Bot 在群聊里主动插一句。谨慎开启。"],
   enable_group_repeat_follow: ["复读处理", "同一句话连续复读达到阈值时，可跟读一次或打断一次。"],
@@ -1389,11 +1389,11 @@ const configDescriptions = {
   group_wakeup_fatigue_decay_minutes: "每隔多少分钟自然恢复 1 点唤醒疲劳。数值越大，越会保留“刚被频繁叫到”的感觉。",
   group_wakeup_log_limit: "每个群最多保留多少条唤醒命中、冷却拦截和兴趣未触发记录。",
   group_wakeup_short_text_wait_seconds: "群聊里已经判定在叫 Bot、但内容只有 1-2 个字且不像完整短互动时，复用消息收口缓冲等待同一群友补充。设为 0 可关闭。",
-  enable_group_high_intensity_mode: "短时间连续被明确叫到后自动进入收口降载，按配置合并后续唤醒消息，并暂停弱相关/兴趣唤醒、群片段整理、黑话释义刷新和主动插话。",
+  enable_group_high_intensity_mode: "短时间连续被明确叫到后自动进入收口降载；只有近期仍在连续唤醒时才合并等待，冷却残留只暂停弱相关后台动作。",
   group_high_intensity_wakeup_window_seconds: "统计连续唤醒的时间窗口。默认 60 秒，即一分钟内连续被叫到才进入高强度收口。",
   group_high_intensity_wakeup_threshold: "窗口内达到多少次唤醒后进入收口。默认 3 次，用于减少连续 @、连续引用造成的多次 LLM 调用。",
-  group_high_intensity_cooldown_seconds: "进入收口降载后维持多久。期间明确 @ 或引用会被合并处理，非必要后台动作会让路。",
-  group_high_intensity_merge_seconds: "高强度期间第一条明确叫到 Bot 的消息最多等待多久。这是固定合并窗口，不会因持续补话无限延长。",
+  group_high_intensity_cooldown_seconds: "进入收口降载后维持多久。冷却期间会暂停弱相关后台动作；若近期唤醒已经断开，单条明确 @ 不再额外等待。",
+  group_high_intensity_merge_seconds: "高强度连续唤醒期间第一条明确叫到 Bot 的消息最多等待多久。这是固定合并窗口，不会因持续补话无限延长。",
   group_high_intensity_max_merge_messages: "高强度期间同一轮最多合并多少条叫 Bot 的消息。达到上限会立刻结束等待进入回复链；0 表示不限制。",
   group_high_intensity_merge_scope: "高强度期间如何合并连续叫 Bot 的消息：按全群合并，或只合并同一发送者的补话。",
   forward_message_mode: "注入：把合并消息摘要塞进主模型上下文；转述：先用专门模型读一遍再交给主模型。",
@@ -2275,6 +2275,7 @@ const tokenTaskLabels = {
   qzone_publish: "空间说说",
   qzone_publish_test: "空间发布测试",
   qzone_publish_sanitize: "空间文案清理",
+  companion_manual_diagnosis: "陪伴答疑",
   astrbot_private_reply: "非插件私聊主回复",
   astrbot_group_reply: "非插件群聊主回复",
   astrbot_reply: "非插件主回复",
@@ -3424,8 +3425,8 @@ function renderTroubleshooting() {
     `).join("")}
     <section class="troubleshooting-reasons">
       <header>
-        <b>${escapeHtml(selected === "all" ? "待处理原因" : `${troubleshootingLevelLabel(selected)}原因`)}</b>
-        <span>${escapeHtml(selected === "all" ? "只展示需要处理的错误和警告；普通信息可点信息查看" : "筛选同时作用于常见问题检查和最近问题")}</span>
+        <b>${escapeHtml(selected === "all" ? "近 2 小时待处理原因" : `${troubleshootingLevelLabel(selected)}原因`)}</b>
+        <span>${escapeHtml(selected === "all" ? "只展示近期需要处理的错误和警告；普通信息可点信息查看" : "筛选同时作用于常见问题检查和最近问题")}</span>
       </header>
       ${reasonItems.length ? reasonItems.map((item) => `
         <button type="button" class="${escapeHtml(item.level || "info")}" ${item.jump ? `data-jump-tab="${escapeHtml(item.jump)}"` : ""}>
@@ -5781,8 +5782,22 @@ function groupEpisodesView(episodes) {
 function groupWakeupPanel(detail) {
   const logs = Array.isArray(detail.group_wakeup_logs) ? detail.group_wakeup_logs : [];
   const fatigue = detail.wakeup_fatigue || {};
+  const high = fatigue.high_intensity || {};
   const ratio = Math.max(0, Math.min(100, Number(fatigue.ratio || 0) * 100));
   const last = detail.last_group_wakeup || {};
+  const highTitle = high.active
+    ? high.merge_active
+      ? "合并等待中"
+      : "仅降载中"
+    : "未触发";
+  const highMeta = high.active
+    ? [
+        `近期 ${Number(high.recent_wakeups || 0)}/${Number(high.threshold || 0)}`,
+        high.merge_recent_floor ? `合并门槛 ${Number(high.merge_recent_floor)}` : "",
+        high.reason ? `原因 ${high.reason}` : "",
+        high.remaining_seconds ? `剩余 ${Number(high.remaining_seconds).toFixed(0)}s` : "",
+      ].filter(Boolean).join(" · ")
+    : "只有近期连续叫到 Bot 时才会合并等待";
   return `
     <div class="group-wakeup-overview">
       <article>
@@ -5796,6 +5811,11 @@ function groupWakeupPanel(detail) {
         <b>${escapeHtml(fatigue.label || "无")}</b>
         <div class="fatigue-meter"><i style="width:${ratio}%"></i></div>
         <small>${escapeHtml(`${fatigue.value || 0}/${fatigue.limit || "-"} · ${fatigue.updated || "暂无"}`)}</small>
+      </article>
+      <article>
+        <span>高强度状态</span>
+        <b>${escapeHtml(highTitle)}</b>
+        <small>${escapeHtml(highMeta)}</small>
       </article>
       <article>
         <span>记录数</span>
