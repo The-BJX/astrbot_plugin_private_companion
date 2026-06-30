@@ -130,7 +130,19 @@ from .group_observation import GroupObservationMixin
 from .event_dispatch import EventDispatchMixin
 from .private_reading import PrivateReadingMixin
 from .news_exploration import NewsExplorationMixin
-from .self_timeline import SelfTimelineMixin
+try:
+    from .self_timeline import SelfTimelineMixin
+except ModuleNotFoundError as exc:
+    if str(getattr(exc, "name", "") or "").split(".")[-1] != "self_timeline":
+        raise
+
+    class SelfTimelineMixin:
+        """Fallback used when an old release package missed self_timeline.py."""
+
+        def _format_self_timeline_context_for_reply(self, *args: Any, **kwargs: Any) -> str:
+            return ""
+
+    logger.warning("[PrivateCompanion] self_timeline.py 缺失，已跳过 Bot 自身时间线注入能力。请重新安装完整版本。")
 from .core_store import CoreStoreMixin
 from .integration_status import IntegrationStatusMixin
 from .astrbot_knowledge import AstrBotKnowledgeMixin
