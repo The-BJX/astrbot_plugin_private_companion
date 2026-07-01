@@ -3331,6 +3331,58 @@ class NewsExplorationMixin:
                 return umo
         return ""
 
+    def _web_search_runtime_state(self) -> dict[str, Any]:
+        state = self.data.setdefault("web_search_runtime", {})
+        if not isinstance(state, dict):
+            self.data["web_search_runtime"] = {}
+            state = self.data["web_search_runtime"]
+        return state
+
+    def _web_search_cooldown_remaining(self, provider: str) -> float:
+        provider = _single_line(provider, 80) or "unknown"
+        state = self.data.get("web_search_runtime") if isinstance(self.data.get("web_search_runtime"), dict) else {}
+        item = state.get(provider) if isinstance(state, dict) else None
+        if not isinstance(item, dict):
+            return 0.0
+        retry_after = _safe_float(item.get("retry_after"), 0.0, 0.0)
+        return max(0.0, retry_after - _now_ts())
+
+    def _web_search_error_cooldown_seconds(self, error: Any) -> tuple[float, str]:
+        text = str(error or "")
+        if "QUOTA_USER_DAILY_FREE" in text or "Daily free quota" in text:
+            now_dt = datetime.now()
+            tomorrow = (now_dt + timedelta(days=1)).replace(hour=0, minute=10, second=0, microsecond=0)
+            return max(3600.0, min(24 * 3600.0, (tomorrow - now_dt).total_seconds())), "daily_quota"
+        if "RATE_LIMIT_SEARCH_QPS" in text or "QPS" in text:
+            return 10 * 60.0, "qps_limit"
+        if "429" in text or "rate limit" in text.lower() or "quota" in text.lower():
+            return 30 * 60.0, "rate_or_quota"
+        return 0.0, ""
+
+    def _mark_web_search_cooldown(self, provider: str, error: Any) -> None:
+        seconds, reason = self._web_search_error_cooldown_seconds(error)
+        if seconds <= 0:
+            return
+        provider = _single_line(provider, 80) or "unknown"
+        state = self._web_search_runtime_state()
+        state[provider] = {
+            "retry_after": _now_ts() + seconds,
+            "reason": reason,
+            "last_error": _single_line(error, 240),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        try:
+            self._save_data_sync()
+        except Exception:
+            pass
+        logger.warning(
+            "[PrivateCompanion] AstrBot 网页搜索进入冷却: provider=%s reason=%s retry=%ss error=%s",
+            provider,
+            reason,
+            int(seconds),
+            _single_line(error, 180),
+        )
+
     async def _run_astrbot_web_search(self, query: str, *, umo: str = "", topic: str = "general") -> list[dict[str, Any]]:
         cleaned_query = _single_line(query, 120)
         self._last_web_search_error = ""
@@ -3341,6 +3393,16 @@ class NewsExplorationMixin:
             return []
         provider = str(settings.get("websearch_provider") or "").strip()
         if provider == "default":
+            return []
+        cooldown = self._web_search_cooldown_remaining(provider)
+        if cooldown > 0:
+            self._last_web_search_error = f"web_search_cooldown:{provider}:{int(cooldown)}s"
+            logger.info(
+                "[PrivateCompanion] AstrBot 网页搜索冷却中,跳过请求: provider=%s retry=%ss query=%s",
+                provider,
+                int(cooldown),
+                cleaned_query,
+            )
             return []
         for key in (
             "websearch_tavily_key",
@@ -3408,6 +3470,7 @@ class NewsExplorationMixin:
                 return []
         except Exception as exc:
             self._last_web_search_error = _single_line(str(exc), 240)
+            self._mark_web_search_cooldown(provider, exc)
             logger.warning("[PrivateCompanion] AstrBot 网页搜索失败: provider=%s query=%s err=%s", provider, cleaned_query, exc)
             return []
         results: list[dict[str, Any]] = []

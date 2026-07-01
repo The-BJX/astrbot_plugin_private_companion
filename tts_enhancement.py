@@ -1229,20 +1229,25 @@ TTS 朗读文本：
             non_plain_tail = [comp for comp in chain if not isinstance(comp, Plain)]
             if non_plain_tail:
                 new_chain = list(new_chain) + non_plain_tail
+        new_chain = self._tts_record_first_visible_last_chain(new_chain)
         ordered_chunks = self._split_tts_chain_for_ordered_send(new_chain)
         expanded_chunks: list[list[Any]] = []
         for chunk in ordered_chunks:
             expanded_chunks.extend(self._tts_segment_plain_chunk_for_ordered_send(event, chunk))
         ordered_chunks = expanded_chunks
         if len(ordered_chunks) > 1:
-            inbound_ts_getter = getattr(self, "_event_inbound_activity_ts", None)
-            if callable(inbound_ts_getter):
-                try:
-                    remainder_started_at = float(inbound_ts_getter(event))
-                except Exception:
-                    remainder_started_at = time.time()
-            else:
+            first_chunk_has_record = any(isinstance(comp, Record) for comp in ordered_chunks[0])
+            if first_chunk_has_record:
                 remainder_started_at = time.time()
+            else:
+                inbound_ts_getter = getattr(self, "_event_inbound_activity_ts", None)
+                if callable(inbound_ts_getter):
+                    try:
+                        remainder_started_at = float(inbound_ts_getter(event))
+                    except Exception:
+                        remainder_started_at = time.time()
+                else:
+                    remainder_started_at = time.time()
             event.set_result(self._build_result_from_chain(ordered_chunks[0]))
             asyncio.create_task(
                 self._send_tts_chain_chunks_after_first(
@@ -1282,6 +1287,7 @@ TTS 朗读文本：
             non_plain_tail = [comp for comp in chain if not isinstance(comp, Plain)]
             if non_plain_tail:
                 new_chain = list(new_chain) + non_plain_tail
+        new_chain = self._tts_record_first_visible_last_chain(new_chain)
         logger.warning(
             "[PrivateCompanion] 发送前终检拦截残留 TTS 标签: session=%s preview=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
@@ -1334,6 +1340,59 @@ TTS 朗读文本：
         if current_visible:
             chunks.append(current_visible)
         return chunks if has_record and has_visible else [chain]
+
+    def _tts_record_first_visible_last_chain(self, chain: list[Any]) -> list[Any]:
+        if not chain or not any(isinstance(comp, Record) for comp in chain):
+            return chain
+        records: list[Any] = []
+        others: list[Any] = []
+        visible_marked: list[str] = []
+        visible_plain: list[str] = []
+        for comp in chain:
+            if isinstance(comp, Record):
+                records.append(comp)
+                continue
+            if isinstance(comp, Plain):
+                text = str(getattr(comp, "text", "") or "").strip()
+                if not text:
+                    continue
+                if bool(getattr(comp, "_private_companion_tts_visible_text", False)):
+                    visible_marked.append(text)
+                else:
+                    visible_plain.append(text)
+                continue
+            others.append(comp)
+
+        def append_unique(target: list[str], value: str) -> None:
+            value = self._sanitize_tts_visible_text(value, max_chars=1000)
+            if not value:
+                return
+            normalized = re.sub(r"\s+", "", value)
+            if any(normalized == re.sub(r"\s+", "", item) for item in target):
+                return
+            if any(normalized and normalized in re.sub(r"\s+", "", item) for item in target):
+                return
+            target[:] = [
+                item
+                for item in target
+                if re.sub(r"\s+", "", item) not in normalized
+            ]
+            target.append(value)
+
+        visible_lines: list[str] = []
+        preferred_visible = visible_marked if visible_marked else visible_plain
+        fallback_visible = visible_plain if visible_marked else []
+        for text in preferred_visible:
+            append_unique(visible_lines, text)
+        for text in fallback_visible:
+            append_unique(visible_lines, text)
+        normalized_chain = list(others) + list(records)
+        visible = "\n".join(visible_lines).strip()
+        if visible:
+            visible_comp = self._mark_tts_visible_plain(visible, max_chars=1000)
+            if visible_comp is not None:
+                normalized_chain.append(visible_comp)
+        return normalized_chain
 
     def _tts_segment_plain_chunk_for_ordered_send(self, event: Any, chunk: list[Any]) -> list[list[Any]]:
         if not (
@@ -1436,6 +1495,13 @@ TTS 朗读文本：
                 if callable(activity_checker):
                     try:
                         if activity_checker(scope, started_at, ignore_self=True):
+                            if scope.startswith("group:"):
+                                logger.info(
+                                    "[PrivateCompanion] 群聊已有新消息，停止发送 TTS 后台补发文本: session=%s sent_preview=%s",
+                                    scope,
+                                    _single_line(previous_text, 120) or "0",
+                                )
+                                return
                             if not previous_text:
                                 stop_after_send = True
                                 logger.info(

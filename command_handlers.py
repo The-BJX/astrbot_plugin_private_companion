@@ -36,6 +36,16 @@ class CommandHandlersMixin:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text[:limit].strip()
 
+    def _companion_manual_clean_question_text(self, value: Any, limit: int = 260) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\[CQ:image,[^\]]+\]", " ", text, flags=re.I)
+        text = re.sub(r"\[(?:图片|image|Image|IMAGE)\]", " ", text)
+        text = re.sub(r"【(?:图片|image)】", " ", text, flags=re.I)
+        text = re.sub(r"\s+", " ", text)
+        return _single_line(text, limit)
+
     def _companion_manual_current_group_note(self, event: AstrMessageEvent | None = None) -> str:
         group_id = ""
         if event is not None:
@@ -193,7 +203,15 @@ class CommandHandlersMixin:
             "group_wakeup_short_text_wait_seconds": {"type": "float", "min": 0.0, "max": 30.0, "label": "短唤醒补话等待秒数"},
             "group_wakeup_cooldown_seconds": {"type": "int", "min": 0, "max": 3600, "label": "群聊唤醒冷却秒数"},
             "enable_natural_language_photo_generation": {"type": "bool", "label": "自然语言生图/改图"},
-            "natural_language_photo_generation_max_daily": {"type": "int", "min": 0, "max": 10, "label": "自然语言生图每日上限"},
+            "natural_language_photo_generation_max_daily": {"type": "int", "min": 0, "max": 100, "label": "自然语言生图每日上限"},
+            "enable_backup_external_image_api": {"type": "bool", "label": "启用备选在线图片 API"},
+            "backup_external_image_api_platform": {
+                "type": "select",
+                "choices": {"auto", "openai", "bailian"},
+                "aliases": {"百炼": "bailian", "阿里云百炼": "bailian", "openai兼容": "openai"},
+                "label": "备选在线生图平台",
+            },
+            "backup_external_image_api_timeout_seconds": {"type": "int", "min": 20, "max": 600, "label": "备选在线生图超时秒数"},
             "enable_qzone_comment_inbox": {"type": "bool", "label": "QQ 空间评论收件箱"},
             "qzone_comment_inbox_interval_minutes": {"type": "int", "min": 5, "max": 1440, "label": "空间评论检查间隔"},
             "qzone_comment_inbox_recent_posts": {"type": "int", "min": 1, "max": 20, "label": "空间评论扫描说说数"},
@@ -225,6 +243,15 @@ class CommandHandlersMixin:
             "group_wakeup_interest_keywords": {"label": "群聊兴趣唤醒关键词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 兴趣唤醒"},
             "enable_photo_text_action": {"label": "生图/拍照能力", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力"},
             "photo_generation_backend": {"label": "生图后端", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 后端选择"},
+            "external_image_api_platform": {"label": "在线生图平台", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
+            "EXTERNAL_IMAGE_API_BASE_URL": {"label": "在线图片 API 地址", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
+            "EXTERNAL_IMAGE_API_MODEL": {"label": "在线图片模型", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
+            "enable_backup_external_image_api": {"label": "启用备选在线图片 API", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
+            "backup_external_image_api_platform": {"label": "备选在线生图平台", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
+            "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": {"label": "备选在线 API 地址", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
+            "BACKUP_EXTERNAL_IMAGE_API_MODEL": {"label": "备选在线图片模型", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
+            "backup_external_image_api_size": {"label": "备选在线生图尺寸", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
+            "backup_external_image_api_timeout_seconds": {"label": "备选在线生图超时秒数", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "photo_persona_reference_image_path": {"label": "人设参考图路径", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 本地 ComfyUI；也可用命令 陪伴 参考图 设置"},
             "photo_prompt_prefix": {"label": "生图提示词前缀", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格/提示词"},
             "enable_qzone_integration": {"label": "QQ 空间联动", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动"},
@@ -332,6 +359,12 @@ class CommandHandlersMixin:
             "自然语言生图": "enable_natural_language_photo_generation",
             "自然语言改图": "enable_natural_language_photo_generation",
             "自然生图上限": "natural_language_photo_generation_max_daily",
+            "备选生图api": "enable_backup_external_image_api",
+            "备选生图API": "enable_backup_external_image_api",
+            "备选在线api": "enable_backup_external_image_api",
+            "备选在线API": "enable_backup_external_image_api",
+            "备选生图平台": "backup_external_image_api_platform",
+            "备选生图超时": "backup_external_image_api_timeout_seconds",
             "空间评论收件箱": "enable_qzone_comment_inbox",
             "空间评论间隔": "qzone_comment_inbox_interval_minutes",
             "空间评论扫描数": "qzone_comment_inbox_recent_posts",
@@ -850,6 +883,78 @@ class CommandHandlersMixin:
             parts.append(f"上一轮涉及配置：{config_text}")
         return "\n".join(parts)
 
+    async def _companion_manual_media_context(self, event: AstrMessageEvent, question: str) -> str:
+        sources: list[tuple[str, str]] = []
+
+        def add(source: Any, label: str) -> None:
+            text = str(source or "").strip()
+            if not text:
+                return
+            if any(existing == text for existing, _ in sources):
+                return
+            sources.append((text, label))
+
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        current_getter = getattr(self, "_photo_reference_sources_from_current_event", None)
+        if callable(current_getter):
+            try:
+                for source in await current_getter(event, sender_id):
+                    add(source, "随消息携带图片")
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 答疑携带图片提取失败: %s", _single_line(exc, 120))
+        reply_cache_getter = getattr(self, "_photo_reference_sources_from_reply_cache", None)
+        if callable(reply_cache_getter):
+            try:
+                for source in reply_cache_getter(event):
+                    add(source, "引用撤回/缓存图片")
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 答疑引用缓存图片提取失败: %s", _single_line(exc, 120))
+        reply_getter = getattr(self, "_photo_reference_sources_from_reply_event", None)
+        if callable(reply_getter):
+            try:
+                for source in await reply_getter(event):
+                    add(source, "引用消息图片")
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 答疑引用图片提取失败: %s", _single_line(exc, 120))
+        if not sources:
+            return ""
+
+        limited_sources = sources[:5]
+        source_values = [source for source, _label in limited_sources]
+        labels: list[str] = []
+        for _source, label in limited_sources:
+            if label not in labels:
+                labels.append(label)
+        vision_text = ""
+        transcriber = getattr(self, "_transcribe_private_inbound_images", None)
+        if callable(transcriber):
+            try:
+                raw_vision = await transcriber(
+                    source_values,
+                    umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                    user_text=question or "陪伴答疑图片排障",
+                    force_contextual=True,
+                )
+                limit_getter = getattr(self, "_private_image_vision_text_limit", None)
+                limit = limit_getter(len(source_values)) if callable(limit_getter) else 1200
+                vision_text = _single_line(raw_vision, _safe_int(limit, 1200, 240, 2400))
+            except Exception as exc:
+                logger.info("[PrivateCompanion] 答疑图片视觉摘要失败: %s", _single_line(exc, 120))
+                vision_text = ""
+
+        lines = [
+            "本轮答疑附带图片上下文：",
+            f"图片来源：{'、'.join(labels)}；数量={len(source_values)}",
+        ]
+        if vision_text:
+            lines.append("图片视觉摘要：" + vision_text)
+        else:
+            lines.append("已检测到图片，但当前没有拿到可靠视觉摘要；如果用户问截图内容，只能说明需要更清晰图片或日志，不要编造画面。")
+        return "\n".join(lines)
+
     def _companion_manual_store_recent_context(
         self,
         event: AstrMessageEvent,
@@ -935,9 +1040,15 @@ class CommandHandlersMixin:
         question: str,
         selected: list[dict[str, Any]],
         proposals: list[dict[str, Any]],
+        media_context: str = "",
     ) -> str:
         query = _single_line(question, 180)
         if not selected:
+            if media_context:
+                return (
+                    "我这轮已经检测到你带了图片或引用了图片，但答疑模型没有给出稳定诊断。"
+                    "如果图片摘要没生成，就需要再看清晰截图或对应日志；如果摘要已生成，可以继续追问“这张图里哪里不对”。"
+                )
             return (
                 "这句我还没抓准你想查哪块功能。你可以直接说具体一点，比如“刚才为什么没回复”、"
                 "“为什么等了几秒”、或“某个配置在哪里改”，我就能按当前会话状态接着查。"
@@ -1510,6 +1621,7 @@ class CommandHandlersMixin:
         question: str,
         local_answer: str,
         selected: list[dict[str, Any]],
+        media_context: str = "",
     ) -> str:
         caller = getattr(self, "_llm_call", None)
         if not callable(caller):
@@ -1565,6 +1677,7 @@ class CommandHandlersMixin:
 
 要求：
 - 根据“完整功能说明书”和“当前运行状态”判断最可能原因,不要泛泛复述所有可能性。
+- 如果“本轮图片/引用图片上下文”有内容,要把它当作用户给的截图/报错/UI 线索一起判断。
 - 如果证据不足,明确说“更像是/需要看日志确认”,不要装作确定。
 - 回复要像当前人格在群里解释,不是后台报告；保留人格语气,但不要编造事实、不要撒娇过头影响清晰度。
 - 默认 4-8 行内说清楚：先一句结论,再说明关键原因,最后给 1-2 条最有用建议。
@@ -1587,6 +1700,9 @@ class CommandHandlersMixin:
 
 【同一会话上一轮答疑上下文】
 {recent_context}
+
+【本轮图片/引用图片上下文】
+{media_context or '本轮没有检测到随消息携带或引用的图片。'}
 
 【检索提示】
 {selected_hint}
@@ -1625,19 +1741,22 @@ class CommandHandlersMixin:
         return self._companion_manual_clean_multiline(raw, limit=1800)
 
     async def _companion_manual_answer(self, event: AstrMessageEvent, question: str) -> str:
-        local_answer, selected = self._companion_manual_local_answer(event, question)
-        query = _single_line(question, 260)
+        query = self._companion_manual_clean_question_text(question, 260)
+        media_context = await self._companion_manual_media_context(event, query)
+        if not query and media_context:
+            query = "根据本轮携带或引用的图片做插件答疑/排障"
+        local_answer, selected = self._companion_manual_local_answer(event, query)
         if not query:
             self._companion_manual_store_pending_config(event, query, [])
             return local_answer
         proposals = self._companion_manual_build_config_proposals(query, selected, event)
         token = self._companion_manual_store_pending_config(event, query, proposals)
         proposal_text = self._companion_manual_format_config_proposals_brief(token, proposals)
-        model_answer = await self._companion_manual_model_answer(event, query, local_answer, selected)
+        model_answer = await self._companion_manual_model_answer(event, query, local_answer, selected, media_context=media_context)
         if model_answer:
             answer = model_answer
         else:
-            answer = self._companion_manual_fallback_answer(event, query, selected, proposals)
+            answer = self._companion_manual_fallback_answer(event, query, selected, proposals, media_context=media_context)
         if proposal_text:
             answer = f"{answer}\n\n{proposal_text}"
         self._companion_manual_store_recent_context(event, question=query, answer=answer, proposals=proposals)
@@ -1919,7 +2038,13 @@ class CommandHandlersMixin:
             + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。")
         )
 
-    def _natural_language_photo_intent(self, text: str, *, has_reference: bool = False) -> dict[str, Any]:
+    def _natural_language_photo_intent(
+        self,
+        text: str,
+        *,
+        has_reference: bool = False,
+        directed: bool = False,
+    ) -> dict[str, Any]:
         raw = re.sub(r"\[CQ:image,[^\]]+\]", "", str(text or ""))
         raw = re.sub(r"\[CQ:at,[^\]]+\]", "", raw)
         raw = re.sub(r"\[(?:At|@):[^\]]+\]", "", raw, flags=re.I)
@@ -1928,7 +2053,9 @@ class CommandHandlersMixin:
         if not raw:
             return {}
         compact = re.sub(r"\s+", "", raw)
-        draw_visual_targets = ("图片", "照片", "插画", "头像", "壁纸", "表情包", "图")
+        selfie_markers = ("自拍", "拍照", "拍张照", "拍一张照", "拍一张照片", "拍张照片", "来张自拍", "发张自拍", "发一张自拍")
+        selfie_hit = any(marker in compact for marker in selfie_markers)
+        draw_visual_targets = ("图片", "照片", "插画", "头像", "壁纸", "表情包", "自拍", "拍照", "图")
         edit_visual_targets = draw_visual_targets + ("这张", "这个图", "引用图")
         edit_strong_markers = ("改图", "修图", "重绘", "p图", "P图", "p一下", "P一下")
         edit_operation_markers = ("改成", "改为", "改一下", "p成", "P成", "换成", "变成", "加上", "加个", "去掉", "去除")
@@ -1942,28 +2069,72 @@ class CommandHandlersMixin:
         draw_hit = any(re.search(pattern, raw, flags=re.I) for pattern in draw_patterns)
         if draw_hit and not any(token in compact for token in draw_visual_targets):
             draw_hit = False
+        if selfie_hit and directed:
+            draw_hit = True
+        if not draw_hit and directed:
+            bare_draw_patterns = (
+                r"^(?:帮我|给我|替我|请你|请|麻烦你)?(?:画一张|画个|画一下|画一个|画|生成一张|生成一个|生成|生一张|做一张|做个|出一张|来一张|来张|整一张|整张|整一个|整个)\S{1,120}",
+                r"^(?:帮我|给我|替我|请你|请|麻烦你)(?:画|生成|做|出|整)\S{1,120}",
+            )
+            draw_hit = any(re.search(pattern, compact, flags=re.I) for pattern in bare_draw_patterns)
+            if draw_hit and re.search(r"(?:画个饼|画饼|规划|画重点|画大饼|画风|图个|图啥|图什么)", compact, flags=re.I):
+                draw_hit = False
         edit_hit = False
         if has_reference:
             explicit_visual_target = any(token in compact for token in edit_visual_targets)
             strong_edit = any(marker in compact for marker in edit_strong_markers)
             operation_edit = any(marker in compact for marker in edit_operation_markers)
             leading_operation = any(compact.startswith(marker) for marker in edit_operation_markers)
-            edit_hit = bool(strong_edit or (operation_edit and (explicit_visual_target or leading_operation)))
+            implicit_directed_edit = bool(
+                directed
+                and not re.search(r"(?:什么|怎么|为啥|为什么|吗|呢|？|\?)", compact)
+                and any(
+                    marker in compact
+                    for marker in (
+                        "红色",
+                        "蓝色",
+                        "绿色",
+                        "黑色",
+                        "白色",
+                        "粉色",
+                        "紫色",
+                        "黄色",
+                        "基调",
+                        "色调",
+                        "风格",
+                        "背景",
+                        "滤镜",
+                        "清晰",
+                        "高清",
+                        "二次元",
+                        "写实",
+                        "赛博",
+                    )
+                )
+            )
+            edit_hit = bool(strong_edit or (operation_edit and (explicit_visual_target or leading_operation)) or implicit_directed_edit)
         if not draw_hit and not edit_hit:
             return {}
         prompt = raw
         cleanup_patterns = [
             r"^(?:麻烦|可以|能不能|能|帮我|给我|替我|请你|请)?",
-            r"^(?:画一张|画个|生成一张|生成|生一张|做一张|做个|出一张|来一张|来张|整一张|整张|画)(?:图片|照片|插画|头像|壁纸|表情包|图)?",
+            r"^(?:拍一张|拍张|拍个|拍一下|发一张|发张|来一张|来张)(?:自拍|照片|照|图片|图)?",
+            r"^(?:画一张|画个|画一下|画一个|生成一张|生成一个|生成|生一张|做一张|做个|出一张|来一张|来张|整一张|整张|整一个|整个|画)(?:图片|照片|插画|头像|壁纸|表情包|图)?",
             r"^(?:把)?(?:这张图|这个图|这张|引用图|图片)?(?:帮我)?(?:改成|改为|改一下|改图|修图|重绘|p成|P成|换成|变成)",
         ]
         for pattern in cleanup_patterns:
             prompt = re.sub(pattern, "", prompt, count=1, flags=re.I).strip()
         prompt = prompt.strip(" ，,。.!！?？:：；;")
+        if selfie_hit and prompt in {"", "看看", "看一下", "看看吧", "看看嘛"}:
+            prompt = "拍一张自拍"
         if not prompt or prompt in {"图", "图片", "一张图", "这张", "这张图"}:
-            return {"kind": "edit" if edit_hit else "text2img", "prompt": "", "needs_prompt": True}
+            return {
+                "kind": "edit" if edit_hit else ("selfie" if selfie_hit else "text2img"),
+                "prompt": "",
+                "needs_prompt": True,
+            }
         return {
-            "kind": "edit" if edit_hit else "text2img",
+            "kind": "edit" if edit_hit else ("selfie" if selfie_hit else "text2img"),
             "prompt": _single_line(prompt, 700),
             "raw": raw,
         }
@@ -1999,6 +2170,12 @@ class CommandHandlersMixin:
                 f"用户要求：{prompt}。"
                 "尽量保留用户未要求修改的主体、构图和重要细节，只改变明确要求的部分。"
             )
+        elif kind == "selfie":
+            base = (
+                "根据用户自然语言请求生成角色自拍。"
+                f"用户要求：{prompt or '拍一张自拍'}。"
+                "角色本人必须露脸，脸、发型、表情和上半身/穿搭要清楚；优先保持今天穿搭、人设参考图和角色外观一致。"
+            )
         else:
             base = f"根据用户自然语言请求生成图片。用户要求：{prompt}。"
         return _single_line(
@@ -2017,6 +2194,8 @@ class CommandHandlersMixin:
         event: AstrMessageEvent,
         user_id: str,
         text: str,
+        *,
+        directed: bool = False,
     ) -> bool:
         if not getattr(self, "enable_natural_language_photo_generation", False):
             return False
@@ -2029,8 +2208,15 @@ class CommandHandlersMixin:
         has_reference = has_reference or bool(self._photo_reference_sources_from_reply_cache(event))
         if not has_reference:
             has_reference = bool(await self._photo_reference_sources_from_reply_event(event))
-        intent = self._natural_language_photo_intent(text, has_reference=has_reference)
+        intent = self._natural_language_photo_intent(text, has_reference=has_reference, directed=directed)
         if not intent:
+            if directed:
+                logger.info(
+                    "[PrivateCompanion] 定向自然语言生图未命中意图: user=%s has_reference=%s text=%s",
+                    _single_line(user_id, 40),
+                    has_reference,
+                    _single_line(text, 180),
+                )
             return False
         logger.info(
             "[PrivateCompanion] 自然语言生图命中: user=%s kind=%s has_reference=%s prompt=%s raw=%s",
@@ -2047,6 +2233,13 @@ class CommandHandlersMixin:
         async with self._data_lock:
             user = self._get_user(user_id)
             if not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)):
+                if directed:
+                    logger.info(
+                        "[PrivateCompanion] 定向自然语言生图已命中但用户无权限: user=%s enabled=%s text=%s",
+                        _single_line(user_id, 40),
+                        bool(user.get("enabled", True)) if isinstance(user, dict) else False,
+                        _single_line(text, 160),
+                    )
                 return False
             if self._private_user_role(user, user_id) == "friend":
                 await self._reply(event, "这个自然语言生图/改图入口只给主人开放。")
@@ -2086,7 +2279,7 @@ class CommandHandlersMixin:
             kind=str(intent.get("kind") or "text2img"),
             has_reference=bool(reference_path),
         )
-        workflow_kind = "selfie" if reference_path else "text2img"
+        workflow_kind = "selfie" if reference_path or str(intent.get("kind") or "") == "selfie" else "text2img"
         backend_name, image_path, note = await self._generate_photo_image(
             workflow_kind=workflow_kind,
             prompt_text=prompt_text,

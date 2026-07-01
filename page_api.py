@@ -2646,6 +2646,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "error": self._single_line(result.get("error"), 220),
             "prompt": self._single_line(result.get("prompt"), 500),
             "text_preview": self._single_line(result.get("text_preview"), 220),
+            "original_text_preview": self._single_line(result.get("original_text_preview"), 220),
+            "final_text_preview": self._single_line(result.get("final_text_preview"), 220),
             "context_chars": self._int(result.get("context_chars")),
             "action": self._single_line(result.get("action"), 60),
             "reason": self._single_line(result.get("reason"), 40),
@@ -5667,6 +5669,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_group_wakeup_cold_group",
             "enable_group_high_intensity_mode",
             "enable_private_image_self_recognition",
+            "enable_backup_external_image_api",
             "enable_private_image_gif_enhancement",
             "enable_group_conversation_followup",
             "enable_group_interjection",
@@ -6677,6 +6680,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_almanac_perception",
             "default_nickname",
             "default_style",
+            "reply_style_prompt",
             "enable_llm_timer_scheduling",
             "proactive_prompt_template",
             "proactive_persona_judge_send_threshold",
@@ -6793,16 +6797,27 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "local_photo_cpu_busy_percent",
             "local_photo_memory_busy_percent",
             "local_photo_defer_minutes",
+            "external_image_api_platform",
             "EXTERNAL_IMAGE_API_BASE_URL",
             "EXTERNAL_IMAGE_API_KEY",
             "EXTERNAL_IMAGE_API_MODEL",
             "external_image_api_size",
             "external_image_api_timeout_seconds",
+            "enable_backup_external_image_api",
+            "backup_external_image_api_platform",
+            "BACKUP_EXTERNAL_IMAGE_API_BASE_URL",
+            "BACKUP_EXTERNAL_IMAGE_API_KEY",
+            "BACKUP_EXTERNAL_IMAGE_API_MODEL",
+            "backup_external_image_api_size",
+            "backup_external_image_api_timeout_seconds",
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt",
             "photo_generation_scene_presets",
             "private_image_vision_wait_seconds",
+            "enable_context_image_captioning",
+            "context_image_caption_max_items",
+            "context_image_caption_timeout_seconds",
             "enable_private_image_gif_enhancement",
             "private_image_gif_max_frames",
             "enable_private_image_self_recognition",
@@ -7489,9 +7504,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "REST_WAKEUP_PROVIDER_ID": "rest_wakeup_provider_id",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME": "comfyui_text2img_workflow_name",
             "COMFYUI_SELFIE_WORKFLOW_NAME": "comfyui_selfie_workflow_name",
+            "external_image_api_platform": "external_image_api_platform",
             "EXTERNAL_IMAGE_API_BASE_URL": "external_image_api_base_url",
             "EXTERNAL_IMAGE_API_KEY": "external_image_api_key",
             "EXTERNAL_IMAGE_API_MODEL": "external_image_api_model",
+            "backup_external_image_api_platform": "backup_external_image_api_platform",
+            "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": "backup_external_image_api_base_url",
+            "BACKUP_EXTERNAL_IMAGE_API_KEY": "backup_external_image_api_key",
+            "BACKUP_EXTERNAL_IMAGE_API_MODEL": "backup_external_image_api_model",
         }
         if key in attr_map:
             setattr(self.plugin, attr_map[key], str(value or "").strip())
@@ -7625,16 +7645,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             setattr(self.plugin, key, value)
 
     def _sync_photo_generation_runtime_config(self) -> None:
+        enabled_backup = self._config_get("enable_backup_external_image_api")
+        if enabled_backup not in ("", None):
+            self.plugin.enable_backup_external_image_api = self._normalize_bool_value(enabled_backup)
         mapping = {
             "photo_generation_backend": "photo_generation_backend",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME": "comfyui_text2img_workflow_name",
             "COMFYUI_SELFIE_WORKFLOW_NAME": "comfyui_selfie_workflow_name",
             "photo_persona_reference_image_path": "photo_persona_reference_image_path",
             "daily_outfit_photo_prompt": "daily_outfit_photo_prompt",
+            "external_image_api_platform": "external_image_api_platform",
             "EXTERNAL_IMAGE_API_BASE_URL": "external_image_api_base_url",
             "EXTERNAL_IMAGE_API_KEY": "external_image_api_key",
             "EXTERNAL_IMAGE_API_MODEL": "external_image_api_model",
             "external_image_api_size": "external_image_api_size",
+            "backup_external_image_api_platform": "backup_external_image_api_platform",
+            "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": "backup_external_image_api_base_url",
+            "BACKUP_EXTERNAL_IMAGE_API_KEY": "backup_external_image_api_key",
+            "BACKUP_EXTERNAL_IMAGE_API_MODEL": "backup_external_image_api_model",
+            "backup_external_image_api_size": "backup_external_image_api_size",
             "photo_generation_style": "photo_generation_style",
             "photo_generation_style_custom_prompt": "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt": "photo_generation_fixed_prompt",
@@ -7651,11 +7680,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     text = text.lower()
                     if text not in {"auto", "comfyui", "sdgen", "external"}:
                         text = "auto"
+                elif key in {"external_image_api_platform", "backup_external_image_api_platform"}:
+                    normalizer = getattr(self.plugin, "_normalize_external_image_api_platform", None)
+                    text = normalizer(text) if callable(normalizer) else text.lower()
+                    if text not in {"auto", "openai", "bailian"}:
+                        text = "auto"
                 setattr(self.plugin, attr, text)
         timeout = self._config_get("external_image_api_timeout_seconds")
         if timeout not in ("", None):
             try:
                 self.plugin.external_image_api_timeout_seconds = max(20, min(600, int(float(timeout))))
+            except Exception:
+                pass
+        backup_timeout = self._config_get("backup_external_image_api_timeout_seconds")
+        if backup_timeout not in ("", None):
+            try:
+                self.plugin.backup_external_image_api_timeout_seconds = max(20, min(600, int(float(backup_timeout))))
             except Exception:
                 pass
         wait_seconds = self._config_get("comfyui_photo_wait_seconds")
@@ -7923,6 +7963,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_almanac_perception",
             "default_nickname",
             "default_style",
+            "reply_style_prompt",
             "response_review_mode",
             "smart_silence_min_confidence",
             "smart_silence_model_timeout_seconds",
@@ -8029,16 +8070,27 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "local_photo_cpu_busy_percent",
             "local_photo_memory_busy_percent",
             "local_photo_defer_minutes",
+            "external_image_api_platform",
             "EXTERNAL_IMAGE_API_BASE_URL",
             "EXTERNAL_IMAGE_API_KEY",
             "EXTERNAL_IMAGE_API_MODEL",
             "external_image_api_size",
             "external_image_api_timeout_seconds",
+            "enable_backup_external_image_api",
+            "backup_external_image_api_platform",
+            "BACKUP_EXTERNAL_IMAGE_API_BASE_URL",
+            "BACKUP_EXTERNAL_IMAGE_API_KEY",
+            "BACKUP_EXTERNAL_IMAGE_API_MODEL",
+            "backup_external_image_api_size",
+            "backup_external_image_api_timeout_seconds",
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt",
             "photo_generation_scene_presets",
             "private_image_vision_wait_seconds",
+            "enable_context_image_captioning",
+            "context_image_caption_max_items",
+            "context_image_caption_timeout_seconds",
             "enable_private_image_gif_enhancement",
             "private_image_gif_max_frames",
             "enable_private_image_self_recognition",
@@ -8401,6 +8453,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         if key == "photo_generation_backend":
             mode = str(value or "auto").strip().lower()
             return mode if mode in {"auto", "comfyui", "sdgen", "external"} else "auto"
+        if key in {"external_image_api_platform", "backup_external_image_api_platform"}:
+            mode = str(value or "auto").strip().lower()
+            aliases = {
+                "openai兼容": "openai",
+                "openai-compatible": "openai",
+                "百炼": "bailian",
+                "阿里云百炼": "bailian",
+                "dashscope": "bailian",
+            }
+            mode = aliases.get(mode, mode)
+            return mode if mode in {"auto", "openai", "bailian"} else "auto"
         if key == "segmented_proactive_split_mode":
             mode = str(value or "regex").strip().lower()
             return mode if mode in {"regex", "words"} else "regex"
@@ -8472,7 +8535,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         if key == "atrelay_default_relay_style":
             mode = str(value or "persona").strip()
             return mode if mode in {"persona", "soft", "original"} else "persona"
-        if key == "worldview_adaptation_prompt":
+        if key in {"reply_style_prompt", "worldview_adaptation_prompt"}:
             return str(value or "").strip()[:1200]
         if key == "roleplay_knowledge_source_ids":
             normalizer = getattr(self.plugin, "_normalize_roleplay_knowledge_source_ids", None)
@@ -8501,7 +8564,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(5, min(600, int(value)))
             except (TypeError, ValueError):
                 return 90
-        if key == "external_image_api_timeout_seconds":
+        if key in {"external_image_api_timeout_seconds", "backup_external_image_api_timeout_seconds"}:
             try:
                 return max(20, min(600, int(value)))
             except (TypeError, ValueError):
@@ -8513,7 +8576,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return 1
         if key == "natural_language_photo_generation_max_daily":
             try:
-                return max(0, min(10, int(value)))
+                return max(0, min(100, int(value)))
             except (TypeError, ValueError):
                 return 2
         if key in self.PERCENT_PROBABILITY_KEYS:
@@ -8650,6 +8713,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "atrelay_member_cache_minutes",
             "atrelay_multi_target_limit",
             "private_image_vision_cache_max_items",
+            "context_image_caption_max_items",
             "group_slang_web_search_terms",
             "group_slang_web_search_results",
             "auto_voice_max_chars",
@@ -8723,6 +8787,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0.0, min(90.0, float(value)))
             except (TypeError, ValueError):
                 return 30.0
+        if key == "context_image_caption_timeout_seconds":
+            try:
+                return max(0.0, min(30.0, float(value)))
+            except (TypeError, ValueError):
+                return 8.0
         if key == "private_image_gif_max_frames":
             try:
                 return max(1, min(8, int(value)))
@@ -8831,6 +8900,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_quote_private_proactive",
             "enable_local_photo_load_guard",
             "enable_private_image_self_recognition",
+            "enable_context_image_captioning",
             "enable_private_image_gif_enhancement",
             "enable_private_image_vision_cache",
             "enable_segmented_proactive_reply",
@@ -10737,6 +10807,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             meta_leak_checker = getattr(self.plugin, "_framework_agent_meta_summary_leak", None)
             if callable(meta_leak_checker) and (
                 meta_leak_checker(str(raw.get("text_preview") or ""))
+                or meta_leak_checker(str(raw.get("original_text_preview") or ""))
+                or meta_leak_checker(str(raw.get("final_text_preview") or ""))
                 or meta_leak_checker(str(raw.get("text") or ""))
                 or meta_leak_checker(str(raw.get("note") or ""))
             ):
@@ -10785,11 +10857,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     bucket,
                 )
             )
+            text_preview = self._display_message_text(raw.get("text_preview"), 180)
+            original_text_preview = self._display_message_text(raw.get("original_text_preview"), 180)
+            final_text_preview = self._display_message_text(raw.get("final_text_preview"), 180)
             existing = seen_audit_signatures.get(signature)
             if existing is not None:
-                existing["updated_ts"] = max(self._float(existing.get("updated_ts")), updated_ts)
+                previous_updated = self._float(existing.get("updated_ts"))
+                existing["updated_ts"] = max(previous_updated, updated_ts)
                 existing["updated"] = self.plugin._format_timestamp_elapsed(existing["updated_ts"])
                 existing["duplicate_count"] = max(1, self._int(existing.get("duplicate_count"))) + max(1, self._int(raw.get("duplicate_count")))
+                if updated_ts >= previous_updated:
+                    if text_preview:
+                        existing["text_preview"] = text_preview
+                    if original_text_preview:
+                        existing["original_text_preview"] = original_text_preview
+                    if final_text_preview:
+                        existing["final_text_preview"] = final_text_preview
                 continue
             audit_status_counts[status] = audit_status_counts.get(status, 0) + 1
             item = {
@@ -10815,7 +10898,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "semantic_risk": self._int(raw.get("semantic_risk")),
                 "semantic_note": self._single_line(raw.get("semantic_note"), 180),
                 "note": note,
-                "text_preview": self._display_message_text(raw.get("text_preview"), 180),
+                "text_preview": text_preview,
+                "original_text_preview": original_text_preview,
+                "final_text_preview": final_text_preview,
                 "scheduled_ts": self._float(raw.get("scheduled_ts")),
                 "scheduled": self.plugin._format_timestamp_elapsed(raw.get("scheduled_ts", 0)),
                 "created_ts": self._float(raw.get("created_ts")),

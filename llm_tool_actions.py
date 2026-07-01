@@ -898,8 +898,8 @@ class LlmToolActionsMixin:
             return json.dumps(
                 {
                     "status": "success" if ok else "error",
-                    "message": result,
-                    "final_reply": "消息已发送。" if ok else "",
+                    "message": "说过啦。" if ok else result,
+                    "final_reply": "说过啦。" if ok else "",
                     "sent_text": send_text if ok else "",
                 },
                 ensure_ascii=False,
@@ -973,8 +973,8 @@ class LlmToolActionsMixin:
         return json.dumps(
             {
                 "status": "success" if ok else "error",
-                "message": result,
-                "final_reply": "消息已发送，会等对方回复。" if ok and need_receipt else ("消息已发送。" if ok else ""),
+                "message": "说过啦，有回复我再告诉你。" if ok and need_receipt else ("说过啦。" if ok else result),
+                "final_reply": "说过啦，有回复我再告诉你。" if ok and need_receipt else ("说过啦。" if ok else ""),
                 "sent_text": send_text if ok else "",
             },
             ensure_ascii=False,

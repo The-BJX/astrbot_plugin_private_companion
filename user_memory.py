@@ -3783,17 +3783,15 @@ Bot 主动后用户回复次数：{reply_count}
         reason = _single_line(payload.get("reason"), 40)
         action = _single_line(payload.get("action"), 40)
         behavior = _single_line(payload.get("behavior"), 80)
-        motive = _single_line(payload.get("motive"), 120)
         keywords = "、".join(self._salient_terms_for_proactive_anchor(last_message)[:6])
         detail_parts = []
-        if reason:
-            detail_parts.append(f"原因：{reason}")
+        reason_label = _single_line(_REASON_TEXT.get(reason, reason), 60)
+        if reason_label and reason_label != reason:
+            detail_parts.append(f"当时背景：{reason_label}")
         if action and action != "message":
             detail_parts.append(f"行为：{action}" + (f"（{behavior}）" if behavior else ""))
         elif behavior:
             detail_parts.append(f"行为：{behavior}")
-        if motive:
-            detail_parts.append(f"当时想法：{motive}")
         detail = "\n" + "；".join(detail_parts) if detail_parts else ""
         lines = [
             "【主动消息回复上下文】",
@@ -3803,9 +3801,9 @@ Bot 主动后用户回复次数：{reply_count}
             lines.append(f"最近主动消息关键词：{keywords}")
         lines.extend(
             [
-                "用户当前消息可能是在回应这条主动消息；请优先自然承接用户这句话。如果用户明显另起话题,再自然切换。",
-                "上一条主动消息已经发出过,现在绝对不要完整复述,也不要同义改写其中的事实、情绪和问题。尤其不要把刚才问过的问题再问一遍；如果用户已经回答了,先接住回答。",
-                "如果用户问“做啥了/怎么了/发生啥了/你刚说的是什么”,只能解释上一条主动消息里的具体事件或原因；不得转去更早的聊天、凌晨、道歉、睡着、不理你等旧话题,除非上一条主动消息本身提到这些内容。",
+                "用户当前消息可能是在回应这条主动消息；优先自然承接用户这句话。如果用户明显另起话题,就跟随新话题。",
+                "上一条主动消息已经发出过,不需要复述或换一种说法再问一遍；如果用户已经回答了,先接住回答。",
+                "这里的背景词只帮助你理解上一条主动消息,不要把它当成现实事件念给用户。用户问“做啥了/怎么了/你刚说的是什么”时,只基于上一条主动消息本身轻轻解释。",
             ]
         )
         return "\n".join(lines)

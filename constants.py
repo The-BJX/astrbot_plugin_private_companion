@@ -5,6 +5,12 @@ import re
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 DATA_VERSION = 1
 
+DEFAULT_REPLY_STYLE_PROMPT = (
+    "每次回复至多三句话；简单的回答尽可能保持在 1~2 句，并尽可能保持口语化与简洁化。"
+    "回复长度和语气应该与当前对话节奏相匹配，必须使用简体中文进行回复，话语符合社交媒体交流习惯。"
+    "当你需要解决复杂问题或进行详细说明时，可以无视这一要求。"
+)
+
 # 日常计划文案 - 生活化JK口语
 DEFAULT_DAILY_PLAN_ITEMS = [
     {"time": "08:20", "activity": "起床收拾", "mood": "开心", "message_seed": "新的一天开始啦——该起床咯~"},
@@ -102,11 +108,11 @@ _REASON_TEXT = {
 
 # 动作描述 - 生活化
 _ACTION_TEXT = {
-    "message": "发了条消息给{name}",
+    "message": "主动留了一句话",
     "screen_peek": "看了眼本机屏幕",
-    "photo_text": "拍了张照片发给{name}",
+    "photo_text": "分享了一张照片",
     "poke": "戳了一下",
-    "voice": "发了段语音跟{name}说",
+    "voice": "用语音说了一句",
     "jm_cosmos_read": "私下翻了会儿漫画本子",
 }
 

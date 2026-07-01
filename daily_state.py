@@ -931,9 +931,9 @@ class DailyStateMixin:
                     "window": "08:20-09:50",
                     "reason": "morning_greeting",
                     "action": "message",
-                    "why": "迷迷糊糊醒来，虽然还想再睡，但先给用户发送早安问候",
+                    "why": "迷迷糊糊醒来，虽然还想再睡，但先轻轻说声早安",
                     "topic": "赖床间隙的早安",
-                    "motive": "迷迷糊糊醒来，虽然还想再睡，但先给用户发送早安问候",
+                    "motive": "迷迷糊糊醒来，虽然还想再睡，但先轻轻说声早安",
                     "scene": "睡意依旧，不想起床",
                     "tone": "迷糊",
                     "impulse": "虽然打算继续睡，但想告诉用户自己醒过了",
@@ -1156,7 +1156,7 @@ class DailyStateMixin:
         if action == "screen_peek":
             base = "刚好有点空，想确认用户是不是还在忙"
         elif action == "photo_text":
-            base = "刚刚看到的画面想发给用户看看"
+            base = "刚刚看到的画面想分享一下"
         elif action == "jm_cosmos_read":
             base = "刚刚私下翻到一点漫画内容,只想含糊地提一句"
         elif action == "poke":
@@ -4254,8 +4254,8 @@ class DailyStateMixin:
     def _get_schedule_planning_prompt(self) -> str:
         return get_schedule_planning_prompt(self)
 
-    def _build_daily_plan_prompt(self, now: str) -> str:
-        return build_daily_plan_prompt(self, now)
+    def _build_daily_plan_prompt(self, now: str, remember_you_context: str = "") -> str:
+        return build_daily_plan_prompt(self, now, remember_you_context=remember_you_context)
 
     async def _ensure_yesterday_conversation_summary(self, force: bool = False) -> dict[str, Any]:
         today = _today_key()
@@ -4348,6 +4348,23 @@ class DailyStateMixin:
             return []
         return [item for item in loaded if isinstance(item, dict)]
 
+    @staticmethod
+    def _proactive_archive_context_text(text: str) -> bool:
+        if not text:
+            return False
+        raw = str(text)
+        compact = re.sub(r"\s+", "", raw).lower()
+        lowered = raw.lower()
+        if "主动承接占位" in raw and ("用户还没发来新消息" in raw or "bot主动" in compact):
+            return True
+        if "这不是用户消息" in raw and "private companion" in lowered and "主动消息" in raw:
+            return True
+        if "[主动消息]" in raw or "【主动消息】" in raw:
+            legacy_markers = ("触发原因", "行为结果", "内部动机", "动作摘要")
+            if sum(1 for marker in legacy_markers if marker in raw) >= 2:
+                return True
+        return False
+
     def _history_item_timestamp(self, item: dict[str, Any]) -> float | None:
         for key in ("timestamp", "time", "created_at", "updated_at", "created", "date"):
             value = item.get(key)
@@ -4377,6 +4394,8 @@ class DailyStateMixin:
             speaker = role or "对话"
         content = self._history_item_content_text(item)
         if not content:
+            return ""
+        if self._proactive_archive_context_text(content):
             return ""
         ts = self._history_item_timestamp(item)
         time_prefix = self._environment_fromtimestamp(ts).strftime("%m-%d %H:%M") + " " if ts else ""
@@ -4580,8 +4599,9 @@ class DailyStateMixin:
         segment: dict[str, Any],
         plan: dict[str, Any],
         state: dict[str, Any],
+        remember_you_context: str = "",
     ) -> str:
-        return build_detail_enhancement_prompt(self, segment, plan, state)
+        return build_detail_enhancement_prompt(self, segment, plan, state, remember_you_context=remember_you_context)
 
     def _get_default_persona_prompt(self) -> str:
         cached = str(getattr(self, "_default_persona_prompt_cache", "") or "").strip()
@@ -4721,31 +4741,14 @@ class DailyStateMixin:
             "无实体", "没有实体", "没有身体", "无身体", "纯意识", "虚拟人格", "虚拟形象",
             "全息投影", "投影形态", "灵体", "幽灵", "意识体"
         )
-        cycle_block_markers = (
-            "男性", "男生", "男孩子", "少年", "男孩", "男人", "男性人类",
-            "无生理期", "没有生理期", "不会有生理期", "不来生理期",
-            "无月经", "没有月经", "不会来月经", "不来月经",
-            "无例假", "没有例假", "不会来例假", "不来例假", "不适用周期"
-        )
-        explicit_cycle_markers = (
-            "女性", "女生", "女孩子", "女孩", "少女", "女人", "成年女性",
-            "生理期", "月经", "例假"
-        )
-
         has_human_markers = has_any(explicitly_human_markers)
         has_bodyless_markers = has_any(bodyless_markers)
         has_strong_non_human = has_any(strong_non_human_markers)
         soft_non_human_hits = sum(1 for marker in soft_non_human_markers if marker in text)
         is_non_human = (has_strong_non_human or soft_non_human_hits >= 2) and not has_human_markers
-        no_biological_body = is_non_human or has_bodyless_markers
         allow_health = bool(getattr(self, "enable_health_state", True))
         allow_hunger = bool(getattr(self, "enable_hunger_state", True))
-        allow_cycle = (
-            self.enable_cycle_state
-            and not no_biological_body
-            and not has_any(cycle_block_markers)
-            and (has_human_markers or has_any(explicit_cycle_markers))
-        )
+        allow_cycle = bool(getattr(self, "enable_cycle_state", True))
         return {
             "non_human": is_non_human or has_bodyless_markers,
             "allow_health": allow_health,
@@ -4768,7 +4771,7 @@ class DailyStateMixin:
         if not profile.get("allow_hunger", True):
             values["hunger"] = "饥饿/胃口状态未开启"
         if not profile.get("allow_cycle", False):
-            values["body_cycle"] = "该人格不适用周期状态"
+            values["body_cycle"] = "生理期模拟未开启"
         return values
 
     def _is_inapplicable_state_text(self, text: str) -> bool:
@@ -5694,6 +5697,7 @@ class DailyStateMixin:
                 "不处于生理期",
                 "健康/不适状态未开启",
                 "饥饿/胃口状态未开启",
+                "生理期模拟未开启",
                 "该人格不适用生病状态",
                 "该人格不适用饥饿状态",
                 "该人格不适用周期状态",
@@ -7664,12 +7668,12 @@ class DailyStateMixin:
                             removed_counts[count_key] = removed_counts.get(count_key, 0) + 1
                             changed = True
 
-        filter_list(data, "proactive_audit_log", ("text_preview", "text", "note", "topic", "motive"), limit=120)
+        filter_list(data, "proactive_audit_log", ("text_preview", "original_text_preview", "final_text_preview", "text", "note", "topic", "motive"), limit=120)
 
         troubleshooting = data.get("troubleshooting_test_results")
         if isinstance(troubleshooting, dict):
             for key, result in list(troubleshooting.items()):
-                if list_item_has_meta(result, ("text_preview", "detail", "error")):
+                if list_item_has_meta(result, ("text_preview", "original_text_preview", "final_text_preview", "detail", "error")):
                     troubleshooting.pop(key, None)
                     removed_counts["troubleshooting_test_results"] = removed_counts.get("troubleshooting_test_results", 0) + 1
                     changed = True
@@ -8478,6 +8482,8 @@ class DailyStateMixin:
         detail: str,
         error: str = "",
         text: str = "",
+        original_text: str = "",
+        final_text: str = "",
         action: str = "message",
         reason: str = "check_in",
         extra_count: int = 0,
@@ -8497,6 +8503,8 @@ class DailyStateMixin:
             "detail": _single_line(detail, 220),
             "error": _single_line(error, 220),
             "text_preview": self._proactive_visible_text_preview(text) if text else "",
+            "original_text_preview": self._proactive_visible_text_preview(original_text) if original_text else "",
+            "final_text_preview": self._proactive_visible_text_preview(final_text) if final_text else "",
             "action": _single_line(action, 60) or "message",
             "reason": _single_line(reason, 40) or "check_in",
             "extra_count": max(0, int(extra_count or 0)),
@@ -9091,21 +9099,32 @@ class DailyStateMixin:
                     rewritten_text = str(review_decision.get("text") or "").strip()
                     if rewritten_text:
                         rewritten_text = _normalize_outbound_punctuation_flow(rewritten_text).strip()
+                        original_text_before_rewrite = str(text or review_candidate_text or "").strip()
                         logger.info(
                             "[PrivateCompanion] 主动消息发送前已润色: user=%s before=%s after=%s",
                             user_id,
-                            _single_line(text or review_candidate_text, 100),
+                            _single_line(original_text_before_rewrite, 100),
                             _single_line(rewritten_text, 100),
                         )
                         text = rewritten_text
-                        if is_troubleshooting_for_send:
-                            async with self._data_lock:
+                        async with self._data_lock:
+                            self._update_proactive_audit(
+                                audit_id,
+                                status="running",
+                                note="发送前价值复核轻改写",
+                                text=text,
+                                original_text=original_text_before_rewrite,
+                                final_text=text,
+                            )
+                            if is_troubleshooting_for_send:
                                 current_for_review_rewrite = self._get_user(user_id)
                                 self._append_troubleshooting_proactive_step(
                                     current_for_review_rewrite,
                                     "发送前价值复核",
                                     "ok",
-                                    "复核模型建议轻改写后发送",
+                                    "复核模型建议轻改写："
+                                    f"由「{_single_line(original_text_before_rewrite, 70)}」"
+                                    f"改为「{_single_line(text, 70)}」",
                                 )
                                 self._record_troubleshooting_proactive_result(
                                     user_id,
@@ -9113,11 +9132,13 @@ class DailyStateMixin:
                                     ok=True,
                                     detail="主动消息已通过发送前价值复核，复核模型建议轻改写",
                                     text=text or review_candidate_text,
+                                    original_text=original_text_before_rewrite,
+                                    final_text=text,
                                     action=effective_action_for_send or planned_action_for_send or "message",
                                     reason=reason or "check_in",
                                     extra_count=len(extra_components),
                                 )
-                                self._save_data_sync()
+                            self._save_data_sync()
                 elif decision in {"defer", "drop"}:
                     note = _single_line(review_decision.get("reason"), 120) or (
                         "发送前价值复核建议延后" if decision == "defer" else "发送前价值复核建议取消"
@@ -9591,6 +9612,7 @@ class DailyStateMixin:
                     current_for_clear["proactive_sending_started_at"] = 0
                     self._save_data_sync()
 
+            remember_you_proactive_payload: dict[str, Any] = {}
             async with self._data_lock:
                 current = self._get_user(user_id)
                 simulation_active = self._simulation_active(current)
@@ -9811,6 +9833,20 @@ class DailyStateMixin:
                         self._schedule_next_proactive(current, now=schedule_now, delay_hours=next_delay)
                 self._save_data_sync()
                 current_snapshot = dict(current)
+                if not simulation_active and visible_text:
+                    remember_you_proactive_payload = {
+                        "user": current_snapshot,
+                        "user_id": user_id,
+                        "text": visible_text,
+                        "reason": reason,
+                        "action": current.get("last_proactive_action") or effective_action_for_send or planned_action_for_send or "message",
+                        "motive": planned_motive_for_send,
+                        "action_summary": action_summary,
+                        "image_path": image_path,
+                        "extra_count": len(extra_components),
+                    }
+            if remember_you_proactive_payload:
+                await self._remember_you_record_proactive_message(**remember_you_proactive_payload)
             asyncio.create_task(self._refresh_persona_relationship(user_id, current_snapshot))
 
         await self._run_proactive_maintenance_tasks()

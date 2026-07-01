@@ -160,6 +160,12 @@
         "hint": "填写简短语气描述，例如温柔、活泼、工作感、校园风。用户可用“陪伴 语气”单独覆盖；该值只作为生成参考，不对应固定外发模板。",
         "default": "温柔"
       },
+      "reply_style_prompt": {
+        "description": "回复风格提示词",
+        "type": "text",
+        "hint": "用于约束普通回复和主动消息的表达节奏。适合写回复句数、语言、口语化、简洁度等要求；复杂问题或用户要求详细说明时可允许模型放宽。",
+        "default": "每次回复至多三句话；简单的回答尽可能保持在 1~2 句，并尽可能保持口语化与简洁化。回复长度和语气应该与当前对话节奏相匹配，必须使用简体中文进行回复，话语符合社交媒体交流习惯。当你需要解决复杂问题或进行详细说明时，可以无视这一要求。"
+      },
       "worldview_adaptation_mode": {
         "description": "世界观适配模式",
         "type": "string",
@@ -336,6 +342,12 @@
     "description": "Legacy flat config: 默认语气",
     "type": "string",
     "default": "温柔",
+    "invisible": true
+  },
+  "reply_style_prompt": {
+    "description": "Legacy flat config: 回复风格提示词",
+    "type": "text",
+    "default": "每次回复至多三句话；简单的回答尽可能保持在 1~2 句，并尽可能保持口语化与简洁化。回复长度和语气应该与当前对话节奏相匹配，必须使用简体中文进行回复，话语符合社交媒体交流习惯。当你需要解决复杂问题或进行详细说明时，可以无视这一要求。",
     "invisible": true
   },
   "worldview_adaptation_mode": {
@@ -678,6 +690,24 @@
     "description": "Legacy flat config: 单个识图模型超时秒数",
     "type": "float",
     "default": 12,
+    "invisible": true
+  },
+  "enable_context_image_captioning": {
+    "description": "Legacy flat config: 上下文图片摘要补全",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "context_image_caption_max_items": {
+    "description": "Legacy flat config: 单轮上下文补全图片数",
+    "type": "int",
+    "default": 12,
+    "invisible": true
+  },
+  "context_image_caption_timeout_seconds": {
+    "description": "Legacy flat config: 上下文图片补全等待秒数",
+    "type": "float",
+    "default": 8,
     "invisible": true
   },
   "enable_private_image_self_recognition": {
@@ -1872,7 +1902,7 @@
     "invisible": true
   },
   "group_slang_web_search_terms": {
-    "description": "Legacy flat config: 黑话联网搜索词数",
+    "description": "Legacy flat config: 黑话联网候选扫描数",
     "type": "int",
     "default": 4,
     "invisible": true
@@ -2473,6 +2503,48 @@
   },
   "external_image_api_timeout_seconds": {
     "description": "Legacy flat config: 在线生图超时时间（秒）",
+    "type": "int",
+    "default": 180,
+    "invisible": true
+  },
+  "enable_backup_external_image_api": {
+    "description": "Legacy flat config: 启用备选在线图片 API",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "backup_external_image_api_platform": {
+    "description": "Legacy flat config: 备选在线生图模型平台",
+    "type": "string",
+    "default": "auto",
+    "invisible": true
+  },
+  "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": {
+    "description": "Legacy flat config: 备选在线图片 API 地址",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "BACKUP_EXTERNAL_IMAGE_API_KEY": {
+    "description": "Legacy flat config: 备选在线图片 API Key",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "BACKUP_EXTERNAL_IMAGE_API_MODEL": {
+    "description": "Legacy flat config: 备选在线图片模型",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "backup_external_image_api_size": {
+    "description": "Legacy flat config: 备选在线生图尺寸",
+    "type": "string",
+    "default": "1024x1024",
+    "invisible": true
+  },
+  "backup_external_image_api_timeout_seconds": {
+    "description": "Legacy flat config: 备选在线生图超时时间（秒）",
     "type": "int",
     "default": 180,
     "invisible": true
@@ -3544,6 +3616,36 @@
         },
         "default": 12,
         "condition": "enable_private_image_self_recognition"
+      },
+      "enable_context_image_captioning": {
+        "description": "上下文图片摘要补全",
+        "type": "bool",
+        "hint": "开启后，LLM 请求前会尝试把历史上下文里的 [图片]/【图片】占位替换为视觉摘要。优先复用图片视觉缓存；找不到原图源或识图超时时保留原占位，不编造内容。",
+        "default": true
+      },
+      "context_image_caption_max_items": {
+        "description": "单轮上下文补全图片数",
+        "type": "int",
+        "hint": "一次 LLM 请求最多把多少条历史图片占位补成视觉摘要。达到上限后保留后续 [图片] 占位，避免长历史一次性触发过多识图。",
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 1
+        },
+        "default": 12,
+        "condition": "enable_context_image_captioning"
+      },
+      "context_image_caption_timeout_seconds": {
+        "description": "上下文图片补全等待秒数",
+        "type": "float",
+        "hint": "历史上下文图片补全的单次等待预算。命中缓存通常很快；缓存未命中且视觉模型超时会放弃本次补全，不阻塞整轮回复太久。",
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 0.5
+        },
+        "default": 8,
+        "condition": "enable_context_image_captioning"
       },
       "enable_private_image_self_recognition": {
         "description": "启用图片转述增强",
@@ -5914,9 +6016,9 @@
         }
       },
       "group_slang_web_search_terms": {
-        "description": "黑话联网搜索词数",
+        "description": "黑话联网候选扫描数",
         "type": "int",
-        "hint": "每次黑话释义整理最多拿多少个候选词去搜索。建议保持较小，避免额外搜索调用过多。",
+        "hint": "每次黑话释义整理最多从多少个候选词里挑选待查词；实际每轮只联网搜索 1 个词，并缓存结果/失败冷却，避免短时间连发搜索。",
         "default": 4,
         "min": 1,
         "max": 12,
@@ -6647,7 +6749,7 @@
       "enable_cycle_state": {
         "description": "启用生理期模拟",
         "type": "bool",
-        "hint": "开启后，只有当人格适合人类身体设定时，拟人身体状态才可能加入“生理期前/处于生理期/生理期后”等余波。它只影响语气、精力和节奏，不是医学记录或真实日期追踪；事件带冷却，不会每天连续重抽。",
+        "hint": "开启后，生理期模拟视为适用，拟人身体状态可能加入“生理期前/处于生理期/生理期后”等余波。它只影响语气、精力和节奏，不是医学记录或真实日期追踪；事件带冷却，不会每天连续重抽。",
         "default": true,
         "condition": {
           "enable_humanized_states": true
@@ -6955,7 +7057,7 @@
         "hint": "独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭自然语言生图/改图。",
         "slider": {
           "min": 0,
-          "max": 10,
+          "max": 100,
           "step": 1
         },
         "default": 2,
@@ -7089,6 +7191,80 @@
         "default": 180,
         "condition": {
           "enable_photo_text_action": true
+        }
+      },
+      "enable_backup_external_image_api": {
+        "description": "启用备选在线图片 API",
+        "type": "bool",
+        "hint": "开启后，主在线图片 API 请求失败、超时或未配置完整时，会先尝试这组备选在线 API，再回退本地 ComfyUI/SDGen。",
+        "default": false,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "backup_external_image_api_platform": {
+        "description": "备选在线生图模型平台",
+        "type": "string",
+        "hint": "可填：auto、openai、bailian。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
+        "default": "auto",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_backup_external_image_api": true
+        }
+      },
+      "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": {
+        "description": "备选在线图片 API 地址",
+        "type": "string",
+        "hint": "主在线图片 API 失败后才会使用。支持 OpenAI 兼容 images 接口或阿里云百炼 / DashScope 原生生图接口。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_backup_external_image_api": true
+        }
+      },
+      "BACKUP_EXTERNAL_IMAGE_API_KEY": {
+        "description": "备选在线图片 API Key",
+        "type": "string",
+        "hint": "备选在线图片 API 的鉴权 Key。留空则不会启用备选后端。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_backup_external_image_api": true
+        }
+      },
+      "BACKUP_EXTERNAL_IMAGE_API_MODEL": {
+        "description": "备选在线图片模型",
+        "type": "string",
+        "hint": "备选平台的图片模型名，不要填写聊天/文本模型。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_backup_external_image_api": true
+        }
+      },
+      "backup_external_image_api_size": {
+        "description": "备选在线生图尺寸",
+        "type": "string",
+        "hint": "格式如 1024x1024、768x1344。留空时按 1024x1024 处理。",
+        "default": "1024x1024",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_backup_external_image_api": true
+        }
+      },
+      "backup_external_image_api_timeout_seconds": {
+        "description": "备选在线生图超时时间（秒）",
+        "type": "int",
+        "hint": "等待备选在线图片 API 返回结果的最长时间。",
+        "slider": {
+          "min": 20,
+          "max": 600,
+          "step": 10
+        },
+        "default": 180,
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_backup_external_image_api": true
         }
       },
       "photo_generation_style": {

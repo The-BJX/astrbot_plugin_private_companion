@@ -533,7 +533,7 @@ const featureMeta = {
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
-  enable_cycle_state: ["生理期模拟", "在人格适合人类身体设定时，允许当前扮演状态偶尔加入生理期前、处于生理期或生理期后的状态。"],
+  enable_cycle_state: ["生理期模拟", "开启后即视为适用，允许当前扮演状态偶尔加入生理期前、处于生理期或生理期后的状态。"],
   enable_skill_growth_simulation: ["技能成长", "能力状态与边界；自定义技能请到观察页的技能成长卡片管理。"],
   enable_message_debounce: ["消息收口防抖", "把文本、图片、转发后的补充说明合并进同一轮；旧版语义收口等待已并入文本补话等待。"],
   enable_smart_message_debounce: ["智能文本收口", "先本地快判明确完整文本；“知道吗/问你个事/你猜”等短引子会先等补话。"],
@@ -883,6 +883,7 @@ const configLabels = {
   user_count: "私聊对象总数",
   require_opt_in: "是否需要私聊确认",
   default_style: "默认语气",
+  reply_style_prompt: "回复风格提示词",
   plugin_specific_persona_id: "插件指定人格 ID",
   private_user_aliases: "私聊身份别名归并",
   private_user_delivery_aliases: "私聊主动发送目标映射",
@@ -1020,7 +1021,7 @@ const configLabels = {
   forward_message_image_limit: "合并消息视觉图片上限",
   max_group_recent_messages: "群聊最近消息上限",
   max_group_slang_terms: "群黑话上限",
-  group_slang_web_search_terms: "黑话联网搜索词数",
+  group_slang_web_search_terms: "黑话联网候选扫描数",
   group_slang_web_search_results: "每词搜索摘要条数",
   daily_token_limit: "每日 Token 限额",
   enable_daily_token_soft_limit: "启用每日 Token 软限额",
@@ -1186,11 +1187,19 @@ const configLabels = {
   local_photo_cpu_busy_percent: "CPU 忙碌阈值",
   local_photo_memory_busy_percent: "内存忙碌阈值",
   local_photo_defer_minutes: "忙时延后分钟数",
+  external_image_api_platform: "在线生图平台",
   EXTERNAL_IMAGE_API_BASE_URL: "在线图片 API 地址",
   EXTERNAL_IMAGE_API_KEY: "在线图片 API Key",
   EXTERNAL_IMAGE_API_MODEL: "在线图片模型",
   external_image_api_size: "在线生图尺寸",
   external_image_api_timeout_seconds: "在线生图超时秒数",
+  enable_backup_external_image_api: "启用备选在线 API",
+  backup_external_image_api_platform: "备选在线生图平台",
+  BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线 API 地址",
+  BACKUP_EXTERNAL_IMAGE_API_KEY: "备选在线 API Key",
+  BACKUP_EXTERNAL_IMAGE_API_MODEL: "备选在线图片模型",
+  backup_external_image_api_size: "备选在线生图尺寸",
+  backup_external_image_api_timeout_seconds: "备选在线超时秒数",
   photo_generation_style: "主动生图风格",
   photo_generation_style_custom_prompt: "自定义风格说明",
   photo_generation_fixed_prompt: "固定附加提示词",
@@ -1225,6 +1234,7 @@ const configDescriptions = {
   proactive_persona_judge_send_threshold: "模型判定为 send 但分数低于该阈值时，会自动转为延后。越高越克制，越低越容易放行。",
   proactive_persona_judge_cache_minutes: "同一主动计划在该时间内复用模型判定，减少重复调用；计划内容、语义或触发来源变化后会自动失效。",
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
+  reply_style_prompt: "注入到普通被动回复和主动消息生成中的表达约束，适合写句数、简洁度、语言和社交媒体口语习惯；复杂问题或用户要求详细说明时，可在这里允许模型放宽。",
   plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于角色设定补充，它会影响私聊被动回复和关系判断。",
   private_user_aliases: "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射，例如：688C2CE7...=100012345。",
   private_user_delivery_aliases: "只改变主动消息/主动测试的发送出口，不改变记忆归属。每行一个映射，例如：大号QQ=小号QQ。",
@@ -1248,7 +1258,7 @@ const configDescriptions = {
   enable_rest_backlog_reply: "休息闸门静默拦截的目标私聊会暂存成简短摘要；下一次醒来或被叫醒回复时，Bot 会像刚补看消息一样自然接上。只记录私聊，不记录群聊。",
   rest_backlog_max_messages: "休息期间最多保留多少条未回复私聊。超过后只留最近几条，避免醒来后被旧消息淹没。",
   REST_WAKEUP_PROVIDER_ID: "可选。用于休息醒来判断的轻量模型；留空时优先使用回复审校模型，再回退主模型。",
-  enable_cycle_state: "开启后，只有人格适合人类身体设定时，才可能在“当前扮演状态”里出现生理期相关状态；它只影响语气、精力和回复节奏，不是医学记录或真实日期追踪。非适用人格会自动判定不适用。",
+  enable_cycle_state: "开启后即视为适用，可能在“当前扮演状态”里出现生理期前、处于生理期或生理期后的相关状态；它只影响语气、精力和回复节奏，不是医学记录或真实日期追踪。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
   enable_holiday_perception: "开启后会把节假日、调休和工作日判断注入环境感知。",
@@ -1404,7 +1414,7 @@ const configDescriptions = {
   forward_message_image_limit: "单次合并消息最多转述多少张图片，超过上限的图片仍会保留占位。",
   max_group_recent_messages: "每个群保存的最近消息数量，用于场景、话题和插话判断。",
   max_group_slang_terms: "每个群最多保留多少条黑话/简称候选。",
-  group_slang_web_search_terms: "黑话释义联网参考开启时，每次最多拿多少个候选词去搜索。建议保持较小，减少搜索调用。",
+  group_slang_web_search_terms: "黑话释义联网参考开启时，每次最多从多少个候选词里挑选待查词；实际每轮只联网搜索 1 个词，并缓存结果/失败冷却，避免短时间连发搜索。",
   group_slang_web_search_results: "黑话释义联网参考开启时，每个候选词最多保留多少条网页摘要给模型判断匹配程度。",
   memory_refresh_interval_minutes: "长期画像整理的最小间隔，越短越容易产生模型调用。",
   max_companion_memory_items: "每个私聊对象最多保留多少条长期画像条目。",
@@ -1472,11 +1482,19 @@ const configDescriptions = {
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
   local_photo_memory_busy_percent: "内存使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。",
   local_photo_defer_minutes: "只有本地 ComfyUI/SDGen 可用且电脑忙时，保留原主动计划并延后这么久再重试。",
-  EXTERNAL_IMAGE_API_BASE_URL: "OpenAI 兼容在线生图接口地址。可填完整 /images/generations 地址，或 API 根地址。",
+  external_image_api_platform: "可填 auto、openai、bailian。auto 会根据 API 地址和模型名自动判断。",
+  EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。OpenAI 兼容可填完整 /images/generations 地址或 API 根地址；百炼可填 /api/v1 根地址或完整生图接口。",
   EXTERNAL_IMAGE_API_KEY: "在线图片 API 的鉴权 Key。保存后会写入插件配置；请只在可信本机环境填写。",
   EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写 gpt-5.5、deepseek、claude、qwen 等聊天/文本模型。填写后配合 API 地址和 Key 可作为 external 或 auto 的生图后端。",
   external_image_api_size: "在线生图尺寸，例如 1024x1024、768x1344。",
   external_image_api_timeout_seconds: "等待在线图片 API 返回结果的最长时间。",
+  enable_backup_external_image_api: "开启后，主在线图片 API 请求失败、超时或未配置完整时，会先尝试这组备选 API，再回退本地 ComfyUI/SDGen。",
+  backup_external_image_api_platform: "可填 auto、openai、bailian。含义与主在线生图平台一致，只在备选 API 生效时使用。",
+  BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线生图接口地址。主在线 API 失败后才会使用。",
+  BACKUP_EXTERNAL_IMAGE_API_KEY: "备选在线图片 API 的鉴权 Key。留空则不会启用备选后端。",
+  BACKUP_EXTERNAL_IMAGE_API_MODEL: "备选平台的图片模型名，不要填写聊天/文本模型。",
+  backup_external_image_api_size: "备选在线生图尺寸，例如 1024x1024、768x1344。",
+  backup_external_image_api_timeout_seconds: "等待备选在线图片 API 返回结果的最长时间。",
   photo_generation_style: "影响主动生图提示词的整体风格倾向，可填 真实、二次元 或 其他。",
   photo_generation_style_custom_prompt: "当风格为“其他”时，把这里作为额外风格要求注入生图提示词。",
   photo_generation_fixed_prompt: "所有生图提交后端前都会追加这段固定提示词，包括主动随手拍、每日穿搭、自然语言文生图和引用/携带图片改图。适合放固定画质、角色细节、安全区或负面约束；留空不追加。",
@@ -1536,6 +1554,7 @@ const configDescriptions = {
 const featureSettingGroups = {
   enable_mai_style_integration: [
     "default_style",
+    "reply_style_prompt",
     "enable_companion_memory",
     "memory_refresh_interval_minutes",
     "max_companion_memory_items",
@@ -1679,7 +1698,8 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_backup_external_image_api: ["backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
@@ -1708,7 +1728,7 @@ const featureSettingSections = {
     {
       title: "回复基座",
       note: "控制私聊接话策略和基础语气。",
-      keys: ["default_style"],
+      keys: ["default_style", "reply_style_prompt"],
     },
     {
       title: "记忆与表达",
@@ -2000,7 +2020,12 @@ const featureSettingSections = {
     {
       title: "在线图片 API",
       note: "作为 external 后端，或 auto 模式下本地忙时的备选后端。",
-      keys: ["EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds"],
+      keys: ["external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds"],
+    },
+    {
+      title: "备选在线图片 API",
+      note: "主在线 API 失败后先尝试这组配置，再回退本地后端。",
+      keys: ["enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds"],
     },
     {
       title: "画面风格",
@@ -2056,10 +2081,11 @@ const featureSettingTypes = {
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
   SMART_SILENCE_PROVIDER_ID: { type: "provider" },
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: { type: "provider" },
+  reply_style_prompt: { type: "textarea" },
   proactive_prompt_template: { type: "textarea" },
   proactive_persona_judge_send_threshold: { type: "number", min: 0, max: 100, step: 1 },
   proactive_persona_judge_cache_minutes: { type: "number", min: 5, max: 720, step: 5 },
-  natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 10, step: 1 },
+  natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   rest_backlog_max_messages: { type: "number", min: 1, max: 12, step: 1 },
@@ -2074,7 +2100,10 @@ const featureSettingTypes = {
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: { type: "provider" },
   segmented_proactive_chat_scope: { type: "select", options: [["all", "全部"], ["private", "仅私聊"], ["group", "仅群聊"]] },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"]] },
+  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"]] },
+  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"]] },
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
+  BACKUP_EXTERNAL_IMAGE_API_KEY: { type: "password" },
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
   segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
   segmented_proactive_send_as_forward: { type: "checkbox" },
@@ -3810,7 +3839,18 @@ function troubleshootingChainPreviewMarkup(type, result) {
     `;
   }
   const parts = [];
-  if (result.text_preview) parts.push(`<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>`);
+  if (result.original_text_preview || result.final_text_preview) {
+    const original = result.original_text_preview || result.text_preview || "";
+    const finalText = result.final_text_preview || result.text_preview || "";
+    parts.push(`
+      <details class="chain-test-steps chain-test-preview">
+        <summary>查看主动改写对比</summary>
+        ${original ? `<p><b>原候选：</b>${escapeHtml(original)}</p>` : ""}
+        ${finalText ? `<p><b>最终发送：</b>${escapeHtml(finalText)}</p>` : ""}
+      </details>
+    `);
+  }
+  if (result.text_preview && !result.final_text_preview) parts.push(`<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>`);
   if (result.prompt) parts.push(`<small class="path">提示词：${escapeHtml(result.prompt)}</small>`);
   return parts.join("");
 }
@@ -8498,7 +8538,9 @@ function proactiveAuditHtml(items) {
       item.reason_label ? `原因：${item.reason_label}` : (item.reason ? `原因：${item.reason}` : ""),
       item.reason_detail ? `为什么：${item.reason_detail}` : "",
       item.note ? `结果：${item.note}` : "",
-      item.text_preview ? `消息：${item.text_preview}` : "",
+      item.original_text_preview ? `原候选：${item.original_text_preview}` : "",
+      item.final_text_preview ? `最终发送：${item.final_text_preview}` : "",
+      item.text_preview && !item.final_text_preview ? `消息：${item.text_preview}` : "",
       item.has_image ? "包含图片" : "",
       item.extra_count ? `组件 ${item.extra_count}` : "",
       Number(item.duplicate_count || 0) > 1 ? `重复 ${item.duplicate_count} 次` : "",
@@ -11475,7 +11517,7 @@ const featureDetailGuides = {
   },
   enable_cycle_state: {
     summary: "作为拟人身体状态的一部分，偶尔生成生理期前、处于生理期或生理期后的状态底色。",
-    trigger: "拟人身体状态刷新时，且人格适合人类身体设定。",
+    trigger: "拟人身体状态刷新时，且生理期模拟开关已开启。",
     enabled: "当前扮演状态可能出现生理期相关描述，并轻微影响精力、语气、长短和节奏；不会当成真实日期或医学记录追踪。",
     disabled: "不会新增生理期状态；已有状态会按持续时间自然结束，之后回到“不处于生理期”。",
   },

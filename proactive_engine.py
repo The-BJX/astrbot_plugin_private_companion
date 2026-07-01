@@ -2903,6 +2903,14 @@ class ProactiveEngineMixin:
                 _safe_float(item.get("updated_ts"), 0),
             )
             previous["duplicate_count"] = _safe_int(previous.get("duplicate_count"), 1, 1) + 1
+            for key in ("text_preview", "original_text_preview", "final_text_preview", "image_path"):
+                if item.get(key):
+                    previous[key] = item.get(key)
+            if item.get("extra_count") is not None:
+                previous["extra_count"] = max(
+                    _safe_int(previous.get("extra_count"), 0, 0),
+                    _safe_int(item.get("extra_count"), 0, 0),
+                )
         if len(compacted) != len(log):
             log[:] = compacted[-160:]
 
@@ -2916,6 +2924,8 @@ class ProactiveEngineMixin:
         reason: str = "",
         action: str = "",
         text: str = "",
+        original_text: str = "",
+        final_text: str = "",
     ) -> str:
         now = _now_ts()
         audit_id = uuid.uuid4().hex[:12]
@@ -2942,6 +2952,8 @@ class ProactiveEngineMixin:
             "candidate_id": _single_line(user.get("planned_candidate_id"), 40),
             "umo": _single_line(user.get("umo"), 180),
             "text_preview": self._proactive_visible_text_preview(text) if text else "",
+            "original_text_preview": self._proactive_visible_text_preview(original_text) if original_text else "",
+            "final_text_preview": self._proactive_visible_text_preview(final_text) if final_text else "",
         }
         log = self._proactive_audit_log()
         signature = self._proactive_audit_signature(item)
@@ -2952,6 +2964,9 @@ class ProactiveEngineMixin:
                 continue
             existing["updated_ts"] = now
             existing["duplicate_count"] = _safe_int(existing.get("duplicate_count"), 1, 1) + 1
+            for key in ("text_preview", "original_text_preview", "final_text_preview"):
+                if item.get(key):
+                    existing[key] = item.get(key)
             return _single_line(existing.get("id"), 40) or audit_id
         log.append(item)
         self._compact_proactive_audit_log()
@@ -2969,6 +2984,8 @@ class ProactiveEngineMixin:
         extra_count: int | None = None,
         action: str = "",
         reason: str = "",
+        original_text: str = "",
+        final_text: str = "",
     ) -> None:
         if not audit_id:
             return
@@ -2981,6 +2998,10 @@ class ProactiveEngineMixin:
                 item["note"] = _single_line(note, 180)
             if text:
                 item["text_preview"] = self._proactive_visible_text_preview(text)
+            if original_text:
+                item["original_text_preview"] = self._proactive_visible_text_preview(original_text)
+            if final_text:
+                item["final_text_preview"] = self._proactive_visible_text_preview(final_text)
             if image_path:
                 item["image_path"] = _single_line(image_path, 260)
             if extra_count is not None:
@@ -5058,16 +5079,58 @@ class ProactiveEngineMixin:
             and self.external_image_api_key
             and self.external_image_api_model
         )
-        if not configured:
+        if configured:
+            checker = getattr(self, "_external_image_model_misconfiguration_note", None)
+            if callable(checker):
+                try:
+                    if not checker():
+                        return True
+                except Exception:
+                    return True
+            else:
+                return True
+        return self._backup_external_photo_available()
+
+    def _backup_external_photo_available(self) -> bool:
+        if not self.enable_photo_text_action:
+            return False
+        if not bool(getattr(self, "enable_backup_external_image_api", False)):
+            return False
+        if not (
+            getattr(self, "backup_external_image_api_base_url", "")
+            and getattr(self, "backup_external_image_api_key", "")
+            and getattr(self, "backup_external_image_api_model", "")
+        ):
             return False
         checker = getattr(self, "_external_image_model_misconfiguration_note", None)
-        if callable(checker):
-            try:
-                if checker():
-                    return False
-            except Exception:
-                pass
-        return True
+        if not callable(checker):
+            return True
+        keys = (
+            "external_image_api_platform",
+            "external_image_api_base_url",
+            "external_image_api_key",
+            "external_image_api_model",
+            "external_image_api_size",
+            "external_image_api_timeout_seconds",
+        )
+        backup_values = {
+            "external_image_api_platform": getattr(self, "backup_external_image_api_platform", "auto"),
+            "external_image_api_base_url": getattr(self, "backup_external_image_api_base_url", ""),
+            "external_image_api_key": getattr(self, "backup_external_image_api_key", ""),
+            "external_image_api_model": getattr(self, "backup_external_image_api_model", ""),
+            "external_image_api_size": getattr(self, "backup_external_image_api_size", "1024x1024"),
+            "external_image_api_timeout_seconds": getattr(self, "backup_external_image_api_timeout_seconds", 180),
+        }
+        old_values = {key: getattr(self, key, None) for key in keys}
+        try:
+            for key, value in backup_values.items():
+                setattr(self, key, value)
+            return not bool(checker())
+        except Exception:
+            return True
+        finally:
+            for key, value in old_values.items():
+                setattr(self, key, value)
 
     def _sdgen_photo_available(self) -> bool:
         if not self.enable_photo_text_action:
@@ -5534,7 +5597,7 @@ class ProactiveEngineMixin:
         if reason == "activity_share":
             motives = [
                 "刚刚碰到一个小片段，想和用户说一句",
-                "刚刚看到一个小东西，想发给用户看看",
+                "刚刚看到一个小东西，想分享一下",
                 "刚刚有个小想法，想告诉用户",
                 "脑子里忽然冒出一句没头没尾的话，想和用户说一下",
                 "刚刚那点小想法放着也没什么用，想和用户说一句",

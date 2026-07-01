@@ -1665,7 +1665,13 @@ class GroupObservationMixin:
             lines.append(
                 "群聊边界：私聊记忆、用户私聊偏好和内部记录只作避错背景,不要说到群里。"
             )
-        livingmemory_guidance = self._format_livingmemory_guidance(scope="group")
+        livingmemory_guidance = (
+            ""
+            if getattr(self, "_remember_you_should_defer_prompt_section", lambda *_args, **_kwargs: False)(
+                "livingmemory_guidance"
+            )
+            else self._format_livingmemory_guidance(scope="group")
+        )
         if livingmemory_guidance:
             lines.append(livingmemory_guidance)
         if len(lines) <= 1:
@@ -2539,6 +2545,15 @@ class GroupObservationMixin:
                 examples.append(f"{_single_line(item.get('name'), 18) or '群友'}: {text}")
         if not examples:
             return
+        acquired = await self._try_acquire_group_background_task(
+            group_id,
+            "group_slang",
+            now,
+            refresh_key="last_slang_summary_at",
+            refresh_seconds=self.group_slang_summary_minutes * 60,
+        )
+        if not acquired:
+            return
         web_evidence = await self._collect_group_slang_web_evidence(group_id, terms, examples)
         web_evidence_block = (
             "【联网参考】\n"
@@ -2578,15 +2593,6 @@ class GroupObservationMixin:
 
 入库标准：只输出 confidence >= 0.65 的词。无法达到就省略。
 """.strip()
-        acquired = await self._try_acquire_group_background_task(
-            group_id,
-            "group_slang",
-            now,
-            refresh_key="last_slang_summary_at",
-            refresh_seconds=self.group_slang_summary_minutes * 60,
-        )
-        if not acquired:
-            return
         try:
             raw = await self._llm_call(
                 prompt,
@@ -2726,26 +2732,105 @@ class GroupObservationMixin:
                 break
         if not picked_terms:
             return ""
-        lines: list[str] = []
-        for term in picked_terms:
-            query = f"群聊环境下的网络用语“{term}”是什么意思？"
-            try:
-                results = await searcher(query, umo=search_umo, topic="general")
-            except Exception as exc:
-                logger.debug("[PrivateCompanion] 群黑话联网参考搜索失败: group=%s term=%s err=%s", group_id, term, _single_line(exc, 120))
-                continue
-            hits = []
-            for item in results[:result_limit]:
+        now = _now_ts()
+        async with self._data_lock:
+            current = self._get_group(group_id)
+            web_state = current.setdefault("slang_web_search_state", {})
+            if not isinstance(web_state, dict):
+                web_state = {}
+                current["slang_web_search_state"] = web_state
+            per_term = web_state.setdefault("terms", {})
+            if not isinstance(per_term, dict):
+                per_term = {}
+                web_state["terms"] = per_term
+            cursor = _safe_int(web_state.get("cursor"), 0, 0)
+            ordered_terms = picked_terms[cursor % len(picked_terms):] + picked_terms[:cursor % len(picked_terms)]
+            selected_term = ""
+            cached_evidence = ""
+            for term in ordered_terms:
+                item = per_term.get(term)
                 if not isinstance(item, dict):
+                    item = {}
+                    per_term[term] = item
+                evidence = str(item.get("evidence") or "").strip()
+                if evidence and now - _safe_float(item.get("last_success_at"), 0.0, 0.0) < 7 * 24 * 3600:
+                    cached_evidence = evidence
                     continue
-                title = _single_line(item.get("title"), 80)
-                snippet = _single_line(item.get("snippet"), 180)
-                if not title and not snippet:
+                if now < _safe_float(item.get("retry_after"), 0.0, 0.0):
                     continue
-                hits.append(f"- {title}: {snippet}".strip())
-            if hits:
-                lines.append(f"{term}（搜索：{query}）:\n" + "\n".join(hits))
+                selected_term = term
+                break
+            if not selected_term and cached_evidence:
+                return cached_evidence[:1800]
+            if not selected_term:
+                return ""
+        lines: list[str] = []
+        term = selected_term
+        query = f"群聊环境下的网络用语“{term}”是什么意思？"
+        try:
+            results = await searcher(query, umo=search_umo, topic="general")
+        except Exception as exc:
+            results = []
+            self._last_web_search_error = _single_line(exc, 240)
+            logger.debug("[PrivateCompanion] 群黑话联网参考搜索失败: group=%s term=%s err=%s", group_id, term, _single_line(exc, 120))
+        error_text = _single_line(getattr(self, "_last_web_search_error", ""), 240)
+        if error_text and not results:
+            async with self._data_lock:
+                current = self._get_group(group_id)
+                web_state = current.setdefault("slang_web_search_state", {})
+                if isinstance(web_state, dict):
+                    per_term = web_state.setdefault("terms", {})
+                    if isinstance(per_term, dict):
+                        item = per_term.setdefault(term, {})
+                        if isinstance(item, dict):
+                            item["last_error"] = error_text
+                            item["retry_after"] = now + 30 * 60
+                    try:
+                        web_state["cursor"] = (picked_terms.index(term) + 1) % len(picked_terms)
+                    except ValueError:
+                        web_state["cursor"] = 0
+                    web_state["last_error"] = error_text
+                    web_state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._save_data_sync()
+            logger.info(
+                "[PrivateCompanion] 群黑话联网参考单词搜索失败并冷却: group=%s term=%s error=%s",
+                group_id,
+                term,
+                error_text,
+            )
+            return ""
+        hits = []
+        for item in results[:result_limit]:
+            if not isinstance(item, dict):
+                continue
+            title = _single_line(item.get("title"), 80)
+            snippet = _single_line(item.get("snippet"), 180)
+            if not title and not snippet:
+                continue
+            hits.append(f"- {title}: {snippet}".strip())
+        if hits:
+            lines.append(f"{term}（搜索：{query}）:\n" + "\n".join(hits))
+        async with self._data_lock:
+            current = self._get_group(group_id)
+            web_state = current.setdefault("slang_web_search_state", {})
+            if isinstance(web_state, dict):
+                per_term = web_state.setdefault("terms", {})
+                if isinstance(per_term, dict):
+                    item = per_term.setdefault(term, {})
+                    if isinstance(item, dict):
+                        item["last_search_at"] = now
+                        item["retry_after"] = 0
+                        item["last_error"] = ""
+                        if lines:
+                            item["last_success_at"] = now
+                            item["evidence"] = "\n".join(lines)[:1800]
+                try:
+                    web_state["cursor"] = (picked_terms.index(term) + 1) % len(picked_terms)
+                except ValueError:
+                    web_state["cursor"] = 0
+                web_state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._save_data_sync()
         if lines:
-            logger.info("[PrivateCompanion] 群黑话联网参考已收集: group=%s terms=%s", group_id, len(lines))
+            logger.info("[PrivateCompanion] 群黑话联网参考已收集: group=%s term=%s", group_id, term)
         return "\n".join(lines)[:1800]
 
