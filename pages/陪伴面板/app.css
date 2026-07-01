@@ -1687,6 +1687,11 @@ input[type="search"] {
   background: linear-gradient(180deg, rgba(255, 246, 224, 0.9), rgba(255, 255, 255, 0.9));
 }
 
+.provider-summary-card.mode {
+  border-color: rgba(58, 101, 82, 0.28);
+  background: linear-gradient(180deg, rgba(226, 241, 236, 0.92), rgba(255, 255, 255, 0.92));
+}
+
 .provider-summary-card span,
 .provider-summary-card small {
   color: var(--muted);
@@ -1698,6 +1703,58 @@ input[type="search"] {
   font-size: 20px;
   line-height: 1.2;
   overflow-wrap: anywhere;
+}
+
+.provider-config-mode-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid rgba(185, 200, 226, 0.82);
+  border-radius: var(--radius);
+  padding: 12px;
+  background:
+    radial-gradient(circle at top left, rgba(26, 75, 140, 0.10), transparent 32%),
+    rgba(255, 255, 255, 0.84);
+  box-shadow: var(--shadow-soft), var(--shadow-ring);
+}
+
+.provider-config-mode-card b {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.provider-config-mode-card span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.provider-config-mode {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(185, 200, 226, 0.86);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.provider-config-mode button {
+  height: 34px;
+  border-color: transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.provider-config-mode button.active {
+  border-color: rgba(26, 75, 140, 0.28);
+  background: var(--accent);
+  color: #fff;
 }
 
 .provider-toolbar {
@@ -1719,6 +1776,19 @@ input[type="search"] {
 
 .provider-toolbar input[type="search"] {
   width: 100%;
+}
+
+.provider-toolbar.is-quick-mode {
+  grid-template-columns: minmax(220px, 1fr);
+}
+
+.provider-toolbar.is-quick-mode #providerFilter,
+.provider-toolbar.is-quick-mode .provider-mode-switch {
+  display: none;
+}
+
+.provider-toolbar.is-quick-mode .provider-toolbar-actions {
+  justify-content: flex-start;
 }
 
 .provider-mode-switch,
@@ -3614,6 +3684,51 @@ input[type="search"] {
 
 .roleplay-studio {
   overflow: hidden;
+}
+
+.world-knowledge-brief {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.world-knowledge-brief section {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  min-height: 116px;
+  border: 1px solid rgba(26, 75, 140, 0.16);
+  border-radius: var(--radius);
+  padding: 13px 14px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(246, 249, 247, 0.78)),
+    var(--surface);
+  box-shadow: var(--shadow-ring);
+}
+
+.world-knowledge-brief b {
+  color: var(--accent-strong);
+  font-size: 14px;
+}
+
+.world-knowledge-brief span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.persona-source-card .module-form {
+  align-items: start;
+}
+
+.persona-source-card .module-form > label,
+.persona-source-card .module-form > .section-desc {
+  grid-column: 1 / -1;
+}
+
+.persona-source-card .module-form > .section-desc {
+  margin: 0;
 }
 
 .persona-draft-actions {
@@ -12102,6 +12217,15 @@ pre {
     grid-template-columns: minmax(220px, 1fr);
   }
 
+  .provider-config-mode-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .provider-config-mode {
+    width: fit-content;
+  }
+
   .provider-mode-switch,
   .provider-toolbar-actions {
     justify-content: flex-start;
@@ -12137,6 +12261,10 @@ pre {
   }
 
   .roleplay-form {
+    grid-template-columns: 1fr;
+  }
+
+  .world-knowledge-brief {
     grid-template-columns: 1fr;
   }
 
@@ -12348,13 +12476,19 @@ pre {
   }
 
   .provider-mode-switch,
+  .provider-config-mode,
   .provider-toolbar-actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .provider-mode-switch button,
+  .provider-config-mode button,
   .provider-toolbar-actions button {
+    width: 100%;
+  }
+
+  .provider-config-mode {
     width: 100%;
   }
 

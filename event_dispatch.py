@@ -2033,6 +2033,7 @@ class EventDispatchMixin:
                     texts.append(text)
         return {
             "active": True,
+            "kind": _single_line(buffer.get("kind"), 40),
             "first_ts": first_ts,
             "updated_ts": updated_ts,
             "remaining": max(0.0, target_ts - now),
@@ -2861,19 +2862,12 @@ class EventDispatchMixin:
         provider_id = self._task_provider(self.group_followup_judge_provider_id)
         if not provider_id:
             return None
-        recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
-        recent_lines = []
-        for item in recent[-8:]:
-            if not isinstance(item, dict):
-                continue
-            name = self._group_member_identity_label(
-                str(item.get("sender_id") or ""),
-                item.get("identity_name") or item.get("name"),
-                limit=20,
-            )
-            msg = _single_line(item.get("text"), 80)
-            if msg:
-                recent_lines.append(f"- {name}: {msg}")
+        flow_formatter = getattr(self, "_format_group_recent_flow_for_review", None)
+        recent_flow = (
+            flow_formatter(group, sender_id=sender_id, text=text, max_lines=10, max_chars=1200)
+            if callable(flow_formatter)
+            else ""
+        )
         prompt = f"""
 判断群聊里当前这句话是否仍然是在和 Bot 对话。
 
@@ -2882,13 +2876,14 @@ class EventDispatchMixin:
 已知：
 - 上一次明确和 Bot 对话的人：{self._group_member_identity_label(str(active.get('sender_id') or sender_id), active.get('sender_name'), limit=24)}
 - 上一次明确对 Bot 说的话：{_single_line(active.get('last_text'), 120)}
+- Bot 上一次回复：{_single_line(active.get('last_bot_reply'), 180) or "（未记录）"}
 - 当前发言者：{self._group_member_identity_label(sender_id, sender_name, limit=24)}
 - 当前发言者身份锚点：{self._group_member_identity_anchor_note(sender_id, sender_name, limit=120) or "无显示名冲突"}
 - 当前消息：{_single_line(text, 180)}
 - 规则初判：trigger={_single_line(scene.get('trigger'), 40)} talking_to={_single_line(scene.get('talking_to'), 40)}
 
-最近群聊：
-{chr(10).join(recent_lines) or "（无）"}
+真实最近群聊（按时间顺序，包含当前句；判断时必须参考整段聊天流，不要只看上一条唤醒消息）：
+{recent_flow or "（无）"}
 
 判断标准：
 - 如果当前消息是在承接 Bot 的回答、追问 Bot、纠正 Bot、继续问 Bot，回答 YES。

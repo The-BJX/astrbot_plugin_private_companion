@@ -3146,34 +3146,56 @@
     "default": "",
     "invisible": true
   },
+  "provider_config_mode": {
+    "description": "Legacy flat config: 模型配置模式",
+    "type": "string",
+    "default": "",
+    "options": [
+      "",
+      "quick",
+      "precision"
+    ],
+    "invisible": true
+  },
   "model_assignment_config": {
     "description": "模型分流",
     "type": "object",
-    "hint": "为不同任务指定 Provider；留空会按陪伴通用模型、主模型或 AstrBot 默认模型回退。",
+    "hint": "选择快速配置时只使用快速模型入口并隐藏细分分流；选择精准配置时使用各任务单独 Provider，快速模型入口不参与运行态。",
     "items": {
+      "provider_config_mode": {
+        "description": "模型配置模式",
+        "type": "string",
+        "hint": "快速配置：只填写快速响应、复杂推理、创作和插件识图，运行时按这几项覆盖任务分流。精准配置：逐项指定下方任务 Provider，快速模型入口不参与回退。两种模式互斥，切换不会清空另一套旧值。留空时会自动推断：已有精准分流则沿用精准配置，否则使用快速配置。",
+        "default": "",
+        "options": [
+          "",
+          "quick",
+          "precision"
+        ]
+      },
       "FAST_RESPONSE_PROVIDER_ID": {
         "description": "快速响应模型",
         "type": "string",
-        "hint": "快速配置入口。用于低延迟判断、轻量复核、群聊续接、语音短句、工具转述、新闻/搜索整理等短任务；具体单项模型已填写时优先使用单项配置。",
+        "hint": "快速配置入口。用于低延迟判断、轻量复核、群聊续接、语音短句、工具转述、新闻/搜索整理等短任务；仅在模型配置模式为“快速配置”时参与运行态。",
         "default": "",
         "_special": "select_provider"
       },
       "COMPLEX_REASONING_PROVIDER_ID": {
         "description": "复杂推理模型",
         "type": "string",
-        "hint": "快速配置入口。用于主模型兜底、日程生成/细化、长期记忆整理、关系分析、合并消息转述等更需要理解和结构化能力的任务；具体单项模型已填写时优先使用单项配置。",
+        "hint": "快速配置入口。用于主模型兜底、日程生成/细化、长期记忆整理、关系分析、合并消息转述等更需要理解和结构化能力的任务；仅在模型配置模式为“快速配置”时参与运行态。",
         "default": "",
         "_special": "select_provider"
       },
       "CREATIVE_MODEL_PROVIDER_ID": {
         "description": "创作模型",
         "type": "string",
-        "hint": "快速配置入口。用于私下创作、创作大纲/审校、日记梦境和生图提示词等更偏文风、画面感和表达质量的任务；具体单项模型已填写时优先使用单项配置。",
+        "hint": "快速配置入口。用于私下创作、创作大纲/审校、日记梦境和生图提示词等更偏文风、画面感和表达质量的任务；仅在模型配置模式为“快速配置”时参与运行态。",
         "default": "",
         "_special": "select_provider"
       },
       "MAI_STYLE_PROVIDER_ID": {
-        "description": "私聊互动策略通用模型（留空跟随主模型）",
+        "description": "互动与表达基座通用模型（留空跟随主模型）",
         "type": "string",
         "hint": "作为新增陪伴能力的通用兜底模型。下方单项模型留空时会先回退到这里，再回退到 LLM_PROVIDER_ID/AstrBot 默认模型。",
         "default": "",
@@ -3322,7 +3344,7 @@
       "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": {
         "description": "群聊续接判断模型",
         "type": "string",
-        "hint": "用于群聊续接判断：判断用户后续没 @ 的发言是否仍在和 Bot 对话。适合便宜、低延迟、指令遵循稳定、YES/NO 分类准确的小模型。留空时会先跟随快速响应模型；快速响应模型也留空时只使用规则判断。",
+        "hint": "用于群聊续接判断：判断用户后续没 @ 的发言是否仍在和 Bot 对话。适合便宜、低延迟、指令遵循稳定、YES/NO 分类准确的小模型。快速模式会跟随快速响应模型；精准模式留空时只使用规则判断。",
         "default": "",
         "_special": "select_provider"
       },
@@ -3336,7 +3358,7 @@
       "PLUGIN_VISION_PROVIDER_ID": {
         "description": "插件识图模型（私聊/合并消息/识屏）",
         "type": "string",
-        "hint": "用于插件自己的通用视觉理解任务：私聊单图/表情包转述、引用图片、合并消息图片和识屏。夹层阅读不使用这里；它有单独的夹层阅读视觉模型。留空时会先尝试 AstrBot 本体图片转述模型，再回退到工具结果转述模型或主模型。",
+        "hint": "快速配置的视觉入口。用于插件自己的通用视觉理解任务：私聊单图/表情包转述、引用图片、合并消息图片和识屏；快速模式下也作为夹层阅读视觉入口。精准模式下请使用下方各视觉/外界信息分流项。",
         "default": "",
         "_special": "select_provider"
       },
@@ -4230,9 +4252,9 @@
     "hint": "启用私聊陪伴策略与用户关系理解。",
     "items": {
       "enable_mai_style_integration": {
-        "description": "启用私聊互动策略",
+        "description": "启用互动与表达基座",
         "type": "bool",
-        "hint": "开启后，被动私聊回复会在 AstrBot 默认人格之上注入互动边界、偏好/表达习惯和简短接话策略。本层不写身份事实，不替换 AstrBot 人格。",
+        "hint": "开启后，普通私聊/群聊被动回复和部分主动消息会在 AstrBot 默认人格之上参考回复风格提示词、互动边界、偏好/表达习惯和简短接话策略。本层不写身份事实，不替换 AstrBot 人格。",
         "default": true
       }
     },

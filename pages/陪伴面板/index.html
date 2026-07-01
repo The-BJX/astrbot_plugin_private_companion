@@ -90,7 +90,7 @@
       <nav class="annotations" aria-label="视图">
         <div class="annot-axis" aria-hidden="true"></div>
         <button class="tab is-active" data-tab="dashboard"><i>01</i><span>总览</span></button>
-        <button class="tab" data-tab="roleplay"><i>02</i><span>角色设定</span></button>
+        <button class="tab" data-tab="roleplay"><i>02</i><span>世界知识</span></button>
         <button class="tab" data-tab="private"><i>03</i><span>私聊</span></button>
         <button class="tab" data-tab="group"><i>04</i><span>群聊</span></button>
         <button class="tab" data-tab="worldbook"><i>05</i><span>关系网</span></button>
@@ -172,32 +172,46 @@
       <section class="panel" id="panel-roleplay">
         <div class="section-head">
           <div>
-            <h2>角色和世界观设定</h2>
-            <span class="muted">集中维护本插件用于日程、状态、主动行为、识图和世界观翻译的设定补充</span>
+            <h2>世界知识</h2>
+            <span class="muted">维护陪伴插件使用的背景资料；真正决定聊天人格的是 AstrBot 主回复人格。</span>
           </div>
         </div>
-        <article class="module-card">
+        <div class="world-knowledge-brief" aria-label="人格与世界知识区别">
+          <section>
+            <b>主回复人格</b>
+            <span>AstrBot 当前人格或插件指定人格，决定 Bot 在私聊和群聊里“是谁、怎么说话”。</span>
+          </section>
+          <section>
+            <b>世界知识</b>
+            <span>本页资料只作为日程、状态、主动动机、日记、识图、生图和世界观转写的背景补充。</span>
+          </section>
+          <section>
+            <b>群聊边界</b>
+            <span>这里不会直接覆盖群聊人格；只有相关功能注入背景时才会被当作线索参考。</span>
+          </section>
+        </div>
+        <article class="module-card persona-source-card">
           <div class="module-card-head">
             <div>
-              <h2>主回复人格</h2>
-              <span class="section-desc">这里决定 Bot 以谁的主身份说话；留空则继承 AstrBot 当前默认人格。</span>
+              <h2>主回复人格来源</h2>
+              <span class="section-desc">这里用于查看聊天人格来源，不是编辑入口；需要修改时请到 AstrBot 人格或插件配置里调整。</span>
             </div>
-            <span class="module-badge">Persona</span>
+            <span class="module-badge">只读</span>
           </div>
           <div class="module-form">
-            <label>当前使用人格
+            <label>当前聊天人格
               <input id="currentPersonaDisplay" readonly value="读取中..." />
             </label>
-            <p class="section-desc">和下方“设定工作台”的区别：这里是主回复人格，会影响私聊被动回复、关系评估和主动消息；下方角色设定补充只给日程、状态、日记、识图和生活背景使用，不应拿来覆盖主聊天人格。</p>
-            <p class="section-desc">如需修改，请到 AstrBot 插件配置页，打开“我会永远陪着你”的配置项，在“插件指定人格 ID”里使用人格选择器选择；留空即继承 AstrBot 当前默认人格。</p>
+            <p class="section-desc">主回复人格会影响被动回复、群聊人格、关系评估和主动消息口吻；本页下方的资料只是背景知识，不应拿来当完整人格覆盖它。</p>
+            <p class="section-desc">如需指定人格，请到 AstrBot 插件配置页，打开“我会永远陪着你”的配置项，在“插件指定人格 ID”里使用人格选择器选择；留空即继承 AstrBot 当前默认人格。</p>
             <div class="persona-draft-actions">
               <div class="persona-draft-scope" aria-label="草稿生成范围">
-                <label><input type="checkbox" data-roleplay-draft-scope="persona" checked /> 角色设定</label>
-                <label><input type="checkbox" data-roleplay-draft-scope="world" /> 世界观设定</label>
-                <label><input type="checkbox" data-roleplay-draft-scope="user" /> 主人/用户设定</label>
+                <label><input type="checkbox" data-roleplay-draft-scope="persona" checked /> 角色资料</label>
+                <label><input type="checkbox" data-roleplay-draft-scope="world" /> 世界观资料</label>
+                <label><input type="checkbox" data-roleplay-draft-scope="user" /> 用户与关系</label>
               </div>
-              <button type="button" id="generateRoleplayDraftBtn">根据主回复人格生成草稿</button>
-              <span>只抽取明确写在主回复人格里的内容；生成后先预览，不会自动保存。</span>
+              <button type="button" id="generateRoleplayDraftBtn">提取为世界知识草稿</button>
+              <span>只抽取主回复人格里明确写出的信息；生成后先预览，不会自动保存，也不会修改人格。</span>
             </div>
             <div id="roleplayPersonaDraftPanel" class="persona-draft-panel" hidden></div>
           </div>
@@ -205,10 +219,10 @@
         <article class="roleplay-studio module-card" data-roleplay-mode="standard">
           <div class="module-card-head">
             <div>
-              <h2>设定工作台</h2>
-              <span class="section-desc">不会覆盖 AstrBot 主人格；这里是给陪伴插件使用的角色和生活背景补充。</span>
+              <h2>世界知识工作台</h2>
+              <span class="section-desc">把角色资料、世界观和用户关系整理成插件可引用的背景材料；不会覆盖 AstrBot 主人格。</span>
             </div>
-            <span class="module-badge">Roleplay</span>
+            <span class="module-badge">知识</span>
           </div>
           <div class="roleplay-mode-switch" role="group" aria-label="设定填写模式">
             <button type="button" data-roleplay-mode="freeform">旧版文案</button>
@@ -219,15 +233,15 @@
               <div class="persona-card-head">
                 <span class="persona-avatar" aria-hidden="true">设</span>
                 <div>
-                  <h3>角色设定补充</h3>
-                  <p>她今天怎样生活、有哪些外貌/世界观/日常细节；这是陪伴插件的背景材料，不是 AstrBot 主人格。</p>
+                  <h3>角色资料</h3>
+                  <p>外观、身份、日常习惯和关键细节；供日程、状态、识图、生图和主动行为参考，不是聊天人格全文。</p>
                 </div>
                 <button type="button" class="roleplay-example-btn" data-roleplay-example="persona">填入示例</button>
               </div>
               <input name="bot_name" type="hidden" />
               <input name="default_style" type="hidden" />
               <input name="roleplay_knowledge_source_ids" type="hidden" />
-              <label class="roleplay-textarea roleplay-freeform">角色设定补充
+              <label class="roleplay-textarea roleplay-freeform">角色资料补充
                 <textarea name="schedule_persona_prompt" rows="10" placeholder="姓名：
 种族：
 生日：
@@ -274,18 +288,18 @@
             <section class="world-blueprint">
               <div class="blueprint-head">
                 <div>
-                  <span>World Blueprint</span>
+                  <span>世界蓝图</span>
                   <h3>世界观蓝图</h3>
                 </div>
                 <button type="button" class="roleplay-example-btn" data-roleplay-example="world">填入示例</button>
                 <label>适配模式
                   <select name="worldview_adaptation_mode">
-                    <option value="auto">auto</option>
-                    <option value="modern">modern</option>
-                    <option value="fantasy">fantasy</option>
-                    <option value="sci_fi">sci_fi</option>
-                    <option value="custom">custom</option>
-                    <option value="off">off</option>
+                    <option value="auto">自动</option>
+                    <option value="modern">现代日常</option>
+                    <option value="fantasy">幻想世界</option>
+                    <option value="sci_fi">科幻世界</option>
+                    <option value="custom">自定义</option>
+                    <option value="off">关闭</option>
                   </select>
                 </label>
               </div>
@@ -342,14 +356,14 @@ QQ空间 = 公开札记
 
             <section class="roleplay-user-card">
               <div>
-                <h3>用户</h3>
-                <p>角色如何称呼用户、如何理解彼此关系，以及平时怎样相处。</p>
+                <h3>用户与关系资料</h3>
+                <p>稳定称呼、关系和相处方式；用于理解这位用户，不会覆盖群聊里其他人的身份。</p>
               </div>
               <button type="button" class="roleplay-example-btn" data-roleplay-example="user">填入示例</button>
               <div class="roleplay-user-fields">
                 <label>对用户的称呼 <input name="default_nickname" /></label>
               </div>
-              <label class="roleplay-textarea roleplay-freeform">用户补充信息
+              <label class="roleplay-textarea roleplay-freeform">用户与关系补充
                 <textarea name="roleplay_user_profile_prompt" rows="5" placeholder="对用户的称呼：
 用户性别：
 用户生日：
@@ -368,7 +382,7 @@ QQ空间 = 公开札记
               </div>
             </section>
 
-            <button type="submit">保存角色设定</button>
+            <button type="submit">保存世界知识</button>
           </form>
         </article>
       </section>
@@ -1321,6 +1335,16 @@ QQ空间 = 公开札记
         </div>
         <div id="providerSummary" class="provider-summary"></div>
         <div id="providerFlow" class="provider-flow"></div>
+        <div class="provider-config-mode-card">
+          <div>
+            <b>模型配置模式</b>
+            <span id="providerConfigModeHint">快速配置和精准配置互斥，保存时只写入当前模式下可见的模型。</span>
+          </div>
+          <div class="provider-config-mode" aria-label="模型配置模式">
+            <button type="button" data-provider-config-mode="quick" class="active">快速配置</button>
+            <button type="button" data-provider-config-mode="precision">精准配置</button>
+          </div>
+        </div>
         <div class="provider-toolbar">
           <input id="providerFilter" type="search" placeholder="筛选模型名称 / 配置键 / 用途 / 低延迟 / 效果" />
           <div class="provider-mode-switch" aria-label="模型配置筛选">
@@ -1341,6 +1365,6 @@ QQ空间 = 公开札记
     </section>
   </main>
 
-  <script src="./app.js?v=20260627-outfit-after-plan2"></script>
+  <script src="./app.js?v=20260702-provider-mode"></script>
 </body>
 </html>

@@ -28,6 +28,7 @@ const state = {
   selectedFeatureKey: "",
   providerFilter: "",
   providerMode: "all",
+  providerConfigMode: "",
   providerDraft: {},
   proactiveCandidateFilter: "all",
   imageCacheItems: [],
@@ -137,6 +138,13 @@ const optionalNoFallbackProviderKeys = new Set([
   "NARRATION_PROVIDER_ID",
 ]);
 
+const quickProviderKeys = new Set([
+  "FAST_RESPONSE_PROVIDER_ID",
+  "COMPLEX_REASONING_PROVIDER_ID",
+  "CREATIVE_MODEL_PROVIDER_ID",
+  "PLUGIN_VISION_PROVIDER_ID",
+]);
+
 const providerPreferenceMeta = {
   speed: {
     label: "低延迟优先",
@@ -176,6 +184,78 @@ const providerPassiveImpactMeta = {
 function providerNeedsLowLatency(key) {
   const guide = providerGuides[key] || {};
   return guide.preference === "speed" || ["direct", "conditional"].includes(guide.passiveImpact || "");
+}
+
+function normalizeProviderConfigMode(value) {
+  const text = String(value || "").trim().toLowerCase();
+  const aliases = {
+    fast: "quick",
+    simple: "quick",
+    "快速": "quick",
+    "快速配置": "quick",
+    precise: "precision",
+    advanced: "precision",
+    "精准": "precision",
+    "精准配置": "precision",
+    "分流": "precision",
+  };
+  const normalized = aliases[text] || text;
+  return normalized === "precision" ? "precision" : "quick";
+}
+
+function inferProviderConfigMode(overview = state.overview || {}) {
+  const settings = overview.settings || {};
+  const explicit = String(settings.provider_config_mode || "").trim();
+  if (explicit) return normalizeProviderConfigMode(explicit);
+  const providers = {
+    ...(overview.providers || {}),
+    ...(state.providerDraft || {}),
+  };
+  const hasPrecisionProvider = Object.keys(providerLabels)
+    .some((key) => !quickProviderKeys.has(key) && visibleConfigKey(key) && Boolean(providers[key]));
+  return hasPrecisionProvider ? "precision" : "quick";
+}
+
+function currentProviderConfigMode() {
+  return normalizeProviderConfigMode(state.providerConfigMode || inferProviderConfigMode());
+}
+
+function providerAllowedInCurrentMode(key) {
+  const mode = currentProviderConfigMode();
+  return mode === "quick" ? quickProviderKeys.has(key) : !quickProviderKeys.has(key);
+}
+
+function syncProviderConfigModeControls() {
+  const mode = currentProviderConfigMode();
+  const quick = mode === "quick";
+  document.querySelectorAll("[data-provider-config-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.providerConfigMode === mode);
+  });
+  const toolbar = document.querySelector(".provider-toolbar");
+  toolbar?.classList.toggle("is-quick-mode", quick);
+  const filter = document.getElementById("providerFilter");
+  if (filter && quick) filter.value = "";
+  document.querySelectorAll("[data-provider-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.providerMode === (state.providerMode || "all"));
+  });
+  const hint = document.getElementById("providerConfigModeHint");
+  if (hint) {
+    hint.textContent = quick
+      ? "快速配置只显示 4 个场景模型；细分任务会按运行态自动套用这些入口。"
+      : "精准配置显示各任务单独 Provider；快速入口不会参与本模式保存。";
+  }
+}
+
+function setProviderConfigMode(mode, { render = true } = {}) {
+  state.providerConfigMode = normalizeProviderConfigMode(mode);
+  if (state.providerConfigMode === "quick") {
+    state.providerMode = "all";
+    state.providerFilter = "";
+    const filter = document.getElementById("providerFilter");
+    if (filter) filter.value = "";
+  }
+  syncProviderConfigModeControls();
+  if (render) renderProviders();
 }
 
 function isPrivateReadingAvailable() {
@@ -923,7 +1003,7 @@ const configLabels = {
   plugin_specific_persona_id: "插件指定人格 ID",
   private_user_aliases: "私聊身份别名归并",
   private_user_delivery_aliases: "私聊主动发送目标映射",
-  schedule_persona_prompt: "角色设定补充",
+  schedule_persona_prompt: "角色资料补充",
   schedule_worldview_prompt: "世界观/生活背景",
   roleplay_user_profile_prompt: "用户与关系补充",
   max_daily_messages: "每日主动上限",
@@ -1272,10 +1352,10 @@ const configDescriptions = {
   proactive_persona_judge_cache_minutes: "同一主动计划在该时间内复用模型判定，减少重复调用；计划内容、语义或触发来源变化后会自动失效。",
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
   reply_style_prompt: "注入到普通被动回复和主动消息生成中的表达约束，适合写句数、简洁度、语言和社交媒体口语习惯；复杂问题或用户要求详细说明时，可在这里允许模型放宽。",
-  plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于角色设定补充，它会影响私聊被动回复和关系判断。",
+  plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于世界知识，它会影响私聊被动回复、群聊人格和关系判断。",
   private_user_aliases: "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射，例如：688C2CE7...=100012345。",
   private_user_delivery_aliases: "只改变主动消息/主动测试的发送出口，不改变记忆归属。每行一个映射，例如：大号QQ=小号QQ。",
-  schedule_persona_prompt: "给陪伴插件的日程、状态、主动行为、识图和创作提供角色补充；不会覆盖 AstrBot 主人格。",
+  schedule_persona_prompt: "给陪伴插件的日程、状态、主动行为、识图、生图和创作提供角色资料补充；不会覆盖 AstrBot 主人格或群聊人格。",
   schedule_worldview_prompt: "给陪伴插件判断生活背景和世界规则，适合写所在世界、日常规则、居住/学校/城市环境和与用户的生活关系。",
   roleplay_user_profile_prompt: "描述角色如何称呼用户、用户身份、彼此关系和相处方式；不会作为图片自我识别的外观线索。",
   humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
@@ -2888,6 +2968,7 @@ function applyOverviewData(overview) {
   state.overview = overview;
   hydrateTokenStatsFromOverview(overview);
   state.featureDraft = featureDraftFromOverview(overview);
+  state.providerConfigMode = inferProviderConfigMode(overview);
 }
 
 function applyUserGroupLists(users, groups) {
@@ -3134,7 +3215,7 @@ function renderDashboardPulse() {
       layout: "wide compact",
       label: "下一次主动",
       value: nextUser ? (nextUser.nickname || nextUser.user_id) : "暂无计划",
-      note: nextUser ? `${nextUser.next_proactive} · ${nextUser.planned_action || "message"}` : `${proactiveCounts.accepted || 0} 个候选已进入计划`,
+      note: nextUser ? `${nextUser.next_proactive} · ${proactiveActionLabel(nextUser.planned_action || "message")}` : `${proactiveCounts.accepted || 0} 个候选已进入计划`,
       jump: "proactive",
     },
     {
@@ -3468,10 +3549,10 @@ function renderUxReviewPanel() {
   const items = [
     {
       level: personaReady && worldReady && userReady ? "ok" : "warn",
-      title: "角色设定仍是最大收益点",
+      title: "世界知识仍是最大收益点",
       text: personaReady && worldReady && userReady
-        ? (roleFilled >= 6 ? `角色 ${roleFilled}/8 项、世界观和用户关系都有内容` : "旧版文案较完整；标准化字段可按需补齐")
-        : `角色 ${roleFilled}/8 项；建议补齐外貌识别点、爱好、禁忌和用户关系`,
+        ? (roleFilled >= 6 ? `角色资料 ${roleFilled}/8 项、世界观和用户关系都有内容` : "旧版文案较完整；标准化字段可按需补齐")
+        : `角色资料 ${roleFilled}/8 项；建议补齐外貌识别点、爱好、禁忌和用户关系`,
       tab: "roleplay",
     },
     {
@@ -3740,7 +3821,7 @@ function troubleshootingFaqMarkup(data = {}) {
       meta: proactiveMeta,
       body: [
         "先确认私聊对象已启用，并且没有处在静默、休息、冷却、每日上限、未回复降频或主动人格判定拦截中。",
-        "再看上方“最近问题”和主动审计记录：如果显示 dropped/deferred，通常是时间窗、关系压力、内容重复或链路依赖不可用。",
+        "再看上方“最近问题”和主动审计记录：如果显示“已放弃/已延后”，通常是时间窗、关系压力、内容重复或链路依赖不可用。",
         "最直接的验证方式是点“测试主动消息”，它会预约一次临时主动，检查生成、复核、发送和归档是否完整。",
       ],
       actions: [
@@ -8868,8 +8949,28 @@ function proactiveStatusLabel(status) {
     accepted: "已计划",
     sent: "已发送",
     blocked: "已拦截",
+    deferred: "已延后",
+    dropped: "已放弃",
+    cancelled: "已取消",
+    failed: "失败",
+    running: "执行中",
+    scheduled: "已登记",
+    due: "已到点",
+    overdue: "超时未发",
+    obsolete: "旧记录",
     expired: "已过期",
   }[status] || status || "未知";
+}
+
+function proactiveActionLabel(action) {
+  return {
+    message: "文字消息",
+    photo_text: "拍照/生图",
+    poke: "戳一戳",
+    voice: "语音",
+    screen_peek: "识屏",
+    quote: "引用回复",
+  }[action] || action || "文字消息";
 }
 
 function renderCreativeProjectCard(item) {
@@ -9825,13 +9926,13 @@ function applyRoleplayExample(kind) {
 
 async function generateRoleplayDraftFromPersona(button) {
   setActionBusy(button, true);
-  showToast("正在读取主回复人格并生成草稿...");
+  showToast("正在读取主回复人格并提取世界知识草稿...");
   try {
     const scopes = selectedRoleplayDraftScopes();
     const result = await postJson("/roleplay/draft_from_persona", { scopes });
     state.roleplayPersonaDraft = result || null;
     renderRoleplayPersonaDraftPanel();
-    showToast("草稿已生成，请先预览再填入");
+    showToast("世界知识草稿已生成，请先预览再填入");
   } catch (error) {
     showToast(`生成失败：${error.message}`, "error");
   } finally {
@@ -9853,9 +9954,9 @@ function renderRoleplayPersonaDraftPanel() {
   const draft = result.draft || {};
   const scopes = Array.isArray(result.scopes) ? result.scopes : [];
   const rows = [
-    ...roleplayDraftPartRows(draft.persona_parts, roleplayPersonaParts, "角色"),
-    ...roleplayDraftPartRows(draft.world_parts, roleplayWorldParts, "世界观"),
-    ...roleplayDraftPartRows(draft.user_parts, roleplayVisionParts, "主人/用户"),
+    ...roleplayDraftPartRows(draft.persona_parts, roleplayPersonaParts, "角色资料"),
+    ...roleplayDraftPartRows(draft.world_parts, roleplayWorldParts, "世界观资料"),
+    ...roleplayDraftPartRows(draft.user_parts, roleplayVisionParts, "用户与关系"),
     ...roleplayTranslationParts.map((label) => ["翻译", label, draft.translations?.[label] || ""]).filter(([, , value]) => String(value || "").trim()),
   ];
   const imageHint = String(draft.image_self_recognition_hint || "").trim();
@@ -9865,7 +9966,7 @@ function renderRoleplayPersonaDraftPanel() {
   panel.innerHTML = `
     <header>
       <div>
-        <b>主回复人格草稿</b>
+        <b>世界知识草稿</b>
         <span>${escapeHtml(roleplayDraftScopeLabel(scopes))} · ${escapeHtml(result.persona_id ? `指定人格：${result.persona_id}` : "继承 AstrBot 默认人格")} · ${escapeHtml(result.provider_id || "主模型")} · 来源 ${escapeHtml(result.source_chars || 0)} 字</span>
       </div>
       <div class="persona-draft-panel-actions">
@@ -9885,7 +9986,7 @@ function renderRoleplayPersonaDraftPanel() {
           </section>
         `).join("")}
       </div>
-    ` : `<div class="empty small">主模型没有抽取到足够明确的字段。可以换一个写得更具体的主回复人格后再试。</div>`}
+    ` : `<div class="empty small">主模型没有抽取到足够明确的世界知识字段。可以换一个写得更具体的主回复人格后再试。</div>`}
     ${notes.length ? `<div class="persona-draft-notes">${notes.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
   `;
   panel.querySelector("[data-roleplay-draft-close]")?.addEventListener("click", () => {
@@ -9894,7 +9995,7 @@ function renderRoleplayPersonaDraftPanel() {
   panel.querySelectorAll("[data-roleplay-draft-apply]").forEach((control) => {
     control.addEventListener("click", () => {
       const overwrite = control.dataset.roleplayDraftApply === "overwrite";
-      if (overwrite && !requireSecondClick(control, "roleplay-draft-overwrite", "再次点击会覆盖当前设定工作台里对应范围的草稿", "再次点击覆盖")) {
+      if (overwrite && !requireSecondClick(control, "roleplay-draft-overwrite", "再次点击会覆盖当前世界知识工作台里对应范围的草稿", "再次点击覆盖")) {
         return;
       }
       applyRoleplayPersonaDraft(overwrite);
@@ -9912,11 +10013,11 @@ function roleplayDraftPartRows(source, parts, group) {
 function roleplayDraftScopeLabel(scopes) {
   const selected = new Set(scopes || []);
   const labels = [
-    selected.has("persona") ? "角色设定" : "",
-    selected.has("world") ? "世界观设定" : "",
-    selected.has("user") ? "主人/用户设定" : "",
+    selected.has("persona") ? "角色资料" : "",
+    selected.has("world") ? "世界观资料" : "",
+    selected.has("user") ? "用户与关系" : "",
   ].filter(Boolean);
-  return labels.length ? `范围：${labels.join("、")}` : "范围：角色设定";
+  return labels.length ? `范围：${labels.join("、")}` : "范围：角色资料";
 }
 
 function applyRoleplayPersonaDraft(overwrite = false) {
@@ -9948,7 +10049,7 @@ function applyRoleplayPersonaDraft(overwrite = false) {
   syncRoleplayStandardFieldsToFreeform();
   const form = document.getElementById("roleplayProfileForm");
   if (changed && form) markModuleFormDirty(form);
-  showToast(changed ? `已填入 ${changed} 项，请检查后保存角色设定` : "没有可填入的新字段");
+  showToast(changed ? `已填入 ${changed} 项，请检查后保存世界知识` : "没有可填入的新字段");
 }
 
 function fillRoleplayDraftControl(selector, value, overwrite = false) {
@@ -12382,11 +12483,13 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
 }
 
 function renderProviders() {
+  syncProviderConfigModeControls();
   const providers = providerValuesForRender();
   renderProviderSummary(providers);
   renderProviderFlow(providers);
   const entries = Object.entries(providerLabels)
     .filter(([key]) => visibleConfigKey(key))
+    .filter(([key]) => providerAllowedInCurrentMode(key))
     .filter(([key, label]) => providerMatchesFilter(key, label, providers));
   const groups = providerGroups
     .map((group) => {
@@ -12515,7 +12618,9 @@ function providerMatchesFilter(key, label, providers) {
 }
 
 function renderProviderSummary(providers) {
-  const keys = Object.keys(providerLabels).filter((key) => visibleConfigKey(key));
+  const keys = Object.keys(providerLabels)
+    .filter((key) => visibleConfigKey(key))
+    .filter((key) => providerAllowedInCurrentMode(key));
   const configured = keys.filter((key) => Boolean(providers[key])).length;
   const inherited = keys.filter((key) => !providers[key] && !noFallbackProviderKeys.has(key) && !optionalNoFallbackProviderKeys.has(key)).length;
   const requiredMissing = keys.filter((key) => !providers[key] && noFallbackProviderKeys.has(key)).length;
@@ -12523,11 +12628,14 @@ function renderProviderSummary(providers) {
   const passiveSensitive = keys.filter((key) => providerGuides[key]?.passiveImpact === "direct").length;
   const speedRecommended = keys.filter((key) => providerNeedsLowLatency(key)).length;
   const qualityRecommended = keys.filter((key) => providerGuides[key]?.preference === "quality").length;
-  const vision = providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述";
+  const providerConfigMode = currentProviderConfigMode();
+  const vision = providerConfigMode === "quick"
+    ? (providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述")
+    : (providers.PRIVATE_READING_VISION_PROVIDER_ID || providers.NARRATION_PROVIDER_ID || "精准分流 / 默认链路");
   $("#providerSummary").innerHTML = `
     <div class="provider-cost-notice">
       <b>成本提醒</b>
-      <span>火山方舟协作计划免费额度将在 2026-06-30 结束。使用火山方舟 Provider 时，请检查每日 Token 限额和后台任务开关，注意成本控制。</span>
+      <span>火山方舟协作计划免费额度已延期到 2026-07-31 左右，具体以控制台/官方活动页为准。使用火山方舟 Provider 时，请检查每日 Token 限额和后台任务开关，注意成本控制。</span>
     </div>
     <div class="provider-summary-card strong">
       <span>单独配置</span>
@@ -12569,7 +12677,7 @@ function renderProviderSummary(providers) {
     <div class="provider-summary-card">
       <span>视觉通道</span>
       <b>${escapeHtml(vision)}</b>
-      <small>图片、识屏与素材理解</small>
+      <small>${escapeHtml(providerConfigMode === "quick" ? "图片、识屏与素材理解" : "精准模式不使用快速视觉入口")}</small>
     </div>
   `;
 }
@@ -12696,6 +12804,11 @@ function bindProviderToolbar() {
       renderProviders();
     });
   }
+  document.querySelectorAll("[data-provider-config-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setProviderConfigMode(button.dataset.providerConfigMode || "quick");
+    });
+  });
   document.querySelectorAll("[data-provider-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       state.providerMode = button.dataset.providerMode || "all";
@@ -12747,29 +12860,40 @@ async function testProvider(key) {
 }
 
 function renderProviderFlow(providers) {
+  const mode = currentProviderConfigMode();
   const fast = providers.FAST_RESPONSE_PROVIDER_ID || "未配置";
   const complex = providers.COMPLEX_REASONING_PROVIDER_ID || "未配置";
   const creative = providers.CREATIVE_MODEL_PROVIDER_ID || "未配置";
+  const quickVision = providers.PLUGIN_VISION_PROVIDER_ID || "未配置";
   const main = resolveProviderId("LLM_PROVIDER_ID", providers) || "AstrBot 默认模型";
   const mai = resolveProviderId("MAI_STYLE_PROVIDER_ID", providers) || main;
-  const pluginVision = providers.PLUGIN_VISION_PROVIDER_ID
-    || providers.NARRATION_PROVIDER_ID
-    || "跟随工具结果转述 / 主模型";
+  const pluginVision = providers.NARRATION_PROVIDER_ID || "跟随工具结果转述 / 主模型";
+  if (mode === "quick") {
+    $("#providerFlow").innerHTML = `
+      <div class="flow-lane">
+        <span class="flow-node primary">快速响应<br><b>${escapeHtml(fast)}</b></span>
+        <span class="flow-arrow">·</span>
+        <span class="flow-node primary">复杂推理<br><b>${escapeHtml(complex)}</b></span>
+        <span class="flow-arrow">·</span>
+        <span class="flow-node primary">创作模型<br><b>${escapeHtml(creative)}</b></span>
+        <span class="flow-arrow">·</span>
+        <span class="flow-node primary">插件识图<br><b>${escapeHtml(quickVision)}</b></span>
+      </div>
+      <div class="flow-tasks">
+        <span class="flow-node inherited">当前为快速配置<br><b>细分任务会按场景套用上方入口</b></span>
+      </div>
+    `;
+    return;
+  }
   const tasks = Object.entries(providerLabels).filter(([key]) => (
     !["FAST_RESPONSE_PROVIDER_ID", "COMPLEX_REASONING_PROVIDER_ID", "CREATIVE_MODEL_PROVIDER_ID"].includes(key)
     && key !== "LLM_PROVIDER_ID"
     && key !== "MAI_STYLE_PROVIDER_ID"
     && key !== "PLUGIN_VISION_PROVIDER_ID"
     && visibleConfigKey(key)
+    && providerAllowedInCurrentMode(key)
   ));
   $("#providerFlow").innerHTML = `
-    <div class="flow-lane">
-      <span class="flow-node primary">快速响应<br><b>${escapeHtml(fast)}</b></span>
-      <span class="flow-arrow">·</span>
-      <span class="flow-node primary">复杂推理<br><b>${escapeHtml(complex)}</b></span>
-      <span class="flow-arrow">·</span>
-      <span class="flow-node primary">创作模型<br><b>${escapeHtml(creative)}</b></span>
-    </div>
     <div class="flow-lane">
       <span class="flow-node primary">主模型<br><b>${escapeHtml(main)}</b></span>
       <span class="flow-arrow">→</span>
@@ -12778,7 +12902,7 @@ function renderProviderFlow(providers) {
     <div class="flow-lane">
       <span class="flow-node primary">默认图片转述<br><b>AstrBot 本体配置</b></span>
       <span class="flow-arrow">→</span>
-      <span class="flow-node ${providers.PLUGIN_VISION_PROVIDER_ID ? "primary" : "inherited"}">插件识图模型<br><b>${escapeHtml(pluginVision)}</b></span>
+      <span class="flow-node ${providers.NARRATION_PROVIDER_ID ? "primary" : "inherited"}">插件识图链路<br><b>${escapeHtml(pluginVision)}</b></span>
     </div>
     <div class="flow-tasks">
       ${tasks.map(([key, label]) => {
@@ -14209,17 +14333,25 @@ $("#enableSafeFeaturesBtn").addEventListener("click", () => {
 
 $("#saveProvidersBtn").addEventListener("click", async () => {
   const values = currentProviderValues();
+  const provider_config_mode = currentProviderConfigMode();
   const providers = {};
   Object.keys(providerLabels).forEach((key) => {
-    if (visibleConfigKey(key)) providers[key] = values[key] || "";
+    if (visibleConfigKey(key) && providerAllowedInCurrentMode(key)) providers[key] = values[key] || "";
   });
-  await runAction(() => postJson("/settings/update", { providers }), "已保存模型配置", $("#saveProvidersBtn"));
+  await runAction(
+    () => postJson("/settings/update", { settings: { provider_config_mode }, providers }),
+    "已保存模型配置",
+    $("#saveProvidersBtn")
+  );
+  state.overview = state.overview || {};
+  state.overview.settings = { ...(state.overview.settings || {}), provider_config_mode };
   state.providerDraft = { ...state.providerDraft, ...providers };
+  state.providerConfigMode = provider_config_mode;
   renderProviders();
 });
 
 $("#testAllProvidersBtn").addEventListener("click", async () => {
-  for (const key of Object.keys(providerLabels).filter(visibleConfigKey)) {
+  for (const key of Object.keys(providerLabels).filter((item) => visibleConfigKey(item) && providerAllowedInCurrentMode(item))) {
     await testProvider(key);
   }
 });

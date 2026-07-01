@@ -840,7 +840,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     changed[key] = self._normalize_setting_value(key, value)
             for key, value in changed.items():
                 self._apply_config_value(key, value, changed)
-            if any(key in self._allowed_provider_keys() for key in changed):
+            if any(key in self._allowed_provider_keys() for key in changed) or "provider_config_mode" in changed:
                 apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
                 if callable(apply_quick):
                     apply_quick()
@@ -4187,7 +4187,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             for key, value in preset.get("features", {}).items():
                 if key in self._allowed_feature_keys():
                     self._apply_config_value(key, self._normalize_bool_value(value))
-            if any(key in self._allowed_provider_keys() for key in preset.get("settings", {})):
+            if any(key in self._allowed_provider_keys() for key in preset.get("settings", {})) or "provider_config_mode" in preset.get("settings", {}):
                 apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
                 if callable(apply_quick):
                     apply_quick()
@@ -5994,7 +5994,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 changed_config[key] = normalized_value
         for key, value in changed_config.items():
             self._apply_config_value(key, value, changed_config)
-        if any(key in self._allowed_provider_keys() for key in changed_config):
+        if any(key in self._allowed_provider_keys() for key in changed_config) or "provider_config_mode" in changed_config:
             apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
             if callable(apply_quick):
                 apply_quick()
@@ -6154,6 +6154,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     @staticmethod
     def _migration_setting_group(key: str) -> str:
         text = str(key)
+        if text == "provider_config_mode":
+            return "providers"
         if text == "QZONE_COOKIE":
             return "sensitive"
         if text.startswith("private_reading_") or text.startswith("enable_private_reading_"):
@@ -6783,6 +6785,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _runtime_settings(self) -> dict[str, Any]:
         keys = [
             "bot_name",
+            "provider_config_mode",
             "plugin_specific_persona_id",
             "target_user_ids",
             "private_user_aliases",
@@ -7592,6 +7595,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
     def _apply_config_value(self, key: str, value: Any, overrides: dict[str, Any] | None = None) -> None:
         self._set_config_value(key, value)
+        if key == "provider_config_mode":
+            normalizer = getattr(self.plugin, "_normalize_provider_config_mode", None)
+            self.plugin.provider_config_mode = (
+                normalizer(value, getattr(self.plugin, "config", None))
+                if callable(normalizer)
+                else str(value or "quick").strip().lower()
+            )
+            return
         attr_map = {
             "FAST_RESPONSE_PROVIDER_ID": "fast_response_provider_id",
             "COMPLEX_REASONING_PROVIDER_ID": "complex_reasoning_provider_id",
@@ -7844,6 +7855,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         config = getattr(self.plugin, "config", None)
         if config is None:
             return
+        if key == "provider_config_mode":
+            self._set_provider_config_mode_value(config, value)
+            return
         if _set_into_config(config, key, value, allow_flat_fallback=False):
             return
         if self._set_schema_group_config_value(config, key, value):
@@ -7851,7 +7865,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         _set_into_config(config, key, value)
         return
 
-    def _set_schema_group_config_value(self, config: Any, key: str, value: Any) -> bool:
+    def _set_provider_config_mode_value(self, config: Any, value: Any) -> None:
+        # Keep the visible schema group and the hidden legacy flat key in sync.
+        # AstrBot validates unknown flat keys during plugin load, while older
+        # page/API paths still read or write the flat name directly.
+        self._set_schema_group_config_value(config, "provider_config_mode", value, create_group=True)
+        _set_into_config(config, "provider_config_mode", value)
+
+    def _set_schema_group_config_value(self, config: Any, key: str, value: Any, *, create_group: bool = False) -> bool:
         group_key = self._schema_group_for_key(key)
         if not group_key:
             return False
@@ -7860,6 +7881,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             group = target.get(group_key)
             if isinstance(group, dict):
                 group[key] = value
+                return True
+            if create_group:
+                target[group_key] = {key: value}
                 return True
             return False
 
@@ -8088,6 +8112,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _allowed_setting_keys(self) -> set[str]:
         keys = {
             "bot_name",
+            "provider_config_mode",
             "enable_proactive_only_mode",
             "plugin_specific_persona_id",
             "target_user_ids",
@@ -8432,6 +8457,24 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             return self._normalize_id_list(value)
         if key == "plugin_specific_persona_id":
             return str(value or "").strip()[:160]
+        if key == "provider_config_mode":
+            normalizer = getattr(self.plugin, "_normalize_provider_config_mode", None)
+            if callable(normalizer):
+                return normalizer(value, getattr(self.plugin, "config", None))
+            text = str(value or "quick").strip().lower()
+            aliases = {
+                "fast": "quick",
+                "simple": "quick",
+                "快速": "quick",
+                "快速配置": "quick",
+                "precise": "precision",
+                "advanced": "precision",
+                "精准": "precision",
+                "精准配置": "precision",
+                "分流": "precision",
+            }
+            text = aliases.get(text, text)
+            return text if text in {"quick", "precision"} else "quick"
         if key == "passive_injection_position":
             normalizer = getattr(self.plugin, "_normalize_passive_injection_position", None)
             if callable(normalizer):

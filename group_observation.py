@@ -485,6 +485,77 @@ class GroupObservationMixin:
             return filtered_recent[-1]
         return raw_recent[-1] if raw_recent else None
 
+    def _format_group_recent_flow_for_review(
+        self,
+        group: dict[str, Any],
+        *,
+        sender_id: str = "",
+        text: str = "",
+        max_lines: int = 12,
+        max_chars: int = 1400,
+        include_current: bool = True,
+    ) -> str:
+        """Format real group chat flow for small-model review and rewrite decisions."""
+        recent = self._filtered_group_recent_messages(group)
+        cleaned = _single_line(text, 260)
+        current_sender_id = str(sender_id or "").strip()
+        current_index = -1
+        if cleaned:
+            for index in range(len(recent) - 1, -1, -1):
+                item = recent[index]
+                if not isinstance(item, dict):
+                    continue
+                if current_sender_id and str(item.get("sender_id") or "") != current_sender_id:
+                    continue
+                if _single_line(item.get("text"), 260) != cleaned:
+                    continue
+                current_index = index
+                break
+
+        line_limit = max(2, _safe_int(max_lines, 12, 2))
+        start = max(0, len(recent) - line_limit)
+        selected: list[tuple[dict[str, Any], int | None]] = [
+            (item, start + offset)
+            for offset, item in enumerate(recent[start:])
+            if isinstance(item, dict)
+        ]
+        if include_current and cleaned and current_index < start:
+            selected.append(
+                (
+                    {
+                        "sender_id": current_sender_id,
+                        "name": "",
+                        "identity_name": "",
+                        "text": cleaned,
+                        "_review_current": True,
+                    },
+                    None,
+                )
+            )
+            if len(selected) > line_limit:
+                selected = selected[-line_limit:]
+
+        lines: list[str] = []
+        for item, index in selected:
+            msg = _single_line(item.get("text"), 120)
+            if not msg:
+                continue
+            item_sender_id = _single_line(item.get("sender_id"), 40)
+            name = self._group_member_identity_label(
+                item_sender_id,
+                item.get("identity_name") or item.get("name"),
+                limit=24,
+            )
+            if item_sender_id:
+                name = f"{name}[QQ:{item_sender_id}]"
+            current_mark = "（当前）" if item.get("_review_current") or index == current_index else ""
+            lines.append(f"- {current_mark}{name}: {msg}")
+
+        char_limit = max(200, _safe_int(max_chars, 1400, 200))
+        while lines and len("\n".join(lines)) > char_limit:
+            lines.pop(0)
+        return "\n".join(lines)
+
     def _update_group_observation(
         self,
         group: dict[str, Any],
@@ -1667,7 +1738,7 @@ class GroupObservationMixin:
             )
         livingmemory_guidance = (
             ""
-            if getattr(self, "_remember_you_should_defer_prompt_section", lambda *_args, **_kwargs: False)(
+            if getattr(self, "_memory_companion_should_defer_prompt_section", lambda *_args, **_kwargs: False)(
                 "livingmemory_guidance"
             )
             else self._format_livingmemory_guidance(scope="group")
@@ -1744,6 +1815,15 @@ class GroupObservationMixin:
 
         if details:
             lines.append("；".join(details) + "。")
+        recent_flow = self._format_group_recent_flow_for_review(
+            group,
+            sender_id=sender_id,
+            text=text,
+            max_lines=max(4, self.group_scene_recent_limit + 2),
+            max_chars=900,
+        )
+        if recent_flow:
+            lines.append("真实最近群聊：\n" + recent_flow)
         return "\n".join(lines)
 
     def _format_group_current_sender_identity_guard(self, group: dict[str, Any], *, sender_id: str = "", text: str = "") -> str:

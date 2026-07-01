@@ -2692,6 +2692,15 @@ class PrivateImageMixin:
         user_id: str,
         buffer: dict[str, Any],
     ) -> None:
+        feature_checker = getattr(self, "_feature_enabled_or_temp_unlocked", None)
+        feature_enabled = (
+            feature_checker("enable_private_image_self_recognition")
+            if callable(feature_checker)
+            else bool(getattr(self, "enable_private_image_self_recognition", True))
+        )
+        if not feature_enabled:
+            logger.info("[PrivateCompanion] 私聊单图延迟任务已跳过: 图片转述增强已关闭 user=%s", user_id)
+            return
         images = buffer.get("images") if isinstance(buffer.get("images"), list) else []
         vision_task = buffer.get("vision_task")
         image_limit = self._private_image_vision_text_limit(len(images))

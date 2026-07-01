@@ -4254,8 +4254,8 @@ class DailyStateMixin:
     def _get_schedule_planning_prompt(self) -> str:
         return get_schedule_planning_prompt(self)
 
-    def _build_daily_plan_prompt(self, now: str, remember_you_context: str = "") -> str:
-        return build_daily_plan_prompt(self, now, remember_you_context=remember_you_context)
+    def _build_daily_plan_prompt(self, now: str, memory_companion_context: str = "") -> str:
+        return build_daily_plan_prompt(self, now, memory_companion_context=memory_companion_context)
 
     async def _ensure_yesterday_conversation_summary(self, force: bool = False) -> dict[str, Any]:
         today = _today_key()
@@ -4599,9 +4599,9 @@ class DailyStateMixin:
         segment: dict[str, Any],
         plan: dict[str, Any],
         state: dict[str, Any],
-        remember_you_context: str = "",
+        memory_companion_context: str = "",
     ) -> str:
-        return build_detail_enhancement_prompt(self, segment, plan, state, remember_you_context=remember_you_context)
+        return build_detail_enhancement_prompt(self, segment, plan, state, memory_companion_context=memory_companion_context)
 
     def _get_default_persona_prompt(self) -> str:
         cached = str(getattr(self, "_default_persona_prompt_cache", "") or "").strip()
@@ -9645,7 +9645,7 @@ class DailyStateMixin:
                     current_for_clear["proactive_sending_started_at"] = 0
                     self._save_data_sync()
 
-            remember_you_proactive_payload: dict[str, Any] = {}
+            memory_companion_proactive_payload: dict[str, Any] = {}
             async with self._data_lock:
                 current = self._get_user(user_id)
                 simulation_active = self._simulation_active(current)
@@ -9867,7 +9867,7 @@ class DailyStateMixin:
                 self._save_data_sync()
                 current_snapshot = dict(current)
                 if not simulation_active and visible_text:
-                    remember_you_proactive_payload = {
+                    memory_companion_proactive_payload = {
                         "user": current_snapshot,
                         "user_id": user_id,
                         "text": visible_text,
@@ -9878,8 +9878,8 @@ class DailyStateMixin:
                         "image_path": image_path,
                         "extra_count": len(extra_components),
                     }
-            if remember_you_proactive_payload:
-                await self._remember_you_record_proactive_message(**remember_you_proactive_payload)
+            if memory_companion_proactive_payload:
+                await self._memory_companion_record_proactive_message(**memory_companion_proactive_payload)
             asyncio.create_task(self._refresh_persona_relationship(user_id, current_snapshot))
 
         await self._run_proactive_maintenance_tasks()
