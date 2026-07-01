@@ -2441,6 +2441,12 @@
     "default": 2,
     "invisible": true
   },
+  "natural_language_photo_extra_prompt": {
+    "description": "Legacy flat config: 自然语言生图附加提示词",
+    "type": "text",
+    "default": "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。",
+    "invisible": true
+  },
   "comfyui_photo_wait_seconds": {
     "description": "Legacy flat config: 主动拍照等待生图秒数",
     "type": "int",
@@ -3122,11 +3128,50 @@
     "default": "",
     "invisible": true
   },
+  "FAST_RESPONSE_PROVIDER_ID": {
+    "description": "Legacy flat config: 快速响应模型",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "COMPLEX_REASONING_PROVIDER_ID": {
+    "description": "Legacy flat config: 复杂推理模型",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "CREATIVE_MODEL_PROVIDER_ID": {
+    "description": "Legacy flat config: 创作模型",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "model_assignment_config": {
     "description": "模型分流",
     "type": "object",
     "hint": "为不同任务指定 Provider；留空会按陪伴通用模型、主模型或 AstrBot 默认模型回退。",
     "items": {
+      "FAST_RESPONSE_PROVIDER_ID": {
+        "description": "快速响应模型",
+        "type": "string",
+        "hint": "快速配置入口。用于低延迟判断、轻量复核、群聊续接、语音短句、工具转述、新闻/搜索整理等短任务；具体单项模型已填写时优先使用单项配置。",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "COMPLEX_REASONING_PROVIDER_ID": {
+        "description": "复杂推理模型",
+        "type": "string",
+        "hint": "快速配置入口。用于主模型兜底、日程生成/细化、长期记忆整理、关系分析、合并消息转述等更需要理解和结构化能力的任务；具体单项模型已填写时优先使用单项配置。",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "CREATIVE_MODEL_PROVIDER_ID": {
+        "description": "创作模型",
+        "type": "string",
+        "hint": "快速配置入口。用于私下创作、创作大纲/审校、日记梦境和生图提示词等更偏文风、画面感和表达质量的任务；具体单项模型已填写时优先使用单项配置。",
+        "default": "",
+        "_special": "select_provider"
+      },
       "MAI_STYLE_PROVIDER_ID": {
         "description": "私聊互动策略通用模型（留空跟随主模型）",
         "type": "string",
@@ -3277,7 +3322,7 @@
       "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": {
         "description": "群聊续接判断模型",
         "type": "string",
-        "hint": "用于群聊续接判断：判断用户后续没 @ 的发言是否仍在和 Bot 对话。适合便宜、低延迟、指令遵循稳定、YES/NO 分类准确的小模型。留空时只使用规则判断；填写后仅在规则不确定时调用。",
+        "hint": "用于群聊续接判断：判断用户后续没 @ 的发言是否仍在和 Bot 对话。适合便宜、低延迟、指令遵循稳定、YES/NO 分类准确的小模型。留空时会先跟随快速响应模型；快速响应模型也留空时只使用规则判断。",
         "default": "",
         "_special": "select_provider"
       },
@@ -7045,7 +7090,7 @@
       "enable_natural_language_photo_generation": {
         "description": "自然语言生图/改图",
         "type": "bool",
-        "hint": "默认关闭，避免和独立生图插件抢触发。开启后，只有私聊里明确说“帮我画一张/生成图片/来张图”等图片请求才会调用生图；普通“生成/画/改成”不会触发。随消息带图或引用图片并明确要求改图、修图、重绘，或说“改成/加上/去掉……”时才会尝试改图。该入口只对主人私聊开放。",
+        "hint": "默认关闭，避免和独立生图插件抢触发。开启后，只有私聊里明确说“帮我画一张/重新画张图片/生成图片/来张图/用插件能力画”等图片请求才会调用生图；普通“生成/画/改成”不会触发。随消息带图或引用图片并明确要求改图、修图、重绘，或说“改成/加上/去掉……”时才会尝试改图。该入口只对主人私聊开放。",
         "default": false,
         "condition": {
           "enable_photo_text_action": true
@@ -7061,6 +7106,16 @@
           "step": 1
         },
         "default": 2,
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_natural_language_photo_generation": true
+        }
+      },
+      "natural_language_photo_extra_prompt": {
+        "description": "自然语言生图附加提示词",
+        "type": "text",
+        "hint": "只作用于自然语言生图/改图入口，会接在用户要求后、风格与场景预设前。留空则不追加这段；全局固定附加提示词仍在所有生图最后追加。",
+        "default": "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。",
         "condition": {
           "enable_photo_text_action": true,
           "enable_natural_language_photo_generation": true

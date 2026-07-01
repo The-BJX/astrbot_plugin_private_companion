@@ -9451,6 +9451,39 @@ class DailyStateMixin:
                 )
                 self._debug_tick_skip(user_id, recent_chat_guard_reason, prefix="延后")
                 continue
+            if text and self._is_proactive_delivery_receipt_text(text):
+                note = "主动正文是工具/执行状态回执，已取消发送"
+                logger.warning(
+                    "[PrivateCompanion] 主动消息发送前拦截执行回执: user=%s text=%s",
+                    user_id,
+                    _single_line(text, 160),
+                )
+                async with self._data_lock:
+                    current = self._get_user(user_id)
+                    current["proactive_sending"] = False
+                    current["proactive_sending_started_at"] = 0
+                    if is_troubleshooting_for_send:
+                        self._append_troubleshooting_proactive_step(current, "内容检查", "error", note)
+                        self._record_troubleshooting_proactive_result(
+                            user_id,
+                            current,
+                            ok=False,
+                            detail="主动消息已生成，但正文是工具/执行状态回执",
+                            error=note,
+                            text=text,
+                            action=effective_action_for_send or planned_action_for_send or "message",
+                            reason=reason or "check_in",
+                            extra_count=len(extra_components),
+                        )
+                        self._restore_troubleshooting_proactive_plan(current)
+                    else:
+                        self._mark_planned_candidate_status(current, "dropped", note)
+                        self._clear_pending_proactive_plan(current)
+                        self._schedule_next_proactive(current, now=_now_ts(), delay_hours=(2, 8))
+                    self._update_proactive_audit(audit_id, status="dropped", note=note, text=text)
+                    self._save_data_sync()
+                self._debug_tick_skip(user_id, note, prefix="放弃")
+                continue
             if not text and not image_path and not extra_components:
                 async with self._data_lock:
                     current = self._get_user(user_id)

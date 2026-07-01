@@ -11,6 +11,8 @@ DEFAULT_REPLY_STYLE_PROMPT = (
     "当你需要解决复杂问题或进行详细说明时，可以无视这一要求。"
 )
 
+DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT = "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。"
+
 # 日常计划文案 - 生活化JK口语
 DEFAULT_DAILY_PLAN_ITEMS = [
     {"time": "08:20", "activity": "起床收拾", "mood": "开心", "message_seed": "新的一天开始啦——该起床咯~"},

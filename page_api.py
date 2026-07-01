@@ -840,6 +840,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     changed[key] = self._normalize_setting_value(key, value)
             for key, value in changed.items():
                 self._apply_config_value(key, value, changed)
+            if any(key in self._allowed_provider_keys() for key in changed):
+                apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
+                if callable(apply_quick):
+                    apply_quick()
             clearer = getattr(self.plugin, "_clear_proactive_only_temp_unlocks_if_mode_off", None)
             if callable(clearer):
                 clearer()
@@ -2703,6 +2707,78 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "skill_similarity": "技能相似项检查",
         }.get(test_type, "排障链路测试")
 
+    @staticmethod
+    def _token_task_label(task: Any) -> str:
+        normalized = str(task or "").strip()
+        if not normalized:
+            return "模型调用"
+        labels = {
+            "daily_plan": "日程生成",
+            "detail": "日程细化",
+            "dream": "梦境内容",
+            "diary": "日记整理",
+            "memory_profile": "长期画像",
+            "dialogue_episode": "私聊片段",
+            "response_review": "回复/主动复核",
+            "emotion_judgement": "情绪判断",
+            "relationship": "关系分析",
+            "group_interject": "群聊插话",
+            "group_episode": "群聊片段",
+            "group_slang": "黑话释义",
+            "group_question_wakeup_reply_review": "群聊答疑复核",
+            "group_followup_judge": "群聊续接判断",
+            "worldbook_registration": "关系网自登记",
+            "web_exploration_query": "探索选题",
+            "web_exploration_digest": "探索笔记",
+            "external_event_self_link": "外界信息关联",
+            "news_digest": "新闻整理",
+            "creative_project": "创作立项",
+            "creative_outline": "创作大纲",
+            "creative_writing": "文本创作",
+            "creative_review": "创作审校",
+            "creative_extract": "创作抽取",
+            "photo_prompt": "生图提示",
+            "screen_narration": "识屏转述",
+            "forward_message": "合并转发转述",
+            "private_reading_vision": "夹层视觉",
+            "private_image_vision": "私聊图片识别",
+            "private_image_only_framework": "单图回复主链",
+            "private_image_only_fallback": "单图兜底回复",
+            "voice": "语音文本",
+            "proactive_framework": "主动主回复",
+            "proactive_persona_judge": "主动人格判定",
+            "voice_framework": "框架语音",
+            "voice_repair": "语音格式修复",
+            "smart_message_debounce": "智能收口防抖",
+            "rest_wakeup_judge": "休息醒来判断",
+            "yesterday_summary": "昨日摘要",
+            "full_test_detail": "完整测试细化",
+            "provider_test": "模型测试",
+            "qzone_comment": "空间评论",
+            "qzone_comment_inbox_decision": "空间评论判断",
+            "qzone_publish": "空间说说",
+            "qzone_publish_test": "空间发布测试",
+            "qzone_publish_sanitize": "空间文案清理",
+            "companion_manual_diagnosis": "陪伴答疑",
+            "astrbot_private_reply": "非插件私聊主回复",
+            "astrbot_group_reply": "非插件群聊主回复",
+            "astrbot_reply": "非插件主回复",
+            "other": "其他调用",
+        }
+        if normalized in labels:
+            return labels[normalized]
+        if normalized.startswith("qzone_") and normalized.endswith("_photo_prompt"):
+            return "空间配图提示"
+        if normalized.startswith("qzone_"):
+            return "QQ 空间任务"
+        if normalized.startswith("astrbot_"):
+            return "AstrBot 主回复"
+        if normalized.startswith("private_image_"):
+            return "私聊图片处理"
+        if normalized.startswith("web_exploration_"):
+            return "主动搜索"
+        return normalized
+
     def _troubleshooting_recent_events(
         self,
         *,
@@ -2774,7 +2850,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             add("warn", "主动候选", title, detail, ts=self._float(item.get("last_seen_ts") or item.get("created_ts")), jump="proactive")
 
         for item in self._active_token_failures(token_stats.get("recent", []), limit=50):
-            title = f"{self._single_line(item.get('task'), 40) or 'LLM 调用'} 失败"
+            title = f"{self._token_task_label(item.get('task'))}失败"
             detail = "；".join(
                 part
                 for part in [
@@ -4111,6 +4187,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             for key, value in preset.get("features", {}).items():
                 if key in self._allowed_feature_keys():
                     self._apply_config_value(key, self._normalize_bool_value(value))
+            if any(key in self._allowed_provider_keys() for key in preset.get("settings", {})):
+                apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
+                if callable(apply_quick):
+                    apply_quick()
             config_saved = await self._save_config_if_possible()
             overview = await self.get_overview()
             if overview.get("success"):
@@ -5116,6 +5196,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _display_message_text(cls, value: Any, limit: int = 500) -> str:
         source = str(value or "").strip()
         source = source.strip("\"'“”‘’` ")
+        if cls._looks_like_internal_delivery_receipt(source):
+            return ""
         if re.fullmatch(r"[.。…~～\s\"'“”‘’`-]{0,12}", source):
             return ""
         if re.search(r"<t{2,}s\b[^>]*>.*?</t{2,}s>", source, flags=re.IGNORECASE | re.DOTALL):
@@ -5131,6 +5213,31 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             if kept and any(re.search(r"[\u4e00-\u9fff]", item) for item in kept):
                 source = "".join(kept)
         return cls._single_line(_strip_internal_message_blocks(source), limit)
+
+    @staticmethod
+    def _looks_like_internal_delivery_receipt(text: Any) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        compact = re.sub(r"[\s。.!！?？,，；;:：、~～\"'“”‘’（）()【】\[\]]+", "", raw).lower()
+        if compact in {"已发送", "发送成功", "发送完成", "发送完毕", "已成功发送", "消息已发送", "消息发送成功"}:
+            return True
+        markers = (
+            ("已经把", "转给"),
+            ("已把", "转给"),
+            ("已经将", "转给"),
+            ("已将", "转给"),
+            ("已经发给", "就假装"),
+            ("已经发送给", "就假装"),
+            ("就假装", "语气很自然"),
+            ("随手分享", "语气很自然"),
+        )
+        if any(all(token in raw for token in pair) for pair in markers):
+            return True
+        return (
+            any(token in compact for token in ("视频链接转给", "链接转给", "消息转给", "内容转给"))
+            and any(token in compact for token in ("已经", "已", "完成", "成功"))
+        )
 
     def _group_wakeup_runtime(self, group: dict[str, Any]) -> dict[str, Any]:
         fatigue = group.get("group_wakeup_fatigue") if isinstance(group.get("group_wakeup_fatigue"), dict) else {}
@@ -5786,6 +5893,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
     def _provider_settings(self) -> dict[str, str]:
         keys = [
+            "FAST_RESPONSE_PROVIDER_ID",
+            "COMPLEX_REASONING_PROVIDER_ID",
+            "CREATIVE_MODEL_PROVIDER_ID",
             "LLM_PROVIDER_ID",
             "MAI_STYLE_PROVIDER_ID",
             "DAILY_PLAN_PROVIDER_ID",
@@ -5823,6 +5933,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             if key not in keys:
                 keys.append(key)
         values = {key: self._config_get(key) for key in keys}
+        if not values.get("FAST_RESPONSE_PROVIDER_ID"):
+            values["FAST_RESPONSE_PROVIDER_ID"] = str(getattr(self.plugin, "fast_response_provider_id", "") or "")
+        if not values.get("COMPLEX_REASONING_PROVIDER_ID"):
+            values["COMPLEX_REASONING_PROVIDER_ID"] = str(getattr(self.plugin, "complex_reasoning_provider_id", "") or "")
+        if not values.get("CREATIVE_MODEL_PROVIDER_ID"):
+            values["CREATIVE_MODEL_PROVIDER_ID"] = str(getattr(self.plugin, "creative_model_provider_id", "") or "")
         if not values.get("PLUGIN_VISION_PROVIDER_ID"):
             values["PLUGIN_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "plugin_vision_provider_id", "") or "")
         if not values.get("PRIVATE_READING_VISION_PROVIDER_ID"):
@@ -5878,6 +5994,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 changed_config[key] = normalized_value
         for key, value in changed_config.items():
             self._apply_config_value(key, value, changed_config)
+        if any(key in self._allowed_provider_keys() for key in changed_config):
+            apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
+            if callable(apply_quick):
+                apply_quick()
         config_saved = True
         if changed_config:
             config_saved = await self._save_config_if_possible()
@@ -6792,6 +6912,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "daily_outfit_photo_prompt",
             "enable_natural_language_photo_generation",
             "natural_language_photo_generation_max_daily",
+            "natural_language_photo_extra_prompt",
             "comfyui_photo_wait_seconds",
             "enable_local_photo_load_guard",
             "local_photo_cpu_busy_percent",
@@ -7012,7 +7133,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             if key not in keys and key not in provider_keys:
                 keys.append(key)
         values = {key: getattr(self.plugin, key, self._config_get(key)) for key in keys}
-        values["private_user_aliases"] = self._config_get("private_user_aliases")
+        values["private_user_aliases"] = self._private_alias_config_text("private_user_aliases")
+        values["private_user_delivery_aliases"] = self._private_alias_config_text("private_user_delivery_aliases")
         values.update(
             {
                 "enable_private_reading_integration": bool(getattr(self.plugin, "enable_jm_cosmos_integration", False)),
@@ -7471,6 +7593,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _apply_config_value(self, key: str, value: Any, overrides: dict[str, Any] | None = None) -> None:
         self._set_config_value(key, value)
         attr_map = {
+            "FAST_RESPONSE_PROVIDER_ID": "fast_response_provider_id",
+            "COMPLEX_REASONING_PROVIDER_ID": "complex_reasoning_provider_id",
+            "CREATIVE_MODEL_PROVIDER_ID": "creative_model_provider_id",
             "LLM_PROVIDER_ID": "llm_provider_id",
             "MAI_STYLE_PROVIDER_ID": "mai_style_provider_id",
             "DAILY_PLAN_PROVIDER_ID": "daily_plan_provider_id",
@@ -7777,6 +7902,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         except Exception:
             return ""
 
+    def _private_alias_config_text(self, key: str) -> str:
+        raw = self._config_get(key)
+        if raw:
+            return raw
+        mapping = getattr(self.plugin, key, None)
+        if not isinstance(mapping, dict):
+            return ""
+        lines: list[str] = []
+        for alias, target in mapping.items():
+            left = str(alias or "").strip()
+            right = str(target or "").strip()
+            if left and right:
+                lines.append(f"{left}={right}")
+        return "\n".join(lines)
+
     async def _save_config_if_possible(self) -> bool:
         config = getattr(self.plugin, "config", None)
         for method_name in ("save_config", "save", "save_conf"):
@@ -7906,6 +8046,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
     def _allowed_provider_keys(self) -> set[str]:
         keys = {
+            "FAST_RESPONSE_PROVIDER_ID",
+            "COMPLEX_REASONING_PROVIDER_ID",
+            "CREATIVE_MODEL_PROVIDER_ID",
             "LLM_PROVIDER_ID",
             "MAI_STYLE_PROVIDER_ID",
             "DAILY_PLAN_PROVIDER_ID",
@@ -8065,6 +8208,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "daily_outfit_photo_prompt",
             "enable_natural_language_photo_generation",
             "natural_language_photo_generation_max_daily",
+            "natural_language_photo_extra_prompt",
             "comfyui_photo_wait_seconds",
             "enable_local_photo_load_guard",
             "local_photo_cpu_busy_percent",
@@ -8427,7 +8571,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             return lang if lang in {"ja", "zh", "en"} else "ja"
         if key in {"tts_extra_prompt", "main_user_mention_voice_prompt"}:
             return str(value or "").strip()[:1200]
-        if key in {"photo_generation_fixed_prompt", "photo_generation_scene_presets"}:
+        if key in {"natural_language_photo_extra_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"}:
             return str(value or "").strip()[:5000]
         if key == "tts_conversion_provider_id":
             return str(value or "").strip()[:160]

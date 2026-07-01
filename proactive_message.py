@@ -1312,6 +1312,8 @@ class ProactiveMessageMixin:
             lines.append("这是有来源的续接/提醒：可以顺着来源，但不要写成用户刚刚又发了新消息。")
         elif kind in {"self_share", "external_share", "observation"}:
             lines.append("这是分享/观察型主动：只取一个最小切口，不写成报告、推荐文或观察总结。")
+            if kind == "external_share" or anchor_type == "external_info":
+                lines.append("外界分享必须贴住这次看到的标题、视频、新闻或资料本身；如果只是低压地放一句，也要围绕来源表达感受，不要改成无关的个人状态或泛泛压力询问。")
         elif kind in {"care", "check_in", "light_touch"}:
             lines.append("这是靠近型主动：不要直接说想念、关心或刷存在感，要侧着落到一个小动作或小片段。")
 
@@ -2024,6 +2026,9 @@ class ProactiveMessageMixin:
         *,
         reason: str,
         action: str,
+        motive: str = "",
+        topic: str = "",
+        action_context: str = "",
     ) -> dict[str, Any]:
         strength = self._proactive_review_strength()
         cleaned = _single_line(text, 500)
@@ -2044,6 +2049,7 @@ class ProactiveMessageMixin:
         semantic_score = _safe_float(semantics.get("score"), 0.5)
         semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
         semantic_risk = _safe_float(semantics.get("risk"), 0.0)
+        external_share_active = semantic_kind == "external_share" or reason in {"bili_video_share", "news_share", "web_exploration_share"}
         default_hard_risk = 0.70 if strength == "lenient" else 0.45
         hard_risk_threshold = max(
             0.0,
@@ -2069,7 +2075,8 @@ class ProactiveMessageMixin:
             "好呀", "好啊", "可以呀", "行啊", "那就", "你说呢", "要不", "刚看到", "才看到",
             "你来了", "你叫我", "你问", "我帮你查", "我去问", "我去说",
         )
-        if any(cleaned.startswith(token) for token in reply_like_openers):
+        matched_reply_opener = next((token for token in reply_like_openers if cleaned.startswith(token)), "")
+        if matched_reply_opener and not (external_share_active and matched_reply_opener in {"刚看到", "才看到"}):
             if strength != "strict":
                 rewritten = re.sub(
                     r"^(?:好呀|好啊|可以呀|行啊|那就|你说呢|要不|刚看到|才看到|你来了|你叫我|你问|我帮你查|我去问|我去说)[，,。！!？?\s]*",
@@ -2090,6 +2097,17 @@ class ProactiveMessageMixin:
             return {"decision": "defer", "reason": "普通主动过于泛泛", "delay_minutes": 60}
         if strength != "lenient" and semantic_kind in {"self_share", "external_share", "observation"} and any(token in cleaned for token in vague):
             return {"decision": "defer", "reason": "生成结果偏离分享型由头", "delay_minutes": 60}
+        if external_share_active:
+            external_fix = self._external_share_source_consistency_decision(
+                user,
+                cleaned,
+                reason=reason,
+                topic=topic,
+                motive=motive,
+                action_context=action_context,
+            )
+            if external_fix:
+                return external_fix
         role = self._private_user_role(user) if isinstance(user, dict) else "friend"
         if role == "owner":
             social_checker = getattr(self, "_daily_plan_clause_has_named_message_interaction", None)
@@ -2106,6 +2124,165 @@ class ProactiveMessageMixin:
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 2 and len(cleaned) > 36:
             return {"decision": "rewrite", "reason": "连续未回应时主动偏长", "text": cleaned[:36].rstrip("，,。") + "。"}
         return {"decision": "send", "reason": "本地检查通过"}
+
+    def _external_share_source_consistency_decision(
+        self,
+        user: dict[str, Any],
+        text: str,
+        *,
+        reason: str = "",
+        topic: str = "",
+        motive: str = "",
+        action_context: str = "",
+    ) -> dict[str, Any] | None:
+        cleaned = _single_line(text, 240)
+        if not cleaned:
+            return None
+        source_text = self._external_share_anchor_text(
+            user,
+            reason=reason,
+            topic=topic,
+            motive=motive,
+            action_context=action_context,
+        )
+        if not source_text:
+            return None
+        if self._external_share_text_mentions_source(cleaned, source_text):
+            return None
+        rewrite = self._external_share_fallback_text(source_text)
+        if rewrite:
+            return {
+                "decision": "rewrite",
+                "reason": "外界分享正文偏离来源",
+                "text": rewrite,
+                "hard": True,
+            }
+        return {
+            "decision": "defer",
+            "reason": "外界分享缺少可承接来源",
+            "delay_minutes": 75,
+            "hard": True,
+        }
+
+    def _external_share_anchor_text(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str = "",
+        topic: str = "",
+        motive: str = "",
+        action_context: str = "",
+    ) -> str:
+        parts: list[str] = []
+
+        def add(value: Any, limit: int = 160) -> None:
+            text = _single_line(value, limit)
+            if text and text not in parts:
+                parts.append(text)
+
+        add(topic, 180)
+        add(action_context, 520)
+        if isinstance(user, dict):
+            for key in ("bilibili_video_context", "news_context", "web_exploration_context"):
+                payload = user.get(key)
+                if not isinstance(payload, dict):
+                    continue
+                for field in ("title", "headline", "topic", "summary", "comment", "review", "source", "selected_source"):
+                    add(payload.get(field), 180)
+        if not parts:
+            add(motive, 140)
+        return _single_line("；".join(parts), 760)
+
+    def _external_share_text_mentions_source(self, text: str, source_text: str) -> bool:
+        message = _single_line(text, 260).lower()
+        source = _single_line(source_text, 760).lower()
+        if not message or not source:
+            return True
+        source_markers = (
+            "看到", "刷到", "看见", "标题", "视频", "新闻", "文章", "资料", "这条", "这个", "那条",
+            "b站", "bili", "链接", "分享", "外面", "报道", "内容",
+        )
+        anchor_tokens = self._external_share_anchor_tokens(source)
+        for token in anchor_tokens:
+            if token and token in message:
+                return True
+        # If the source itself has no concrete title/topic tokens, do not over-block
+        # a clearly source-shaped short share.
+        if not anchor_tokens and any(marker in message for marker in source_markers):
+            return True
+        return False
+
+    def _external_share_anchor_tokens(self, source_text: str) -> list[str]:
+        text = _single_line(source_text, 760)
+        if not text:
+            return []
+        tokens: list[str] = []
+
+        def add(value: str) -> None:
+            clean = value.strip(" \t\r\n，。！？；：、,.!?;:()（）[]【】《》“”\"'")
+            if len(clean) >= 2 and clean not in tokens:
+                tokens.append(clean)
+
+        for item in re.findall(r"[A-Za-z]+[-_A-Za-z0-9]*|[0-9]+(?:多年|年|月|日|次|个|%)?", text):
+            add(item.lower())
+        for chunk in re.split(r"[\s，。！？；：、,.!?;:|｜/\\\\()（）\\[\\]【】《》“”\"']+", text):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]{2,12}", chunk):
+                add(chunk)
+                if len(chunk) > 4:
+                    for size in (4, 3, 2):
+                        for index in range(0, max(0, len(chunk) - size + 1)):
+                            add(chunk[index:index + size])
+            elif re.search(r"[\u4e00-\u9fff]", chunk):
+                for item in re.findall(r"[\u4e00-\u9fff]{2,8}", chunk):
+                    add(item)
+        generic = {
+            "标题", "视频", "新闻", "文章", "资料", "来源", "分享", "短评", "回味", "评分", "链接",
+            "刚刷到一个视频", "刚刷到", "刷到一", "到一个", "一个视", "个视频", "一个视频",
+            "b站视频分享线索", "站视频分享线索", "视频分享线索", "分享线索",
+            "新闻阅读线索", "阅读线索", "刚扫过", "扫过几", "几条新", "条新闻",
+            "网页探索线索", "探索线索", "内部探索笔记", "探索笔记",
+            "http", "https", "www", "com", "cn", "bilibili", "video",
+        }
+        generic_phrases = (
+            "b站视频分享线索刚刷到一个视频",
+            "新闻阅读线索刚扫过几条新闻其中一条让自己有点想私下提一句",
+            "网页探索线索bot刚刚按自己的兴趣主动搜索并了解了一点新东西这是一条内部探索笔记",
+            "表达要求不要像播报新闻不要夸大或补充未知事实",
+        )
+        return [
+            token
+            for token in tokens
+            if token not in generic and not any(token in phrase for phrase in generic_phrases)
+        ][:24]
+
+    def _external_share_fallback_text(self, source_text: str) -> str:
+        source = _single_line(source_text, 760)
+        if not source:
+            return ""
+        title = ""
+        for pattern in (
+            r"(?:标题|摘要重点|话题|headline|topic)[:：]\s*([^；。\n\r|｜]{2,90})",
+            r"^([^；。\n\r]{4,90})",
+        ):
+            match = re.search(pattern, source, flags=re.I)
+            if match:
+                title = _single_line(match.group(1), 64)
+                title = re.split(
+                    r"\s+(?:链接|UP|评分|心情|短评|回味|来源|内部印象|表达气质|额外边界|参考来源|搜索词)[:：]",
+                    title,
+                    maxsplit=1,
+                    flags=re.I,
+                )[0]
+                break
+        if not title:
+            return ""
+        title = title.strip(" ，。！？；：、,.!?;:|｜")
+        if not title:
+            return ""
+        return _single_line(f"刚看到“{title}”这个标题，有点沉，就放这儿了。", 120)
 
     def _strip_proactive_motive_leak_text(self, text: str) -> str:
         cleaned = str(text or "").strip()
@@ -2182,8 +2359,21 @@ class ProactiveMessageMixin:
         image_path: str = "",
     ) -> dict[str, Any]:
         strength = self._proactive_review_strength()
-        local = self._local_proactive_send_decision(user, text, reason=reason, action=action)
+        review_context = _single_line(action_summary, 240)
+        if image_path:
+            review_context = _single_line(f"{review_context}\n真实图片文件：{image_path}", 360)
+        local = self._local_proactive_send_decision(
+            user,
+            text,
+            reason=reason,
+            action=action,
+            motive=motive,
+            topic=topic,
+            action_context=review_context,
+        )
         if local.get("decision") in {"drop", "defer"} and (strength != "lenient" or bool(local.get("hard"))):
+            return local
+        if local.get("decision") == "rewrite" and bool(local.get("hard")):
             return local
         if not bool(getattr(self, "enable_response_self_review", True)):
             return local
@@ -2193,9 +2383,6 @@ class ProactiveMessageMixin:
         if mode == "local_only":
             return local
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
-        review_context = _single_line(action_summary, 240)
-        if image_path:
-            review_context = _single_line(f"{review_context}\n真实图片文件：{image_path}", 360)
         intent_hint = self._format_proactive_generation_intent_hint(
             user,
             reason=reason,
@@ -4155,6 +4342,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
     def _visible_text_without_tts_reading(self, text: str, *, limit: int = 1000) -> str:
         source = str(text or "").strip()
         if not source:
+            return ""
+        if self._is_proactive_delivery_receipt_text(source):
             return ""
         placeholder_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)
         if callable(placeholder_cleaner):
@@ -6510,6 +6699,23 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "sent",
         }:
             return True
+        long_receipt_markers = (
+            ("已经把", "转给"),
+            ("已把", "转给"),
+            ("已经将", "转给"),
+            ("已将", "转给"),
+            ("已经发给", "就假装"),
+            ("已经发送给", "就假装"),
+            ("就假装", "语气很自然"),
+            ("随手分享", "语气很自然"),
+        )
+        if any(all(token in raw for token in pair) for pair in long_receipt_markers):
+            return True
+        if (
+            any(token in compact for token in ("视频链接转给", "链接转给", "消息转给", "内容转给"))
+            and any(token in compact for token in ("已经", "已", "完成", "成功"))
+        ):
+            return True
         return (
             len(compact) <= 32
             and any(token in compact for token in ("发送给用户", "发给用户", "发送给对方", "发给对方", "发出去了"))
@@ -6526,6 +6732,16 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 continue
             kept.append(line)
         return "\n".join(kept).strip()
+
+    def _proactive_archive_context_text(self, text: str) -> bool:
+        cleaned = _single_line(text, 500)
+        if not cleaned:
+            return False
+        if "【主动承接占位】" in cleaned or "下一条是 Bot 主动发出的内容" in cleaned:
+            return True
+        if self._is_proactive_delivery_receipt_text(cleaned):
+            return True
+        return False
 
     @staticmethod
     def _strip_leading_sentence_boundary_artifacts(text: str) -> str:
@@ -7108,6 +7324,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         extra_components: list[Any] | None = None,
         action_summary: str = "",
     ) -> str:
+        original_is_receipt = self._is_proactive_delivery_receipt_text(text)
         message_text = self._visible_text_without_tts_reading(text, limit=1000)
         attachment_notes: list[str] = []
         if image_path:
@@ -7129,6 +7346,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             message_text = f"{message_text}{suffix}" if message_text else suffix
         if message_text:
             return message_text
+        if original_is_receipt:
+            return ""
         return _single_line(action_summary, 160) or "主动向用户发送了一条消息。"
 
     async def _archive_proactive_message_to_conversation(

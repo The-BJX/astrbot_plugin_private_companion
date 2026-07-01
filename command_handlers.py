@@ -13,6 +13,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from .constants import DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
 from .helpers import _flat_get, _now_ts, _safe_float, _safe_int, _set_into_config, _single_line
 
 
@@ -228,6 +229,9 @@ class CommandHandlersMixin:
     def _companion_manual_config_display_meta(self) -> dict[str, dict[str, str]]:
         return {
             "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": {"label": "群聊连续对话判断模型", "location": "拓展页 -> 模型/Provider -> GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"},
+            "FAST_RESPONSE_PROVIDER_ID": {"label": "快速响应模型", "location": "拓展页 -> 模型/Provider -> 快速配置 -> 快速响应模型"},
+            "COMPLEX_REASONING_PROVIDER_ID": {"label": "复杂推理模型", "location": "拓展页 -> 模型/Provider -> 快速配置 -> 复杂推理模型"},
+            "CREATIVE_MODEL_PROVIDER_ID": {"label": "创作模型", "location": "拓展页 -> 模型/Provider -> 快速配置 -> 创作模型"},
             "LLM_PROVIDER_ID": {"label": "插件主模型 Provider", "location": "拓展页 -> 模型/Provider -> LLM_PROVIDER_ID"},
             "MAI_STYLE_PROVIDER_ID": {"label": "风格/轻量任务模型", "location": "拓展页 -> 模型/Provider -> MAI_STYLE_PROVIDER_ID"},
             "PHOTO_MODEL_PROVIDER_ID": {"label": "生图模型感知 Provider", "location": "拓展页 -> 模型/Provider -> PHOTO_MODEL_PROVIDER_ID"},
@@ -253,7 +257,9 @@ class CommandHandlersMixin:
             "backup_external_image_api_size": {"label": "备选在线生图尺寸", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "backup_external_image_api_timeout_seconds": {"label": "备选在线生图超时秒数", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "photo_persona_reference_image_path": {"label": "人设参考图路径", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 本地 ComfyUI；也可用命令 陪伴 参考图 设置"},
-            "photo_prompt_prefix": {"label": "生图提示词前缀", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格/提示词"},
+            "natural_language_photo_extra_prompt": {"label": "自然语言生图附加提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 自然语言生图/改图"},
+            "photo_generation_scene_presets": {"label": "生图场景预设", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
+            "photo_generation_fixed_prompt": {"label": "全局固定生图提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
             "enable_qzone_integration": {"label": "QQ 空间联动", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动"},
             "enable_qzone_life_publish": {"label": "QQ 空间生活说说", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 生活说说"},
             "max_daily_messages": {"label": "主动消息每日上限", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
@@ -1291,7 +1297,7 @@ class CommandHandlersMixin:
                     "设置入口：配置页搜索“群聊连续对话保持”或 enable_group_conversation_followup。",
                     "窗口：group_conversation_followup_seconds，决定多久内还能续接。",
                     "轮数：group_conversation_followup_max_turns，决定不继续 @ 时最多自动续几轮。",
-                    "模型：GROUP_FOLLOWUP_JUDGE_PROVIDER_ID 只在规则不确定时使用；留空时只走规则判断。",
+                    "模型：GROUP_FOLLOWUP_JUDGE_PROVIDER_ID 只在规则不确定时使用；留空时会先跟随快速响应模型，快速响应模型也留空时只走规则判断。",
                 ],
                 "settings": [
                     "enable_group_conversation_followup",
@@ -1381,6 +1387,7 @@ class CommandHandlersMixin:
                 "summary": "插件多数能力默认跟随 AstrBot 当前会话模型；部分功能可以单独指定 Provider。未单独配置时通常不是没模型，而是会回退到主模型或相关默认模型。",
                 "checks": [
                     "主聊天回复通常使用 AstrBot 当前会话选择的人格和 Provider。",
+                    "可以先用快速配置只填 4 类：快速响应模型、复杂推理模型、创作模型、插件视觉模型；高级单项留空时会自动套用这些快速配置。",
                     "陪伴答疑优先使用 TROUBLESHOOTING_PROVIDER_ID，未填时依次回退到 RESPONSE_REVIEW_PROVIDER_ID、MAI_STYLE_PROVIDER_ID、LLM_PROVIDER_ID。",
                     "智能收口使用 SMART_MESSAGE_DEBOUNCE_PROVIDER_ID；留空时跟随插件主模型。",
                     "生图模型不等于聊天模型，需要在生图平台/后端配置里单独确认。",
@@ -1388,6 +1395,9 @@ class CommandHandlersMixin:
                 ],
                 "settings": [
                     "LLM_PROVIDER_ID",
+                    "FAST_RESPONSE_PROVIDER_ID",
+                    "COMPLEX_REASONING_PROVIDER_ID",
+                    "CREATIVE_MODEL_PROVIDER_ID",
                     "TROUBLESHOOTING_PROVIDER_ID",
                     "RESPONSE_REVIEW_PROVIDER_ID",
                     "MAI_STYLE_PROVIDER_ID",
@@ -2038,6 +2048,53 @@ class CommandHandlersMixin:
             + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。")
         )
 
+    def _natural_language_photo_explicit_plugin_request(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        plugin_hit = any(
+            token in compact
+            for token in (
+                "插件能力",
+                "插件生图",
+                "插件画图",
+                "用插件",
+                "走插件",
+                "陪伴能力",
+                "陪伴插件",
+                "本插件",
+            )
+        )
+        if not plugin_hit:
+            return False
+        return any(
+            token in compact
+            for token in (
+                "画",
+                "绘图",
+                "生图",
+                "出图",
+                "生成图",
+                "生成图片",
+                "图片",
+                "照片",
+                "改图",
+                "修图",
+                "重绘",
+            )
+        )
+
+    def _natural_language_photo_disabled_text(self, reason: str = "natural_off") -> str:
+        if reason == "photo_off":
+            return (
+                "插件的主动拍照/生图总开关现在没开，所以不能走插件生图链路。\n"
+                "位置：拓展页 -> 功能开关 -> 长线主动 -> 主动拍照/生图。"
+            )
+        return (
+            "插件的自然语言生图/改图入口现在没开，所以这句不会被插件接管。\n"
+            "位置：拓展页 -> 功能开关 -> 长线主动 -> 主动拍照/生图详情 -> 自然语言生图/改图。"
+        )
+
     def _natural_language_photo_intent(
         self,
         text: str,
@@ -2055,11 +2112,14 @@ class CommandHandlersMixin:
         compact = re.sub(r"\s+", "", raw)
         selfie_markers = ("自拍", "拍照", "拍张照", "拍一张照", "拍一张照片", "拍张照片", "来张自拍", "发张自拍", "发一张自拍")
         selfie_hit = any(marker in compact for marker in selfie_markers)
-        draw_visual_targets = ("图片", "照片", "插画", "头像", "壁纸", "表情包", "自拍", "拍照", "图")
+        explicit_plugin_request = self._natural_language_photo_explicit_plugin_request(raw)
+        draw_visual_targets = ("图片", "照片", "插画", "头像", "壁纸", "表情包", "自拍", "拍照", "画卷", "图")
         edit_visual_targets = draw_visual_targets + ("这张", "这个图", "引用图")
         edit_strong_markers = ("改图", "修图", "重绘", "p图", "P图", "p一下", "P一下")
         edit_operation_markers = ("改成", "改为", "改一下", "p成", "P成", "换成", "变成", "加上", "加个", "去掉", "去除")
         draw_patterns = (
+            r"(?:帮我|给我|替我|请你|麻烦你)?(?:重新|再|再来|继续|重画|重绘)?(?:画一张|画张|画个|画一下|画一个|生成一张|生成一个|重新生成|再生成|生一张|做一张|做个|出一张)(?:图片|照片|插画|头像|壁纸|表情包|画卷|图)",
+            r"(?:重画|重绘|重新画|重新生成)(?:一张|一个|张|个)?.{0,80}?(?:图片|照片|插画|头像|壁纸|表情包|画卷|图)",
             r"(?:帮我|给我|替我|请你|麻烦你)(?:画一张|画个|生成一张|生一张|做一张|做个|出一张)(?:图片|照片|插画|头像|壁纸|表情包|图)",
             r"(?:帮我|给我|替我|请你|麻烦你)(?:画|生成|做|出).{0,80}?(?:图片|照片|插画|头像|壁纸|表情包|图)",
             r"(?:画一张|画个|生成|生成一张|生一张|做一张|做个|出一张)(?:图片|照片|插画|头像|壁纸|表情包|图)",
@@ -2070,6 +2130,8 @@ class CommandHandlersMixin:
         if draw_hit and not any(token in compact for token in draw_visual_targets):
             draw_hit = False
         if selfie_hit and directed:
+            draw_hit = True
+        if not draw_hit and explicit_plugin_request:
             draw_hit = True
         if not draw_hit and directed:
             bare_draw_patterns = (
@@ -2119,6 +2181,9 @@ class CommandHandlersMixin:
         cleanup_patterns = [
             r"^(?:麻烦|可以|能不能|能|帮我|给我|替我|请你|请)?",
             r"^(?:拍一张|拍张|拍个|拍一下|发一张|发张|来一张|来张)(?:自拍|照片|照|图片|图)?",
+            r"^(?:用|走)?(?:这个|你|本)?(?:插件能力|插件|陪伴能力|陪伴插件)(?:来|去)?",
+            r"^(?:重画|重绘|重新画|重新生成)(?:一张|一个|张|个)?(?:图片|照片|插画|头像|壁纸|表情包|画卷|图)?",
+            r"^(?:重新|再|再来|继续|重画|重绘)?(?:画一张|画张|画个|画一下|画一个|生成一张|生成一个|重新生成|再生成|生一张|做一张|做个|出一张|来一张|来张|整一张|整张|整一个|整个|画)(?:图片|照片|插画|头像|壁纸|表情包|画卷|图)?",
             r"^(?:画一张|画个|画一下|画一个|生成一张|生成一个|生成|生一张|做一张|做个|出一张|来一张|来张|整一张|整张|整一个|整个|画)(?:图片|照片|插画|头像|壁纸|表情包|图)?",
             r"^(?:把)?(?:这张图|这个图|这张|引用图|图片)?(?:帮我)?(?:改成|改为|改一下|改图|修图|重绘|p成|P成|换成|变成)",
         ]
@@ -2164,6 +2229,10 @@ class CommandHandlersMixin:
 
     def _build_natural_language_photo_prompt(self, *, prompt: str, kind: str, has_reference: bool) -> str:
         style_name, style_instruction = self._get_photo_style_instruction() if callable(getattr(self, "_get_photo_style_instruction", None)) else ("默认", "")
+        extra_prompt = str(
+            getattr(self, "natural_language_photo_extra_prompt", DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT)
+            or ""
+        ).strip()
         if kind == "edit" and has_reference:
             base = (
                 "基于用户提供或引用的参考图进行改图。"
@@ -2180,14 +2249,31 @@ class CommandHandlersMixin:
             base = f"根据用户自然语言请求生成图片。用户要求：{prompt}。"
         return _single_line(
             " ".join(
-                [
+                part
+                for part in [
                     base,
-                    "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。",
+                    extra_prompt,
                     f"风格：{style_name}；{style_instruction}",
                 ]
+                if str(part or "").strip()
             ),
-            1000,
+            6500,
         )
+
+    def _natural_language_photo_ack_text(self, *, kind: str, has_reference: bool) -> str:
+        if kind == "edit" or has_reference:
+            return "我照着这张改一下，等我一下。"
+        if kind == "selfie":
+            return "等我拍一下。"
+        return "我去画，等我一下。"
+
+    def _natural_language_photo_done_text(self, *, kind: str, reference_label: str = "") -> str:
+        if kind == "edit":
+            label = _single_line(reference_label, 24) or "这张图"
+            return f"按{label}改好啦，你看。"
+        if kind == "selfie":
+            return "拍好啦，你看。"
+        return "画好啦，你看。"
 
     async def _maybe_handle_natural_language_photo_request(
         self,
@@ -2197,12 +2283,21 @@ class CommandHandlersMixin:
         *,
         directed: bool = False,
     ) -> bool:
-        if not getattr(self, "enable_natural_language_photo_generation", False):
-            return False
-        if not getattr(self, "enable_photo_text_action", False):
-            return False
         text = _single_line(text, 800)
         if not text or text.startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴")):
+            return False
+        explicit_plugin_request = self._natural_language_photo_explicit_plugin_request(text)
+        if not getattr(self, "enable_photo_text_action", False):
+            if explicit_plugin_request:
+                await self._reply(event, self._natural_language_photo_disabled_text("photo_off"))
+                event.stop_event()
+                return True
+            return False
+        if not getattr(self, "enable_natural_language_photo_generation", False):
+            if explicit_plugin_request:
+                await self._reply(event, self._natural_language_photo_disabled_text("natural_off"))
+                event.stop_event()
+                return True
             return False
         has_reference = bool(self._private_event_has_image(event) if callable(getattr(self, "_private_event_has_image", None)) else False)
         has_reference = has_reference or bool(self._photo_reference_sources_from_reply_cache(event))
@@ -2279,7 +2374,12 @@ class CommandHandlersMixin:
             kind=str(intent.get("kind") or "text2img"),
             has_reference=bool(reference_path),
         )
-        workflow_kind = "selfie" if reference_path or str(intent.get("kind") or "") == "selfie" else "text2img"
+        intent_kind = str(intent.get("kind") or "text2img")
+        workflow_kind = "selfie" if reference_path or intent_kind == "selfie" else "text2img"
+        await self._reply(
+            event,
+            self._natural_language_photo_ack_text(kind=intent_kind, has_reference=bool(reference_path)),
+        )
         backend_name, image_path, note = await self._generate_photo_image(
             workflow_kind=workflow_kind,
             prompt_text=prompt_text,
@@ -2310,7 +2410,7 @@ class CommandHandlersMixin:
             )
             event.stop_event()
             return True
-        caption = "好了。" if not reference_path else f"好了，按{reference_label or '这张图'}改了一版。"
+        caption = self._natural_language_photo_done_text(kind=intent_kind, reference_label=reference_label)
         chain = self._build_outbound_chain(caption, image_path)
         try:
             await event.send(self._build_result_from_chain(chain))

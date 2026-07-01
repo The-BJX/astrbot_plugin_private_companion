@@ -1,6 +1,9 @@
 const HTTP_API = "/astrbot_plugin_private_companion/page";
 const PAGE_ENDPOINT_PREFIX = "page";
 const TRANSPARENT_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+let cachedPageBridge = null;
+let pageBridgeProbePromise = null;
+let loadAllRequestSeq = 0;
 
 const state = {
   overview: null,
@@ -66,6 +69,9 @@ const featureSwitchNotes = {
 };
 
 const providerLabels = {
+  FAST_RESPONSE_PROVIDER_ID: "快速响应模型",
+  COMPLEX_REASONING_PROVIDER_ID: "复杂推理模型",
+  CREATIVE_MODEL_PROVIDER_ID: "创作模型",
   LLM_PROVIDER_ID: "主模型",
   MAI_STYLE_PROVIDER_ID: "陪伴通用模型",
   DAILY_PLAN_PROVIDER_ID: "日程生成",
@@ -125,6 +131,9 @@ const noFallbackProviderKeys = new Set([
 ]);
 
 const optionalNoFallbackProviderKeys = new Set([
+  "FAST_RESPONSE_PROVIDER_ID",
+  "COMPLEX_REASONING_PROVIDER_ID",
+  "CREATIVE_MODEL_PROVIDER_ID",
   "NARRATION_PROVIDER_ID",
 ]);
 
@@ -244,6 +253,27 @@ function visibleConfigKey(key) {
 }
 
 const providerGuides = {
+  FAST_RESPONSE_PROVIDER_ID: {
+    preference: "speed",
+    passiveImpact: "direct",
+    purpose: "快速配置入口。给短判断、轻量复核、智能沉默/收口、群聊续接、语音短句、工具转述、新闻和搜索整理等低延迟任务兜底。",
+    fit: "适合便宜、响应快、短 JSON/YES-NO 稳定、中文短句自然的小到中型模型。",
+    fallback: "只作为未单独填写任务的默认值；单项模型已填写时优先使用单项配置。",
+  },
+  COMPLEX_REASONING_PROVIDER_ID: {
+    preference: "quality",
+    passiveImpact: "conditional",
+    purpose: "快速配置入口。给主模型兜底、日程生成/细化、长期记忆整理、关系分析、合并消息转述等复杂理解任务兜底。",
+    fit: "适合推理更强、长上下文理解和结构化输出更稳的模型。",
+    fallback: "只作为未单独填写任务的默认值；主模型或单项模型已填写时优先使用对应配置。",
+  },
+  CREATIVE_MODEL_PROVIDER_ID: {
+    preference: "quality",
+    passiveImpact: "async",
+    purpose: "快速配置入口。给私下创作、创作大纲/审校、日记梦境和生图提示词等表达/画面感任务兜底。",
+    fit: "适合文风稳定、画面感好、中文表达自然、能遵守角色边界的模型。",
+    fallback: "只作为未单独填写任务的默认值；创作相关单项模型已填写时优先使用单项配置。",
+  },
   LLM_PROVIDER_ID: {
     preference: "quality",
     passiveImpact: "direct",
@@ -432,7 +462,7 @@ const providerGuides = {
     passiveImpact: "direct",
     purpose: "判断群里用户后续没 @ 的话是否仍在和 Bot 对话，只在规则不确定时调用。",
     fit: "适合便宜、低延迟、YES/NO 分类准确、指令遵循稳定的小模型。",
-    fallback: "留空时只使用规则判断。",
+    fallback: "留空时先跟随快速响应模型；快速响应模型也留空时只使用规则判断。",
   },
   FORWARD_MESSAGE_PROVIDER_ID: {
     preference: "balanced",
@@ -473,6 +503,12 @@ const providerGuides = {
 
 const providerGroups = [
   {
+    id: "quick",
+    title: "快速配置",
+    desc: "按使用场景配置 4 个模型；高级单项留空时会自动套用这里的配置。",
+    keys: ["FAST_RESPONSE_PROVIDER_ID", "COMPLEX_REASONING_PROVIDER_ID", "CREATIVE_MODEL_PROVIDER_ID", "PLUGIN_VISION_PROVIDER_ID"],
+  },
+  {
     id: "core",
     title: "基础与兜底",
     desc: "主模型、陪伴通用和最终回复前后的基础能力。",
@@ -500,7 +536,7 @@ const providerGroups = [
     id: "media",
     title: "视觉与外界信息",
     desc: "识图、新闻和主动搜索相关模型。",
-    keys: ["PLUGIN_VISION_PROVIDER_ID", "PRIVATE_READING_VISION_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
+    keys: ["PRIVATE_READING_VISION_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
   },
 ];
 
@@ -1182,6 +1218,7 @@ const configLabels = {
   daily_outfit_photo_prompt: "每日穿搭提示词",
   enable_natural_language_photo_generation: "自然语言生图/改图",
   natural_language_photo_generation_max_daily: "自然语言生图上限",
+  natural_language_photo_extra_prompt: "自然语言生图附加提示词",
   comfyui_photo_wait_seconds: "本地生图等待秒数",
   enable_local_photo_load_guard: "电脑高负荷保护",
   local_photo_cpu_busy_percent: "CPU 忙碌阈值",
@@ -1475,8 +1512,9 @@ const configDescriptions = {
   photo_persona_reference_image_path: "png/jpg/jpeg/webp 本地文件路径或 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。仅在自拍/人像类主动生图时使用。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口，不支持时回退纯文生图；SDGen 仍按提示词生成。",
   enable_daily_outfit_photo: "开启后，每天日程生成并保存后额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，并替换拓展页左上角 Logo。失败会记录当天结果，不会因为刷新页面反复请求。",
   daily_outfit_photo_prompt: "可选。给每日穿搭补充偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
-  enable_natural_language_photo_generation: "默认关闭，避免和独立生图插件抢触发。开启后，只有私聊里明确说“帮我画一张/生成图片/来张图”等图片请求才会调用生图；普通“生成/画/改成”不会触发。随消息带图或引用图片并明确要求改图、修图、重绘，或说“改成/加上/去掉……”时才会尝试改图。该入口只对主人私聊开放。",
+  enable_natural_language_photo_generation: "默认关闭，避免和独立生图插件抢触发。开启后，只有私聊里明确说“帮我画一张/重新画张图片/生成图片/来张图/用插件能力画”等图片请求才会调用生图；普通“生成/画/改成”不会触发。随消息带图或引用图片并明确要求改图、修图、重绘，或说“改成/加上/去掉……”时才会尝试改图。该入口只对主人私聊开放。",
   natural_language_photo_generation_max_daily: "独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭自然语言生图/改图。",
+  natural_language_photo_extra_prompt: "只作用于自然语言生图/改图入口，会接在用户要求后、风格与场景预设前。留空则不追加这段；全局固定附加提示词仍在所有生图最后追加。",
   comfyui_photo_wait_seconds: "本地 ComfyUI 工作流最多等待多久。超时后不会假装已经拍照。",
   enable_local_photo_load_guard: "开启后，本地 ComfyUI/SDGen 生图前读取 CPU/内存负载；负载偏高时延后本次主动计划，或在 auto 模式下改走在线图片 API。",
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
@@ -1698,7 +1736,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_backup_external_image_api: ["backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
@@ -2010,7 +2048,7 @@ const featureSettingSections = {
     {
       title: "自然语言生图/改图",
       note: "私聊明确请求时直接调用生图后端；默认关闭，避免和独立生图插件抢触发。",
-      keys: ["enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily"],
+      keys: ["enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"],
     },
     {
       title: "电脑负载保护",
@@ -2133,6 +2171,7 @@ const featureSettingTypes = {
   daily_outfit_photo_prompt: { type: "textarea" },
   photo_generation_style_custom_prompt: { type: "textarea" },
   photo_generation_fixed_prompt: { type: "textarea" },
+  natural_language_photo_extra_prompt: { type: "textarea" },
   photo_generation_scene_presets: { type: "textarea" },
   segmented_proactive_regex: { type: "textarea" },
   segmented_proactive_split_words: { type: "textarea" },
@@ -2181,6 +2220,12 @@ function displaySettingValue(key, value) {
     if (numeric < 0) return String(numeric);
     const percent = numeric <= 1 ? numeric * 100 : numeric;
     return Number.isInteger(percent) ? String(percent) : String(Number(percent.toFixed(2)));
+  }
+  if (["private_user_aliases", "private_user_delivery_aliases"].includes(key) && value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.entries(value)
+      .map(([alias, target]) => `${String(alias || "").trim()}=${String(target || "").trim()}`)
+      .filter((line) => line !== "=")
+      .join("\n");
   }
   return value ?? "";
 }
@@ -2270,6 +2315,8 @@ const tokenTaskLabels = {
   group_interject: "群聊插话",
   group_episode: "群聊片段",
   group_slang: "黑话释义",
+  group_slang_learning: "群黑话学习",
+  group_slang_meaning: "黑话释义",
   group_question_wakeup_reply_review: "群聊答疑复核",
   group_followup_judge: "群聊续接判断",
   worldbook_registration: "关系网自登记",
@@ -2423,13 +2470,13 @@ async function hydrateDailyOutfitLogo() {
 }
 
 async function fetchJson(path, options = {}) {
-  const bridge = await waitForBridge();
+  const bridge = await getPageBridge();
   const method = (options.method || "GET").toUpperCase();
   let payload;
 
   if (bridge && typeof bridge.apiGet === "function" && typeof bridge.apiPost === "function") {
     payload = await bridgeRequest(bridge, path, method, options.body);
-  } else if (new URLSearchParams(window.location.search).get("debug_http") === "1") {
+  } else if (isDebugHttpMode()) {
     const response = await fetch(`${HTTP_API}${path}`, {
       cache: "no-store",
       headers: options.body ? { "Content-Type": "application/json" } : undefined,
@@ -2461,6 +2508,42 @@ function getBridge() {
     return null;
   }
   return null;
+}
+
+function isDebugHttpMode() {
+  return new URLSearchParams(window.location.search).get("debug_http") === "1";
+}
+
+function isUsableBridge(bridge) {
+  return Boolean(bridge && typeof bridge.apiGet === "function" && typeof bridge.apiPost === "function");
+}
+
+async function getPageBridge(timeoutMs = 2500) {
+  if (isUsableBridge(cachedPageBridge)) return cachedPageBridge;
+
+  const bridge = getBridge();
+  if (isUsableBridge(bridge)) {
+    cachedPageBridge = bridge;
+    return cachedPageBridge;
+  }
+
+  if (isDebugHttpMode()) return null;
+
+  if (!pageBridgeProbePromise) {
+    pageBridgeProbePromise = waitForBridge(timeoutMs)
+      .then((resolvedBridge) => {
+        if (isUsableBridge(resolvedBridge)) {
+          cachedPageBridge = resolvedBridge;
+          return cachedPageBridge;
+        }
+        return null;
+      })
+      .finally(() => {
+        pageBridgeProbePromise = null;
+      });
+  }
+
+  return pageBridgeProbePromise;
 }
 
 async function waitForBridge(timeoutMs = 2500) {
@@ -2741,10 +2824,12 @@ async function applyConfigImport() {
   state.configImportPreview = null;
   renderConfigMigrationPreview();
   if (result) {
+    const requestSeq = ++loadAllRequestSeq;
     state.overview = result;
     state.configBackups = result.migration_backups || state.configBackups;
     state.configLastChecks = result.post_import_checks || [];
     renderAll();
+    void loadUserGroupLists(requestSeq);
   }
   showToast("配置已导入，已自动备份导入前状态");
 }
@@ -2755,10 +2840,12 @@ async function restoreConfigBackup(id) {
   if (!window.confirm(`将从自动备份恢复：${backupId}\n恢复前也会再次备份当前状态。继续吗？`)) return;
   const result = await postJson("/config/restore", { id: backupId });
   if (result) {
+    const requestSeq = ++loadAllRequestSeq;
     state.overview = result;
     state.configBackups = result.migration_backups || state.configBackups;
     state.configLastChecks = result.post_import_checks || [];
     renderAll();
+    void loadUserGroupLists(requestSeq);
   }
   showToast("已从备份恢复");
 }
@@ -2797,25 +2884,57 @@ async function loadTroubleshooting() {
   return data;
 }
 
-async function loadAll() {
-  $("#subtitle").textContent = "读取运行态中...";
+function applyOverviewData(overview) {
+  state.overview = overview;
+  hydrateTokenStatsFromOverview(overview);
+  state.featureDraft = featureDraftFromOverview(overview);
+}
+
+function applyUserGroupLists(users, groups) {
+  state.users = Array.isArray(users?.items) ? users.items : [];
+  state.groups = Array.isArray(groups?.items) ? groups.items : [];
+  if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
+  if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
+}
+
+async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) {
+  const { showErrors = false } = options;
   try {
-    const [overview, users, groups] = await Promise.all([
-      fetchJson("/overview"),
+    const [users, groups] = await Promise.all([
       fetchJson("/users?limit=300"),
       fetchJson("/groups?limit=300"),
     ]);
-    state.overview = overview;
-    hydrateTokenStatsFromOverview(overview);
-    state.users = users.items || [];
-    state.groups = groups.items || [];
-    state.featureDraft = featureDraftFromOverview(overview);
-    if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
-    if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
+    if (requestSeq !== loadAllRequestSeq) return null;
+    applyUserGroupLists(users, groups);
+    renderAll();
+    const overview = state.overview || {};
+    $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
+    return { users, groups };
+  } catch (error) {
+    if (requestSeq !== loadAllRequestSeq) return null;
+    console.warn("[PrivateCompanionPage] 用户/群聊列表加载失败", error);
+    const overview = state.overview || {};
+    $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载，名单加载失败`;
+    if (showErrors) showToast(`名单加载失败：${error.message}`, "error");
+    return null;
+  }
+}
+
+async function loadAll(options = {}) {
+  const requestSeq = ++loadAllRequestSeq;
+  const { waitForLists = false } = options;
+  $("#subtitle").textContent = "读取运行态中...";
+  try {
+    const overview = await fetchJson("/overview");
+    if (requestSeq !== loadAllRequestSeq) return;
+    applyOverviewData(overview);
     renderAll();
     void ensureTabData(state.activeTab, true);
-    $("#subtitle").textContent = `${overview.plugin.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
+    $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载，正在补全名单...`;
+    const listPromise = loadUserGroupLists(requestSeq, { showErrors: true });
+    if (waitForLists) await listPromise;
   } catch (error) {
+    if (requestSeq !== loadAllRequestSeq) return;
     $("#subtitle").textContent = `加载失败：${error.message}`;
   }
 }
@@ -3505,7 +3624,7 @@ function troubleshootingReasonItems(checks, events, selected) {
     if (!importantLevels.has(item.level || "info")) continue;
     rows.push({
       level: item.level || "info",
-      title: item.title || "-",
+      title: troubleshootingDisplayTitle(item.title || "-", item),
       text: item.action || item.text || "",
       jump: item.jump || "",
     });
@@ -3514,7 +3633,7 @@ function troubleshootingReasonItems(checks, events, selected) {
     if (!importantLevels.has(item.level || "info")) continue;
     rows.push({
       level: item.level || "info",
-      title: item.title || "-",
+      title: troubleshootingDisplayTitle(item.title || "-", item),
       text: item.detail || item.action || "",
       jump: item.jump || "",
     });
@@ -3522,6 +3641,23 @@ function troubleshootingReasonItems(checks, events, selected) {
   const rank = { error: 0, warn: 1, info: 2, ok: 3 };
   rows.sort((a, b) => (rank[a.level] ?? 9) - (rank[b.level] ?? 9));
   return rows.slice(0, 6);
+}
+
+function troubleshootingDisplayTitle(title, item = {}) {
+  const rawTitle = String(title || "").trim();
+  const task = String(item.task || item.key || "").trim();
+  if (task) {
+    const label = tokenTaskLabel(task);
+    if (label && label !== task) {
+      return rawTitle.includes("失败") ? `${label}失败` : label;
+    }
+  }
+  const match = rawTitle.match(/^([A-Za-z0-9_.:-]+)\s*(失败|异常|错误|调用失败)$/);
+  if (match) {
+    const label = tokenTaskLabel(match[1]);
+    if (label && label !== match[1]) return `${label}${match[2]}`;
+  }
+  return rawTitle || "-";
 }
 
 function troubleshootingSummaryText(counts) {
@@ -4487,11 +4623,14 @@ function renderTokens() {
   const softRemaining = budget.soft_remaining == null ? null : Number(budget.soft_remaining || 0);
   const exemptUsed = Number(budget.exempt_used || 0);
   const dailyRemaining = budget.remaining == null ? null : Number(budget.remaining || 0);
+  const tokenLoadingNote = state.tokenStatsPartial
+    ? `<div class="empty small">已先显示总览中的 Token 摘要，正在加载完整明细...</div>`
+    : (!state.tokenStats && !state.lazyLoaded.tokenStats ? `<div class="empty small">正在加载 Token 统计...</div>` : "");
   renderTokenToolbar(stats);
   const showHourlyTrend = state.tokenView === "total";
   const hourlyPanel = $("#tokenHourlyPanel");
   if (hourlyPanel) hourlyPanel.hidden = !showHourlyTrend;
-  $("#tokenSummary").innerHTML = tokenSummaryBoard({
+  $("#tokenSummary").innerHTML = `${tokenLoadingNote}${tokenSummaryBoard({
     scope,
     externalScope,
     totalTokens,
@@ -4513,7 +4652,7 @@ function renderTokens() {
     softActive: Boolean(budget.soft_active),
     deferredCalls: Number(budget.deferred_calls || 0),
     proactiveMessages: exemptUsed,
-  });
+  })}`;
 
   renderTokenChart("#tokenProviderChart", scope.providers || [], "暂无 Provider 消耗数据", (item) => item.key || "default");
   renderTokenChart("#tokenTaskChart", scope.tasks || [], "暂无任务消耗数据", (item) => tokenTaskLabel(item.key));
@@ -11129,7 +11268,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_photo_text_action") {
     if (settingKey === "daily_outfit_photo_prompt") return boolSetting("enable_daily_outfit_photo");
-    if (settingKey === "natural_language_photo_generation_max_daily") return boolSetting("enable_natural_language_photo_generation");
+    if (["natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"].includes(settingKey)) return boolSetting("enable_natural_language_photo_generation");
     return true;
   }
   if (featureKey === "enable_emotion_simulation") {
@@ -12315,7 +12454,7 @@ function providerCardMarkup(key, label, providers) {
       </label>
       <div class="provider-current">
         <span>当前使用</span>
-        <b>${escapeHtml(resolved || (noFallback ? "未配置" : "AstrBot 默认模型"))}</b>
+        <b>${escapeHtml(resolved || (noFallback ? "未配置" : (optionalNoFallback ? "未启用" : "AstrBot 默认模型")))}</b>
       </div>
       ${providerGuideMarkup(key)}
       <div class="provider-row">
@@ -12439,7 +12578,7 @@ function providerSelect(key, value) {
   const known = state.availableProviders.some((item) => item.id === value);
   const customValue = value && !known ? value : "";
   const options = [
-    `<option value="">${noFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
+    `<option value="">${noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
     ...state.availableProviders.map((item) => {
       const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
       return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
@@ -12467,26 +12606,61 @@ function resolveProviderId(key, values = currentProviderValues()) {
   if (values[key]) return values[key];
   if (noFallbackProviderKeys.has(key)) return "";
   if (optionalNoFallbackProviderKeys.has(key)) return "";
+  const fast = values.FAST_RESPONSE_PROVIDER_ID || "";
+  const complex = values.COMPLEX_REASONING_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
+  const creative = values.CREATIVE_MODEL_PROVIDER_ID || complex || fast;
+  if (key === "LLM_PROVIDER_ID") return complex || "";
+  if (key === "MAI_STYLE_PROVIDER_ID") return fast || complex || "";
+  if ([
+    "DAILY_PLAN_PROVIDER_ID",
+    "DETAIL_ENHANCEMENT_PROVIDER_ID",
+    "HISTORY_SUMMARY_PROVIDER_ID",
+    "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
+    "COMPANION_MEMORY_PROVIDER_ID",
+    "DIALOGUE_EPISODE_PROVIDER_ID",
+    "GROUP_EPISODE_PROVIDER_ID",
+    "FORWARD_MESSAGE_PROVIDER_ID",
+  ].includes(key)) {
+    return complex || fast || "";
+  }
+  if ([
+    "CREATIVE_PROVIDER_ID",
+    "CREATIVE_OUTLINE_PROVIDER_ID",
+    "CREATIVE_REVIEW_PROVIDER_ID",
+    "DREAM_DIARY_PROVIDER_ID",
+    "PHOTO_PROMPT_PROVIDER_ID",
+  ].includes(key)) {
+    return creative || values.MAI_STYLE_PROVIDER_ID || fast || complex || "";
+  }
+  if ([
+    "RESPONSE_REVIEW_PROVIDER_ID",
+    "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
+    "TROUBLESHOOTING_PROVIDER_ID",
+    "EMOTION_JUDGEMENT_PROVIDER_ID",
+    "GROUP_INTERJECT_PROVIDER_ID",
+    "GROUP_SLANG_PROVIDER_ID",
+    "VOICE_PROMPT_PROVIDER_ID",
+    "tts_conversion_provider_id",
+    "NARRATION_PROVIDER_ID",
+    "NEWS_PROVIDER_ID",
+    "WEB_EXPLORATION_PROVIDER_ID",
+  ].includes(key)) {
+    return fast || values.MAI_STYLE_PROVIDER_ID || complex || "";
+  }
   if (key === "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID") {
-    return values.LLM_PROVIDER_ID || "";
+    return fast || complex || "";
   }
   if (key === "SMART_SILENCE_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || values.SMART_MESSAGE_DEBOUNCE_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
-  }
-  if (key === "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
+    return values.RESPONSE_REVIEW_PROVIDER_ID || values.SMART_MESSAGE_DEBOUNCE_PROVIDER_ID || fast || values.MAI_STYLE_PROVIDER_ID || complex || "";
   }
   if (key === "REST_WAKEUP_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
+    return values.RESPONSE_REVIEW_PROVIDER_ID || fast || complex || "";
   }
-  if (key === "TROUBLESHOOTING_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
-  }
-  if (key === "EMOTION_JUDGEMENT_PROVIDER_ID") {
-    return values.TROUBLESHOOTING_PROVIDER_ID || values.RELATIONSHIP_ANALYSIS_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
+  if (key === "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID") {
+    return fast || "";
   }
   if (key !== "LLM_PROVIDER_ID" && values.MAI_STYLE_PROVIDER_ID) return values.MAI_STYLE_PROVIDER_ID;
-  return values.LLM_PROVIDER_ID || "";
+  return complex || "";
 }
 
 function setProviderStatus(key, message, level = "info") {
@@ -12573,18 +12747,29 @@ async function testProvider(key) {
 }
 
 function renderProviderFlow(providers) {
-  const main = providers.LLM_PROVIDER_ID || "AstrBot 默认模型";
-  const mai = providers.MAI_STYLE_PROVIDER_ID || main;
+  const fast = providers.FAST_RESPONSE_PROVIDER_ID || "未配置";
+  const complex = providers.COMPLEX_REASONING_PROVIDER_ID || "未配置";
+  const creative = providers.CREATIVE_MODEL_PROVIDER_ID || "未配置";
+  const main = resolveProviderId("LLM_PROVIDER_ID", providers) || "AstrBot 默认模型";
+  const mai = resolveProviderId("MAI_STYLE_PROVIDER_ID", providers) || main;
   const pluginVision = providers.PLUGIN_VISION_PROVIDER_ID
     || providers.NARRATION_PROVIDER_ID
     || "跟随工具结果转述 / 主模型";
   const tasks = Object.entries(providerLabels).filter(([key]) => (
-    key !== "LLM_PROVIDER_ID"
+    !["FAST_RESPONSE_PROVIDER_ID", "COMPLEX_REASONING_PROVIDER_ID", "CREATIVE_MODEL_PROVIDER_ID"].includes(key)
+    && key !== "LLM_PROVIDER_ID"
     && key !== "MAI_STYLE_PROVIDER_ID"
     && key !== "PLUGIN_VISION_PROVIDER_ID"
     && visibleConfigKey(key)
   ));
   $("#providerFlow").innerHTML = `
+    <div class="flow-lane">
+      <span class="flow-node primary">快速响应<br><b>${escapeHtml(fast)}</b></span>
+      <span class="flow-arrow">·</span>
+      <span class="flow-node primary">复杂推理<br><b>${escapeHtml(complex)}</b></span>
+      <span class="flow-arrow">·</span>
+      <span class="flow-node primary">创作模型<br><b>${escapeHtml(creative)}</b></span>
+    </div>
     <div class="flow-lane">
       <span class="flow-node primary">主模型<br><b>${escapeHtml(main)}</b></span>
       <span class="flow-arrow">→</span>
@@ -13080,10 +13265,12 @@ async function runAction(action, successMessage = "", control = null) {
   try {
     const result = await action();
     if (result && typeof result === "object" && result.plugin && result.features) {
+      const requestSeq = ++loadAllRequestSeq;
       state.overview = result;
       state.featureDraft = featureDraftFromOverview(result);
       renderAll();
       $("#subtitle").textContent = `${result.plugin.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
+      void loadUserGroupLists(requestSeq);
     } else {
       await loadAll();
     }

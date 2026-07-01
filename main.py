@@ -68,6 +68,7 @@ except Exception:
 from .constants import (
     DEFAULT_DAILY_PLAN_ITEMS,
     DEFAULT_HUMANIZED_STATE,
+    DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT,
     DEFAULT_REPLY_STYLE_PROMPT,
     PLUGIN_NAME,
     DATA_VERSION,
@@ -426,7 +427,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.6.1",
+    "5.6.2",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -626,6 +627,9 @@ class PrivateCompanionPlugin(
         self.enable_lunar_perception = self._cfg_bool(c, "enable_lunar_perception", True)
         self.enable_solar_term_perception = self._cfg_bool(c, "enable_solar_term_perception", True)
         self.enable_almanac_perception = self._cfg_bool(c, "enable_almanac_perception", False)
+        self.fast_response_provider_id = self._cfg_str(c, "FAST_RESPONSE_PROVIDER_ID", "")
+        self.complex_reasoning_provider_id = self._cfg_str(c, "COMPLEX_REASONING_PROVIDER_ID", "")
+        self.creative_model_provider_id = self._cfg_str(c, "CREATIVE_MODEL_PROVIDER_ID", "")
         self.llm_provider_id = self._cfg_str(c, "LLM_PROVIDER_ID", "")
         self.daily_token_limit = self._cfg_int(c, "daily_token_limit", 1_000_000, 0)
         legacy_soft_enabled = self._cfg_bool(c, "enable_maintenance_token_saver", True)
@@ -817,6 +821,12 @@ class PrivateCompanionPlugin(
         self.daily_outfit_photo_prompt = self._cfg_str(c, "daily_outfit_photo_prompt", "")
         self.enable_natural_language_photo_generation = self._cfg_bool(c, "enable_natural_language_photo_generation", False)
         self.natural_language_photo_generation_max_daily = self._cfg_int(c, "natural_language_photo_generation_max_daily", 2, 0, 100)
+        raw_natural_photo_extra = _flat_get(c, "natural_language_photo_extra_prompt", None)
+        self.natural_language_photo_extra_prompt = (
+            DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
+            if raw_natural_photo_extra is None
+            else str(raw_natural_photo_extra).strip()
+        )
         self.enable_weather_context = self._cfg_bool(c, "enable_weather_context", True)
         self.weather_api_key = self._cfg_str(c, "weather_api_key", "")
         self.weather_city = self._cfg_str(c, "weather_city", "")
@@ -1180,6 +1190,7 @@ class PrivateCompanionPlugin(
             "PRIVATE_READING_VISION_PROVIDER_ID",
             self._cfg_str(c, "JM_COSMOS_VISION_PROVIDER_ID", ""),
         )
+        self._apply_quick_provider_defaults()
         if isinstance(c, dict):
             legacy_private_reading_keys = {
                 "enable_jm_cosmos_integration": "enable_private_reading_integration",
@@ -1748,7 +1759,7 @@ class PrivateCompanionPlugin(
             "消息已发送会等对方回复",
             "messagesent",
             "sent",
-        } or status_receipt_like or re.fullmatch(r"(?i)message\s+sent\s+to\s+session\s+\S+", text):
+        } or status_receipt_like or self._is_proactive_delivery_receipt_text(text) or re.fullmatch(r"(?i)message\s+sent\s+to\s+session\s+\S+", text):
             atrelay_result = getattr(event, "private_companion_atrelay_tool_result", None)
             if isinstance(atrelay_result, dict) and _single_line(atrelay_result.get("status"), 24) in {"success", "scheduled"}:
                 final_reply = _single_line(atrelay_result.get("final_reply"), 80) or "说过啦。"
@@ -3173,6 +3184,97 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "通义万相": "bailian",
         }
         return aliases.get(text, text if text in {"auto", "openai", "bailian"} else "auto")
+
+    def _apply_quick_provider_defaults(self) -> None:
+        fast = str(getattr(self, "fast_response_provider_id", "") or "").strip()
+        complex_model = str(getattr(self, "complex_reasoning_provider_id", "") or "").strip()
+        creative = str(getattr(self, "creative_model_provider_id", "") or "").strip()
+
+        attr_config_keys = {
+            "llm_provider_id": "LLM_PROVIDER_ID",
+            "mai_style_provider_id": "MAI_STYLE_PROVIDER_ID",
+            "daily_plan_provider_id": "DAILY_PLAN_PROVIDER_ID",
+            "detail_enhancement_provider_id": "DETAIL_ENHANCEMENT_PROVIDER_ID",
+            "history_summary_provider_id": "HISTORY_SUMMARY_PROVIDER_ID",
+            "relationship_analysis_provider_id": "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
+            "companion_memory_provider_id": "COMPANION_MEMORY_PROVIDER_ID",
+            "dialogue_episode_provider_id": "DIALOGUE_EPISODE_PROVIDER_ID",
+            "group_episode_provider_id": "GROUP_EPISODE_PROVIDER_ID",
+            "forward_message_provider_id": "FORWARD_MESSAGE_PROVIDER_ID",
+            "proactive_persona_judge_provider_id": "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
+            "response_review_provider_id": "RESPONSE_REVIEW_PROVIDER_ID",
+            "smart_silence_provider_id": "SMART_SILENCE_PROVIDER_ID",
+            "troubleshooting_provider_id": "TROUBLESHOOTING_PROVIDER_ID",
+            "emotion_judgement_provider_id": "EMOTION_JUDGEMENT_PROVIDER_ID",
+            "smart_message_debounce_provider_id": "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+            "rest_wakeup_provider_id": "REST_WAKEUP_PROVIDER_ID",
+            "group_followup_judge_provider_id": "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
+            "group_interject_provider_id": "GROUP_INTERJECT_PROVIDER_ID",
+            "group_slang_provider_id": "GROUP_SLANG_PROVIDER_ID",
+            "voice_prompt_provider_id": "VOICE_PROMPT_PROVIDER_ID",
+            "tts_conversion_provider_id": "tts_conversion_provider_id",
+            "narration_provider_id": "NARRATION_PROVIDER_ID",
+            "news_provider_id": "NEWS_PROVIDER_ID",
+            "web_exploration_provider_id": "WEB_EXPLORATION_PROVIDER_ID",
+            "creative_provider_id": "CREATIVE_PROVIDER_ID",
+            "creative_outline_provider_id": "CREATIVE_OUTLINE_PROVIDER_ID",
+            "creative_review_provider_id": "CREATIVE_REVIEW_PROVIDER_ID",
+            "dream_diary_provider_id": "DREAM_DIARY_PROVIDER_ID",
+            "dream_provider_id": "DREAM_DIARY_PROVIDER_ID",
+            "diary_provider_id": "DREAM_DIARY_PROVIDER_ID",
+            "photo_prompt_provider_id": "PHOTO_PROMPT_PROVIDER_ID",
+        }
+
+        def fill(attr: str, provider_id: str) -> None:
+            config_key = attr_config_keys.get(attr)
+            configured = self._cfg_str(getattr(self, "config", None), config_key, "") if config_key else ""
+            if not str(configured or "").strip():
+                setattr(self, attr, provider_id)
+
+        fill("llm_provider_id", complex_model)
+        fill("mai_style_provider_id", fast or complex_model)
+
+        for attr in (
+            "daily_plan_provider_id",
+            "detail_enhancement_provider_id",
+            "history_summary_provider_id",
+            "relationship_analysis_provider_id",
+            "companion_memory_provider_id",
+            "dialogue_episode_provider_id",
+            "group_episode_provider_id",
+            "forward_message_provider_id",
+            "proactive_persona_judge_provider_id",
+        ):
+            fill(attr, complex_model)
+
+        for attr in (
+            "response_review_provider_id",
+            "smart_silence_provider_id",
+            "troubleshooting_provider_id",
+            "emotion_judgement_provider_id",
+            "smart_message_debounce_provider_id",
+            "rest_wakeup_provider_id",
+            "group_interject_provider_id",
+            "group_slang_provider_id",
+            "voice_prompt_provider_id",
+            "tts_conversion_provider_id",
+            "narration_provider_id",
+            "news_provider_id",
+            "web_exploration_provider_id",
+        ):
+            fill(attr, fast or complex_model)
+        fill("group_followup_judge_provider_id", fast)
+
+        for attr in (
+            "creative_provider_id",
+            "creative_outline_provider_id",
+            "creative_review_provider_id",
+            "dream_diary_provider_id",
+            "dream_provider_id",
+            "diary_provider_id",
+            "photo_prompt_provider_id",
+        ):
+            fill(attr, creative or complex_model)
 
     def _detect_astrbot_version(self) -> str:
         candidates: list[Any] = []
