@@ -330,9 +330,11 @@ class CoreStoreMixin:
             "daily_outfit_photo": {},
             "recent_photo_generations": [],
             "daily_story_plan": {},
+            "daily_story_plan_history": [],
             "skill_growth": {},
             "detail_enhanced_day": "",
             "detail_enhanced_segments": {},
+            "detail_enhanced_history": [],
             "schedule_adjustments": [],
             "yesterday_conversation_summary": {},
             "can_do": [],
@@ -381,9 +383,11 @@ class CoreStoreMixin:
         data.setdefault("daily_outfit_photo", {})
         data.setdefault("recent_photo_generations", [])
         data.setdefault("daily_story_plan", {})
+        data.setdefault("daily_story_plan_history", [])
         data.setdefault("skill_growth", {})
         data.setdefault("detail_enhanced_day", "")
         data.setdefault("detail_enhanced_segments", {})
+        data.setdefault("detail_enhanced_history", [])
         data.setdefault("schedule_adjustments", [])
         data.setdefault("yesterday_conversation_summary", {})
         data.setdefault("can_do", [])

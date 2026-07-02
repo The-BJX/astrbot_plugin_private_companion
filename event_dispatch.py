@@ -3312,25 +3312,49 @@ class EventDispatchMixin:
             priority += 8
         return (-priority, start_minutes)
 
+    def _chain_has_media_component(self, chain: list[Any]) -> bool:
+        media_types = {"image", "record", "video", "file", "node", "forward"}
+        for item in chain if isinstance(chain, list) else []:
+            try:
+                type_name = self._component_type_name(item)
+            except Exception:
+                type_name = str(getattr(item, "type", "") or item.__class__.__name__).strip().lower()
+            if type_name in media_types:
+                return True
+        return False
+
     def _build_result_from_chain(self, chain: list[Any]) -> Any:
         try:
             from astrbot.api.event import MessageEventResult
         except ImportError:
             from astrbot.core.message.message_event_result import MessageEventResult
+        prefer_chain_result = self._chain_has_media_component(chain)
+        if prefer_chain_result:
+            try:
+                result = MessageEventResult().chain_result(chain)
+            except Exception:
+                try:
+                    result = MessageEventResult(chain=chain)
+                except TypeError:
+                    result = MessageEventResult().chain_result(chain)
+        else:
+            try:
+                result = MessageEventResult(chain=chain)
+            except TypeError:
+                result = MessageEventResult().chain_result(chain)
+        result = self._disable_result_t2i(result)
+        return result
+
+    def _disable_result_t2i(self, result: Any) -> Any:
+        if result is None:
+            return result
         try:
-            result = MessageEventResult(chain=chain)
-        except TypeError:
-            result = MessageEventResult().chain_result(chain)
-        if hasattr(result, "use_t2i"):
-            try:
+            if hasattr(result, "use_t2i"):
                 result = result.use_t2i(False)
-            except Exception:
-                pass
-        elif hasattr(result, "use_t2i_"):
-            try:
+            elif hasattr(result, "use_t2i_"):
                 result.use_t2i_ = False
-            except Exception:
-                pass
+        except Exception:
+            pass
         return result
 
     def _is_silent_control_reply_text(self, text: str) -> bool:

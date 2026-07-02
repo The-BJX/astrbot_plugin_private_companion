@@ -7283,25 +7283,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         extra_components: list[Any] | None = None,
     ) -> Any:
         chain = self._build_outbound_chain(text, image_path, extra_components=extra_components)
-        try:
-            from astrbot.api.event import MessageEventResult
-        except ImportError:
-            from astrbot.core.message.message_event_result import MessageEventResult
-        try:
-            result = MessageEventResult(chain=chain)
-        except TypeError:
-            result = MessageEventResult().chain_result(chain)
-        if hasattr(result, "use_t2i"):
-            try:
-                result = result.use_t2i(False)
-            except Exception:
-                pass
-        elif hasattr(result, "use_t2i_"):
-            try:
-                result.use_t2i_ = False
-            except Exception:
-                pass
-        return result
+        return self._build_result_from_chain(chain)
 
     def _build_proactive_archive_user_prompt(
         self,

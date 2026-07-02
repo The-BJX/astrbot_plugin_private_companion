@@ -12041,7 +12041,7 @@ tbody tr.is-selected {
 
 .migration-flow {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto auto;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   align-items: end;
   gap: 10px;
   margin-top: 14px;
@@ -12068,6 +12068,27 @@ tbody tr.is-selected {
   padding: 0 12px;
   background: rgba(255,255,255,0.92);
   color: var(--ink);
+}
+
+.migration-risk-option {
+  align-self: stretch;
+  display: flex !important;
+  grid-auto-flow: column;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px !important;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid rgba(194, 91, 76, 0.32);
+  border-radius: 12px;
+  background: rgba(255, 245, 240, 0.78);
+  color: #8b3d31 !important;
+}
+
+.migration-risk-option input {
+  width: 15px;
+  height: 15px;
+  accent-color: #b9503f;
 }
 
 .migration-preview {

@@ -912,7 +912,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     async def preview_migration_config_import(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         try:
-            package = self._extract_migration_package(payload)
+            package = self._extract_migration_package(
+                payload,
+                allow_checksum_mismatch=self._normalize_bool_value(payload.get("allow_checksum_mismatch")),
+            )
             normalized = self._normalize_migration_package(package)
             summary = await self._migration_import_summary(normalized)
             summary["message"] = "已读取备份，确认后才会写入。"
@@ -924,7 +927,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     async def apply_migration_config_import(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         try:
-            package = self._extract_migration_package(payload)
+            package = self._extract_migration_package(
+                payload,
+                allow_checksum_mismatch=self._normalize_bool_value(payload.get("allow_checksum_mismatch")),
+            )
             mode = str(payload.get("mode") or "merge").strip().lower()
             if mode not in {"merge", "replace"}:
                 mode = "merge"
@@ -6192,7 +6198,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "bookshelf_items": "书柜阅读记录",
         }.get(key, key)
 
-    def _extract_migration_package(self, payload: Any) -> dict[str, Any]:
+    def _extract_migration_package(self, payload: Any, *, allow_checksum_mismatch: bool = False) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("导入内容必须是 JSON 对象")
         package = self._unwrap_migration_package_payload(payload)
@@ -6205,7 +6211,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return legacy
         checksum = str(package.get("checksum") or "").strip()
         if checksum and not self._migration_checksum_matches(package, checksum):
-            raise ValueError("备份校验失败：文件可能被截断或手动修改过")
+            if not allow_checksum_mismatch:
+                raise ValueError("备份校验失败：文件可能被截断或手动修改过。如确认只是手动脱敏/删改敏感字段，请勾选“校验失败仍继续预览/导入”。")
+            package = deepcopy(package)
+            package["_checksum_mismatch_allowed"] = True
         return package
 
     def _unwrap_migration_package_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -6332,6 +6341,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "included_sections": [str(item) for item in package.get("included_sections", []) if str(item).strip()],
             "checksum": str(package.get("checksum") or ""),
             "checksum_ok": bool(package.get("checksum")) and self._migration_checksum_matches(package, str(package.get("checksum") or "")),
+            "checksum_bypassed": bool(package.get("_checksum_mismatch_allowed")),
             "legacy_snapshot": bool(package.get("legacy_snapshot")),
             "settings": settings,
             "features": features,
@@ -6367,6 +6377,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "included_sections": normalized.get("included_sections", []),
             "checksum": normalized.get("checksum") or "",
             "checksum_ok": bool(normalized.get("checksum_ok")),
+            "checksum_bypassed": bool(normalized.get("checksum_bypassed")),
             "legacy_snapshot": bool(normalized.get("legacy_snapshot")),
             "config_count": config_count,
             "config_diff": config_diff,

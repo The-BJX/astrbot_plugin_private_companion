@@ -441,6 +441,7 @@ class DailyStateMixin:
                     "coverage_repair_done": bool(segment.get("_coverage_repair")),
                 }
                 self._sanitize_detail_enhanced_segments_inplace(enhanced)
+                self._remember_detail_enhancement_history(plan_date, enhanced, story_plan)
                 self._refresh_daily_state_location_from_plan(plan=plan, detail=detail)
                 self._reschedule_users_for_new_detail_events(segment)
                 self._save_data_sync()
@@ -594,6 +595,47 @@ class DailyStateMixin:
             if isinstance(additions, list):
                 existing.extend(item for item in additions if isinstance(item, dict))
                 story_plan[key] = self._trim_story_plan_items(key, existing, limit)
+
+    def _remember_detail_enhancement_history(
+        self,
+        date_text: str,
+        enhanced: dict[str, Any],
+        story_plan: dict[str, Any],
+    ) -> None:
+        date_key = _single_line(date_text, 16)
+        if not date_key:
+            return
+        history = self.data.setdefault("detail_enhanced_history", [])
+        if not isinstance(history, list):
+            history = []
+            self.data["detail_enhanced_history"] = history
+        history[:] = [
+            old
+            for old in history
+            if not (isinstance(old, dict) and _single_line(old.get("date"), 16) == date_key)
+        ]
+        history.append(
+            {
+                "date": date_key,
+                "updated_at": self._environment_now().strftime("%Y-%m-%d %H:%M"),
+                "segments": dict(enhanced or {}),
+            }
+        )
+        del history[:-14]
+
+        story_history = self.data.setdefault("daily_story_plan_history", [])
+        if not isinstance(story_history, list):
+            story_history = []
+            self.data["daily_story_plan_history"] = story_history
+        story_history[:] = [
+            old
+            for old in story_history
+            if not (isinstance(old, dict) and _single_line(old.get("date"), 16) == date_key)
+        ]
+        compact_story = dict(story_plan or {})
+        compact_story["date"] = date_key
+        story_history.append(compact_story)
+        del story_history[:-14]
 
     def _trim_story_plan_items(
         self,
@@ -3711,6 +3753,7 @@ class DailyStateMixin:
             return None
         plan_date = _single_line(plan.get("date"), 16) or _today_key()
         sample: list[str] = []
+        compact_items: list[dict[str, str]] = []
         for item in items[:6]:
             if not isinstance(item, dict):
                 continue
@@ -3718,12 +3761,24 @@ class DailyStateMixin:
             activity = _single_line(item.get("activity"), 52)
             if activity:
                 sample.append(f"{time_text} {activity}".strip())
+        for item in items[:18]:
+            if not isinstance(item, dict):
+                continue
+            compact_items.append(
+                {
+                    "time": _single_line(item.get("time"), 20),
+                    "activity": _single_line(item.get("activity") or item.get("title"), 180),
+                    "mood": _single_line(item.get("mood"), 80),
+                    "message_seed": _single_line(item.get("message_seed"), 220),
+                }
+            )
         entry = {
             "date": plan_date,
             "generated_at": _single_line(plan.get("generated_at"), 20) or self._environment_now().strftime("%Y-%m-%d %H:%M"),
             "source": _single_line(plan.get("source"), 16),
             "signature": self._plan_signature(items),
             "sample": sample,
+            "items": compact_items,
         }
         return entry
 

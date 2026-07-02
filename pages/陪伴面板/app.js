@@ -2675,6 +2675,10 @@ function selectedConfigExportSections() {
   return sections.length ? sections : ["basic", "relations", "food_skills"];
 }
 
+function allowConfigChecksumMismatch() {
+  return Boolean($("#configAllowChecksumMismatch")?.checked);
+}
+
 function migrationDiffText(item) {
   const added = Number(item?.added || 0);
   const overwritten = Number(item?.overwritten || 0);
@@ -2781,14 +2785,18 @@ function renderConfigMigrationPreview() {
   const configDiff = preview.config_diff || {};
   const compatibility = preview.compatibility || {};
   const checksumLine = preview.checksum
-    ? (preview.checksum_ok ? "文件校验：通过" : "文件校验：失败")
+    ? (preview.checksum_ok ? "文件校验：通过" : (preview.checksum_bypassed ? "文件校验：失败，已按风险选项继续" : "文件校验：失败"))
     : "文件校验：旧备份未提供";
+  const checksumWarn = preview.checksum_bypassed
+    ? `<p class="migration-warn">这份备份的校验值与当前内容不一致。仅当你确认文件只是被手动脱敏或删改敏感字段、且 JSON 内容完整时，才继续导入。</p>`
+    : "";
   const compatibilityHtml = `
     <p class="migration-note">
       备份来自 ${escapeHtml(compatibility.backup_version || preview.version || "未知")}，当前版本 ${escapeHtml(compatibility.current_version || preview.current_version || "未知")}。
       ${escapeHtml(compatibility.message || "")}
     </p>
-    <p class="${compatibility.level === "warn" ? "migration-warn" : "migration-note"}">${escapeHtml(checksumLine)}</p>
+    <p class="${compatibility.level === "warn" || preview.checksum_bypassed ? "migration-warn" : "migration-note"}">${escapeHtml(checksumLine)}</p>
+    ${checksumWarn}
   `;
   const included = Array.isArray(preview.included_sections) && preview.included_sections.length
     ? `<p class="migration-note">备份包含：${escapeHtml(preview.included_sections.map(migrationSectionLabel).join("、"))}</p>`
@@ -2846,7 +2854,10 @@ async function previewConfigImport() {
     showToast("请先选择备份文件", "error");
     return;
   }
-  const result = await postJson("/config/import/preview", { package: state.configImportPackage });
+  const result = await postJson("/config/import/preview", {
+    package: state.configImportPackage,
+    allow_checksum_mismatch: allowConfigChecksumMismatch(),
+  });
   state.configImportPreview = result;
   renderConfigMigrationPreview();
   showToast("预览完成");
@@ -2867,8 +2878,20 @@ async function applyConfigImport() {
   const message = mode === "replace"
     ? "将覆盖可迁移资料段。已确认要继续吗？"
     : `将合并导入备份内容，字段冲突时：${conflictText}。已确认要继续吗？`;
-  if (!window.confirm(message)) return;
-  const result = await postJson("/config/import/apply", { package: state.configImportPackage, mode, conflict });
+  if (state.configImportPreview?.checksum_bypassed && !allowConfigChecksumMismatch()) {
+    showToast("这份备份校验失败，确认导入前需要保持风险选项勾选", "error");
+    return;
+  }
+  const finalMessage = state.configImportPreview?.checksum_bypassed
+    ? `${message}\n\n注意：这份备份校验失败，只建议在确认它只是被手动脱敏/删改敏感字段时继续。`
+    : message;
+  if (!window.confirm(finalMessage)) return;
+  const result = await postJson("/config/import/apply", {
+    package: state.configImportPackage,
+    mode,
+    conflict,
+    allow_checksum_mismatch: allowConfigChecksumMismatch(),
+  });
   state.configImportPreview = null;
   renderConfigMigrationPreview();
   if (result) {
@@ -13859,6 +13882,11 @@ $("#applyConfigImportBtn").addEventListener("click", async () => {
 });
 
 $("#configImportMode").addEventListener("change", () => {
+  renderConfigMigrationPreview();
+});
+
+$("#configAllowChecksumMismatch").addEventListener("change", () => {
+  state.configImportPreview = null;
   renderConfigMigrationPreview();
 });
 
