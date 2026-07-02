@@ -2438,12 +2438,33 @@ class GroupObservationMixin:
         allowed, reason = self._group_interjection_allowed(group, text)
         if not allowed:
             return
+        memory_context = ""
+        composer = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(composer):
+            try:
+                memory_context = await composer(
+                    kind="group_interjection",
+                    query=(
+                        f"群聊主动插话判断：群={group.get('group_id') or ''}；触发消息={_single_line(text, 180)}；"
+                        "群聊最近谁在对话、谁不喜欢被cue、上次插话效果、关系边界、常聊话题、是否适合轻接一句"
+                    ),
+                    event=event,
+                    top_k=5,
+                    max_chars=900,
+                    timeout_seconds=1.2,
+                )
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 群聊插话 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你在一个群聊里,系统认为现在也许可以非常轻地接一句,但你必须先判断这句会不会显得硬插话。
 只输出要发到群里的正文,不要解释。
 
 【主动插话判断上下文】
 {self._format_group_context_for_prompt(group)}
+
+【RememberYou 群聊场合参考】
+{memory_context or '暂无可用长期参考。'}
+使用方式：只用于判断这个群、这些人和这个话题是否适合接话；不要在回复里提到记忆来源。
 
 【刚刚触发的消息】
 {_single_line(text, 180)}

@@ -1134,6 +1134,14 @@ class ProactiveMixin:
                 if callable(saver):
                     saver()
                 return "情绪 hurt 收敛中,亲密主动候选已延后"
+            scheduler = getattr(self, "_schedule_next_proactive", None)
+            if callable(scheduler):
+                scheduler(user, now=base_after, delay_hours=(0.5, 2.0))
+            if _safe_float(user.get("next_proactive_at"), 0) <= check_now:
+                user["next_proactive_at"] = base_after
+                user["planned_proactive_window_start_at"] = base_after
+                user["planned_proactive_best_until_at"] = base_after + 45 * 60
+                user["planned_proactive_expire_at"] = base_after + 90 * 60
             saver = getattr(self, "_schedule_data_save", None)
             if callable(saver):
                 saver()

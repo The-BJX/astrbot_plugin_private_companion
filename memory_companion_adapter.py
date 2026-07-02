@@ -17,6 +17,8 @@ class MemoryCompanionAdapterMixin:
 
     def _memory_companion_bridge(self) -> Any | None:
         for module_name in (
+            "data.plugins.astrbot_plugin_remember_you.main",
+            "astrbot_plugin_remember_you.main",
             "data.plugins.astrbot_plugin_memory_companion.main",
             "astrbot_plugin_memory_companion.main",
         ):
@@ -25,7 +27,7 @@ class MemoryCompanionAdapterMixin:
             if bridge is not None:
                 return bridge
         for module in list(sys.modules.values()):
-            if getattr(module, "PLUGIN_NAME", "") != "astrbot_plugin_memory_companion":
+            if getattr(module, "PLUGIN_NAME", "") not in {"astrbot_plugin_memory_companion", "astrbot_plugin_remember_you", "RememberYou"}:
                 continue
             bridge = self._memory_companion_bridge_from_module(module)
             if bridge is not None:
@@ -279,6 +281,87 @@ class MemoryCompanionAdapterMixin:
         if "没有检索到足够相关的长期记忆" in text and text.count("\n- ") <= 1:
             return ""
         return text[: max(300, int(max_chars or 1200))]
+
+    async def _memory_companion_compose_feature_context(
+        self,
+        *,
+        kind: str,
+        query: str,
+        user: dict[str, Any] | None = None,
+        user_id: str = "",
+        event: Any | None = None,
+        top_k: int = 5,
+        max_chars: int = 900,
+        timeout_seconds: float = 4.0,
+    ) -> str:
+        bridge = self._memory_companion_bridge()
+        composer = getattr(bridge, "compose_context", None) if bridge is not None else None
+        if not callable(composer):
+            return ""
+        clean_query = _single_line(query, 1200)
+        if not clean_query:
+            return ""
+        session_context: dict[str, Any]
+        if event is not None:
+            session_id = _single_line(getattr(event, "unified_msg_origin", ""), 180)
+            scope = "unknown"
+            try:
+                scope = "private" if bool(getattr(event, "is_private_chat", lambda: False)()) else "group"
+            except Exception:
+                scope = "unknown"
+            if not user_id:
+                try:
+                    user_id = _single_line(event.get_sender_id(), 80)
+                except Exception:
+                    user_id = ""
+            user_name = ""
+            try:
+                user_name = _single_line(self._sender_display_name(event), 80)
+            except Exception:
+                user_name = ""
+            session_context = {
+                "session_id": session_id,
+                "scope": scope,
+                "platform": session_id.split(":", 1)[0] if ":" in session_id else "",
+                "user_id": user_id,
+                "user_name": user_name,
+                "message_text": clean_query,
+            }
+        elif isinstance(user, dict):
+            umo = _single_line(user.get("umo"), 200)
+            session_context = {
+                "session_id": umo or f"private_companion:{kind}:{user_id or 'unknown'}",
+                "scope": "private" if user_id else "unknown",
+                "platform": umo.split(":", 1)[0] if ":" in umo else "",
+                "user_id": user_id,
+                "user_name": _single_line(user.get("nickname") or user.get("display_name") or user_id, 80),
+                "message_text": clean_query,
+            }
+        else:
+            session_context = {
+                "session_id": f"private_companion:{kind}",
+                "scope": "unknown",
+                "message_text": clean_query,
+            }
+        try:
+            text = await asyncio.wait_for(
+                composer(
+                    query=clean_query,
+                    session_context=session_context,
+                    top_k=max(1, min(10, int(top_k or 5))),
+                    max_chars=max(240, min(1800, int(max_chars or 900))),
+                ),
+                timeout=max(0.5, min(6.0, float(timeout_seconds or 4.0))),
+            )
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] MemoryCompanion 功能上下文读取失败: kind=%s err=%s", _single_line(kind, 60), _single_line(exc, 120))
+            return ""
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        if "没有检索到足够相关的长期记忆" in text and text.count("\n- ") <= 1:
+            return ""
+        return text[: max(240, min(1800, int(max_chars or 900)))]
 
     async def _memory_companion_record_daily_plan(self, plan: dict[str, Any]) -> None:
         if not isinstance(plan, dict):
@@ -653,3 +736,235 @@ class MemoryCompanionAdapterMixin:
             )
         except Exception as exc:
             logger.debug("[PrivateCompanion] MemoryCompanion 图片观察写入失败: %s", _single_line(exc, 120))
+
+    async def _memory_companion_record_user_habit(
+        self,
+        *,
+        user: dict[str, Any],
+        user_id: str,
+        habit: dict[str, Any],
+    ) -> None:
+        if not isinstance(user, dict) or not isinstance(habit, dict):
+            return
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_event", None) if bridge is not None else None
+        if not callable(recorder):
+            return
+        topic = _single_line(habit.get("topic"), 120)
+        category = _single_line(habit.get("category"), 40)
+        intent = _single_line(habit.get("intent"), 60)
+        if not topic or not category:
+            return
+        count = 0
+        try:
+            count = int(habit.get("count") or 0)
+        except Exception:
+            count = 0
+        bucket = _single_line(habit.get("bucket"), 20)
+        avg_time = ""
+        formatter = getattr(self, "_format_user_habit_time", None)
+        if callable(formatter):
+            try:
+                avg_time = _single_line(formatter(habit.get("avg_minute")), 20)
+            except Exception:
+                avg_time = ""
+        name = _single_line(user.get("nickname") or user.get("display_name") or user_id, 80)
+        umo = _single_line(user.get("umo"), 200)
+        platform = umo.split(":", 1)[0] if ":" in umo else ""
+        query_anchors = habit.get("query_anchors")
+        if not isinstance(query_anchors, list):
+            query_anchors = []
+        query_anchors = [_single_line(item, 40) for item in query_anchors if _single_line(item, 40)][:12]
+        answer_hints = habit.get("answer_hints")
+        if not isinstance(answer_hints, list):
+            answer_hints = []
+        answer_hints = [_single_line(item, 80) for item in answer_hints if _single_line(item, 80)][:8]
+        examples = habit.get("examples")
+        if not isinstance(examples, list):
+            examples = []
+        examples = [_single_line(item, 90) for item in examples if _single_line(item, 90)][:5]
+        content_parts = [
+            f"{name or user_id} 常在{bucket or '相近时段'}问：{topic}",
+            f"类型：{category}",
+            f"出现约 {count} 次" if count > 0 else "",
+            f"平均时间：{avg_time}" if avg_time else "",
+            "回答时优先检索：" + "、".join(query_anchors) if query_anchors else "",
+            "回答倾向：" + "；".join(answer_hints) if answer_hints else "",
+        ]
+        content = "；".join(part for part in content_parts if part)
+        if not content:
+            return
+        memory_key = _single_line(habit.get("memory_key") or habit.get("key"), 120)
+        if not memory_key:
+            memory_key = f"{user_id}:{category}:{topic}"
+        try:
+            await recorder(
+                content=content,
+                memory_type="user_habit",
+                scope="private",
+                session_id=umo,
+                platform=platform,
+                message_id=f"private_companion_user_habit_{memory_key}",
+                memory_id=f"private_companion_user_habit_{memory_key}",
+                subject={"kind": "user", "id": str(user_id or ""), "name": name, "role": "private_companion_target"},
+                object={"kind": "bot", "id": "self", "name": "Bot", "role": "bot_self"},
+                visibility="private_pair",
+                sayability="direct",
+                reality_level="real_user_fact",
+                lifecycle="stable_memory",
+                confidence=0.82,
+                importance=0.66,
+                review_status="auto",
+                tags=["user_habit", "private_user", category, intent, *query_anchors[:6]],
+                metadata={
+                    "category": category,
+                    "intent": intent,
+                    "topic": topic,
+                    "bucket": bucket,
+                    "avg_time": avg_time,
+                    "count": count,
+                    "query_anchors": query_anchors,
+                    "answer_hints": answer_hints,
+                    "examples": examples,
+                    "source": "private_companion_behavior_habits",
+                },
+                source_plugin="private_companion",
+            )
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] MemoryCompanion 用户习惯写入失败: %s", _single_line(exc, 120))
+
+    async def _memory_companion_record_daily_outfit(self, item: dict[str, Any]) -> None:
+        if not isinstance(item, dict) or not _single_line(item.get("path"), 300):
+            return
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_persona_life", None) if bridge is not None else None
+        if not callable(recorder):
+            return
+        date_text = _single_line(item.get("date"), 20)
+        prompt = _single_line(item.get("prompt"), 600)
+        note = _single_line(item.get("note"), 160)
+        path = _single_line(item.get("path"), 300)
+        schedule_hint = ""
+        try:
+            schedule_hint = _single_line(self._daily_outfit_schedule_text(), 280)
+        except Exception:
+            schedule_hint = ""
+        content = (
+            f"{date_text or '今天'}的 Bot 每日穿搭图已生成。"
+            f"这条记忆用于回答当前穿搭、衣服颜色、今天穿什么等问题。"
+        )
+        if schedule_hint:
+            content += f" 穿搭依据：{schedule_hint}。"
+        if prompt:
+            content += f" 穿搭提示摘要：{prompt[:360]}"
+        try:
+            await recorder(
+                content=content,
+                scope="unknown",
+                session_id="private_companion:daily_outfit",
+                message_id=f"private_companion_daily_outfit_{date_text or 'today'}",
+                memory_id=f"private_companion_daily_outfit_{date_text or 'today'}",
+                metadata={
+                    "date": date_text,
+                    "image_path": path,
+                    "backend": _single_line(item.get("backend"), 80),
+                    "note": note,
+                    "prompt_preview": prompt,
+                    "query_anchors": ["今日穿搭", "每日穿搭", "衣服颜色", "穿什么", "穿了什么", "当前穿着"],
+                },
+                source_plugin="private_companion",
+                confidence=0.76,
+                importance=0.62,
+                tags=["daily_outfit", "outfit", "clothing", "current_state", "persona_life", "衣服颜色", "今日穿搭"],
+                occurred_at=self._memory_companion_now_iso(),
+            )
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] MemoryCompanion 每日穿搭写入失败: %s", _single_line(exc, 120))
+
+    async def _memory_companion_record_creative_progress(
+        self,
+        *,
+        project: dict[str, Any],
+        chunk: str = "",
+        extract: dict[str, Any] | None = None,
+        event: Any | None = None,
+    ) -> None:
+        if not isinstance(project, dict):
+            return
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_creative_work", None) if bridge is not None else None
+        if not callable(recorder):
+            return
+        project_id = _single_line(project.get("id"), 60)
+        title = _single_line(project.get("title"), 60) or "未命名作品"
+        work_type = _single_line(project.get("work_type"), 40) or "创作"
+        premise = _single_line(project.get("premise"), 180)
+        chunk_text = _single_line(chunk, 360)
+        extract = extract if isinstance(extract, dict) else {}
+        next_direction = _single_line(extract.get("next_direction") or project.get("next_hint"), 160)
+        important = extract.get("important_facts") if isinstance(extract.get("important_facts"), list) else []
+        threads = extract.get("new_threads") if isinstance(extract.get("new_threads"), list) else []
+        important_text = "；".join(_single_line(item, 80) for item in important[:3] if _single_line(item, 80))
+        thread_text = "；".join(_single_line(item, 80) for item in threads[:3] if _single_line(item, 80))
+        content_parts = [
+            f"Bot 私下创作项目《{title}》（{work_type}）有新进展。",
+            f"核心设定：{premise}" if premise else "",
+            f"最新片段：{chunk_text}" if chunk_text else "",
+            f"新增线索：{thread_text}" if thread_text else "",
+            f"必须记住：{important_text}" if important_text else "",
+            f"下一步：{next_direction}" if next_direction else "",
+        ]
+        content = " ".join(part for part in content_parts if part)
+        if not content.strip():
+            return
+        session_id = "private_companion:creative"
+        group_id = ""
+        platform = ""
+        if event is not None:
+            session_id = _single_line(getattr(event, "unified_msg_origin", ""), 180) or session_id
+            platform = session_id.split(":", 1)[0] if ":" in session_id else ""
+            try:
+                if not bool(getattr(event, "is_private_chat", lambda: False)()):
+                    group_id = _single_line(getattr(event, "get_group_id", lambda: "")(), 80)
+            except Exception:
+                group_id = ""
+        try:
+            await recorder(
+                content=content,
+                scope="unknown",
+                session_id=session_id,
+                platform=platform,
+                group_id=group_id,
+                message_id=f"private_companion_creative_{project_id}_{_single_line(project.get('current_chars'), 20)}",
+                memory_id=f"private_companion_creative_{project_id}_{_single_line(project.get('current_chars'), 20)}",
+                metadata={
+                    "project_id": project_id,
+                    "title": title,
+                    "work_type": work_type,
+                    "status": _single_line(project.get("status"), 30),
+                    "current_chars": project.get("current_chars"),
+                    "target_chars": project.get("target_chars"),
+                    "next_direction": next_direction,
+                    "important_facts": important[:5],
+                    "new_threads": threads[:5],
+                    "query_anchors": [title, work_type, "私下创作", "创作项目", "上次写到哪", "小说片段", "人工修订"],
+                },
+                source_plugin="private_companion",
+                confidence=0.8,
+                importance=0.72,
+                tags=["creative_work", "private_companion", "creative_project", work_type, title],
+                occurred_at=self._memory_companion_now_iso(),
+            )
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] MemoryCompanion 创作进展写入失败: %s", _single_line(exc, 120))
+
+    def _memory_companion_now_iso(self) -> str:
+        try:
+            return self._environment_now().isoformat(timespec="seconds")
+        except Exception:
+            try:
+                from datetime import datetime
+
+                return datetime.now().isoformat(timespec="seconds")
+            except Exception:
+                return ""

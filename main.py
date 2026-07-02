@@ -427,7 +427,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.6.4",
+    "5.6.5",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -512,6 +512,11 @@ class PrivateCompanionPlugin(
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         os.makedirs(self.data_dir, exist_ok=True)
         self.data_file = os.path.join(self.data_dir, "companions.json")
+        self.storage_backend = self._cfg_str(c, "storage_backend", "json", "json").strip().lower() or "json"
+        if self.storage_backend not in {"json", "sqlite"}:
+            self.storage_backend = "json"
+        self.storage_sqlite_path = self._cfg_str(c, "storage_sqlite_path", "", "")
+        self._rebuild_store_manager()
         config_migration_started = time.perf_counter()
         self._startup_config_migration_changes = migrate_flat_config_into_schema_groups(
             c,
@@ -1768,12 +1773,49 @@ class PrivateCompanionPlugin(
             atrelay_result = getattr(event, "private_companion_atrelay_tool_result", None)
             if isinstance(atrelay_result, dict) and _single_line(atrelay_result.get("status"), 24) in {"success", "scheduled"}:
                 final_reply = _single_line(atrelay_result.get("final_reply"), 80) or "说过啦。"
+                reference = _single_line(atrelay_result.get("final_reply_reference"), 260)
+                rewriter = getattr(self, "_rewrite_reference_reply_with_persona", None)
+                if reference and callable(rewriter):
+                    sender_id = ""
+                    try:
+                        sender_id = self._canonical_private_user_id(str(event.get_sender_id()))
+                    except Exception:
+                        try:
+                            sender_id = str(event.get_sender_id())
+                        except Exception:
+                            sender_id = ""
+                    users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+                    user = users.get(sender_id) if sender_id and isinstance(users, dict) and isinstance(users.get(sender_id), dict) else {}
+                    rewritten = await rewriter(
+                        reference,
+                        scene="拦截工具发送状态后改成自然聊天回执",
+                        user=user,
+                        event=event,
+                        fallback_text=final_reply,
+                        task="atrelay_receipt_rewrite",
+                        max_chars=70,
+                        allow_fallback=True,
+                        preserve_status=True,
+                    )
+                    if rewritten:
+                        final_reply = rewritten
                 logger.info(
                     "[PrivateCompanion] 工具发送回执已改为自然短句: before=%s after=%s",
                     _single_line(text, 120),
                     final_reply,
                 )
                 event.set_result(self._build_result_from_chain([Plain(final_reply)]))
+                return
+            companion_receipt = bool(
+                getattr(event, "private_companion_proactive_framework", False)
+                or getattr(event, "private_companion_force_sanitize_tools", False)
+            )
+            if not companion_receipt:
+                logger.debug(
+                    "[PrivateCompanion] 放行非陪伴插件工具回执: session=%s text=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    _single_line(text, 120),
+                )
                 return
             logger.warning(
                 "[PrivateCompanion] 已拦截孤立工具发送回执外发: session=%s text=%s",
@@ -1922,6 +1964,25 @@ class PrivateCompanionPlugin(
     async def suppress_smart_silence_reply_before_send(self, event: AstrMessageEvent):
         """用户明确想停下当前话题时，用小模型决定是否静默取消待发送回复。"""
         if not self.enabled:
+            return
+        if (
+            bool(getattr(self, "enable_response_self_review", True))
+            and bool(getattr(event, "_private_companion_response_review_drop", False))
+        ):
+            logger.info("[PrivateCompanion] 回复复核去重发送前兜底拦截")
+            self._record_passive_no_reply(
+                event,
+                source="回复复核去重",
+                reason="最终回复与上一条 Bot 消息重复",
+                level="info",
+            )
+            empty_result = self._build_result_from_chain([])
+            try:
+                empty_result.stop_event()
+            except Exception:
+                pass
+            event.set_result(empty_result)
+            event.stop_event()
             return
         if bool(getattr(event, "_private_companion_smart_silence_drop", False)):
             logger.info(
@@ -4261,24 +4322,58 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     ) -> str:
         status = _single_line(result.get("status"), 40)
         fallback = _single_line(result.get("final_reply") or result.get("message"), 240)
+        sender_id = ""
+        try:
+            sender_id = self._canonical_private_user_id(str(event.get_sender_id()))
+        except Exception:
+            try:
+                sender_id = str(event.get_sender_id())
+            except Exception:
+                sender_id = ""
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+        user = users.get(sender_id) if sender_id and isinstance(users, dict) and isinstance(users.get(sender_id), dict) else {}
+        rewriter = getattr(self, "_rewrite_reference_reply_with_persona", None)
         if status not in {"success", "scheduled"}:
-            return fallback or "转述没有成功。"
+            if callable(rewriter):
+                rewritten = await rewriter(
+                    f"参考意图：转述没有成功；原因是「{fallback or '未知'}」。用当前人格简短告诉用户失败，不要说成已经发出。",
+                    scene="跨群/私聊转述失败回执",
+                    user=user,
+                    event=event,
+                    fallback_text=fallback or "转述没成功。",
+                    task="atrelay_receipt_rewrite",
+                    max_chars=80,
+                    allow_fallback=True,
+                    preserve_status=True,
+                )
+                if rewritten:
+                    return rewritten
+            return fallback or "转述没成功。"
         recipient = _single_line(payload.get("target_token") or payload.get("recipient_hint"), 60) or "对方"
         if status == "scheduled":
-            return f"好，等{recipient}冒泡我再说。"
-        if recipient and recipient not in {"对方", "群里"}:
-            templates = [
-                f"跟{recipient}说过啦。",
-                f"已经和{recipient}说啦。",
-                f"嗯，给{recipient}带到啦。",
-            ]
+            reference = f"参考意图：转述已挂起，等{recipient}下次在群里出现或冒泡时再转达；简短告诉用户会稍后带到。"
+            fallback_ok = f"等{recipient}出现我再说。"
         else:
-            templates = ["说过啦。", "带到啦。", "发过去啦。"]
-        try:
-            index = abs(hash((_single_line(payload.get("message"), 80), recipient, _single_line(payload.get("destination"), 20)))) % len(templates)
-        except Exception:
-            index = 0
-        return templates[index]
+            reference = (
+                f"参考意图：转述已经成功发给{recipient}；只给用户一个很短的成功回执，"
+                "不要复述转述正文，也不要写工具执行状态。"
+            )
+            fallback_ok = f"给{recipient}带到了。" if recipient and recipient not in {"对方", "群里"} else "带到了。"
+        if callable(rewriter):
+            rewritten = await rewriter(
+                reference,
+                scene="跨群/私聊转述成功回执",
+                user=user,
+                event=event,
+                fallback_text=fallback_ok,
+                task="atrelay_receipt_rewrite",
+                max_chars=70,
+                allow_fallback=True,
+                preserve_status=True,
+            )
+            if rewritten:
+                return rewritten
+        return fallback_ok
 
     async def _send_direct_atrelay_result_reply(
         self,
@@ -5429,7 +5524,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     str(user.get("last_proactive_action") or "message"),
                     text,
                 )
-                self._mark_recent_proactive_reply_turn(user, text, now=received_ts)
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
                 user["awaiting_reply_since"] = 0
                 user["last_reply_at"] = received_ts
@@ -5962,6 +6056,39 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
         if food_menu_context:
             prompt_surface.add("food.menu", food_menu_context, priority=53, source="food")
+        if re.search(
+            r"(你|星缘|bot|机器人).{0,8}(在干嘛|在做什么|做什么|穿什么|穿的?什么|衣服|衣服颜色|什么颜色|吃了什么|吃的?什么|几点吃|什么时候吃|吃饭|进食|在哪里|在哪儿|当前位置|今天状态|现在状态)",
+            inbound_text,
+        ) or re.search(r"(穿搭|自拍|衣服.{0,8}(颜色|什么色)|穿.{0,6}什么|今天.*衣服|今天.*颜色|刚才.*做|几点.*做了什么)", inbound_text):
+            composer = getattr(self, "_memory_companion_compose_feature_context", None)
+            if callable(composer):
+                try:
+                    current_state_memory = await composer(
+                        kind="current_state_reply",
+                        query=(
+                            f"当前状态问答：{inbound_text}；"
+                            "今日穿搭、衣服颜色、当前日程、当前位置、刚才做了什么、进食时间、吃了什么、最近自拍、用户常问状态习惯"
+                        ),
+                        user=current_user,
+                        user_id=user_id,
+                        event=event,
+                        top_k=6,
+                        max_chars=950,
+                        timeout_seconds=1.6,
+                    )
+                except Exception as exc:
+                    current_state_memory = ""
+                    logger.debug("[PrivateCompanion] 当前状态 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                if current_state_memory:
+                    prompt_surface.add(
+                        "memory.current_state",
+                        "【RememberYou 当前状态参考】\n"
+                        f"{current_state_memory}\n"
+                        "使用方式：只把它当作回答当前状态、穿搭、吃饭、日程连续性的辅助证据；"
+                        "优先服从本轮状态注入和明确时间线。不要说“我查到/记忆里”。",
+                        priority=54,
+                        source="memory_companion",
+                    )
         if (
             buffered_images
             and buffered_image_vision
@@ -6551,6 +6678,34 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 working_text,
                 music_album_context=music_album_context if isinstance(music_album_context, dict) else None,
             )
+            if bool(getattr(self, "enable_response_self_review", True)) and self._is_response_review_drop_marker(reviewed_text):
+                setattr(event, "_private_companion_response_review_drop", True)
+                resp.completion_text = ""
+                async with self._data_lock:
+                    current = self._get_user(user_id)
+                    stats = current.setdefault("postprocess_stats", {})
+                    if not isinstance(stats, dict):
+                        stats = {}
+                        current["postprocess_stats"] = stats
+                    stats["duplicate_dropped"] = _safe_int(stats.get("duplicate_dropped"), 0, 0) + 1
+                    stats["last_duplicate_dropped_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
+                    self._save_data_sync()
+                logger.info(
+                    "[PrivateCompanion] 回复复核已取消重复私聊回复: user=%s inbound=%s reply=%s",
+                    user_id,
+                    _single_line(inbound_text, 120),
+                    _single_line(working_text, 160),
+                )
+                self._record_passive_no_reply(
+                    event,
+                    source="回复复核去重",
+                    reason="最终回复与上一条 Bot 消息重复",
+                    detail=inbound_text,
+                    reply_preview=working_text,
+                    level="info",
+                )
+                release_now = True
+                return
             if reviewed_text != working_text:
                 resp.completion_text = reviewed_text
                 working_text = reviewed_text
@@ -6565,9 +6720,46 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     self._save_data_sync()
 
             async with self._data_lock:
+                live_user_for_duplicate = self._get_user(user_id)
+            if bool(getattr(self, "enable_response_self_review", True)):
+                should_drop_duplicate, duplicate_reason = self._should_drop_duplicate_reply_text(live_user_for_duplicate, inbound_text, working_text)
+            else:
+                should_drop_duplicate, duplicate_reason = False, ""
+            if should_drop_duplicate:
+                setattr(event, "_private_companion_response_review_drop", True)
+                resp.completion_text = ""
+                async with self._data_lock:
+                    current = self._get_user(user_id)
+                    stats = current.setdefault("postprocess_stats", {})
+                    if not isinstance(stats, dict):
+                        stats = {}
+                        current["postprocess_stats"] = stats
+                    stats["duplicate_dropped"] = _safe_int(stats.get("duplicate_dropped"), 0, 0) + 1
+                    stats["last_duplicate_dropped_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
+                    self._save_data_sync()
+                logger.info(
+                    "[PrivateCompanion] 发送前去重已取消重复私聊回复: user=%s reason=%s inbound=%s reply=%s",
+                    user_id,
+                    _single_line(duplicate_reason, 120),
+                    _single_line(inbound_text, 120),
+                    _single_line(working_text, 160),
+                )
+                self._record_passive_no_reply(
+                    event,
+                    source="回复复核去重",
+                    reason=duplicate_reason or "最终回复与上一条 Bot 消息重复",
+                    detail=inbound_text,
+                    reply_preview=working_text,
+                    level="info",
+                )
+                release_now = True
+                return
+
+            async with self._data_lock:
                 current = self._get_user(user_id)
                 visible_reply_text = _single_line(_strip_internal_message_blocks(working_text), 500)
                 current["last_companion_message"] = visible_reply_text
+                current["last_companion_message_at"] = _now_ts()
                 self._remember_passive_reply_topic(current, working_text, inbound_text)
                 self._save_data_sync()
         except Exception:
@@ -6632,7 +6824,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 reason, _ = self._choose_proactive_message(user, name, planned_reason)
                 planned_motive = self._choose_proactive_motive(reason, user, action=planned_action)
             planned_topic = _single_line(user.get("planned_proactive_topic"), 48)
-            framework_prompt = self._build_framework_proactive_prompt(
+            framework_prompt = await self._build_framework_proactive_prompt(
                 user=user,
                 name=name,
                 reason=reason,
@@ -6676,6 +6868,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         companion_manual_confirm_actions = {"答疑确认", "排障确认", "诊断确认", "应用答疑建议", "应用建议"}
         companion_manual_cancel_actions = {"答疑取消", "排障取消", "诊断取消", "取消答疑建议", "取消建议"}
         companion_manual_setting_actions = {"答疑设置", "排障设置", "诊断设置", "答疑修改", "排障修改", "诊断修改"}
+        daily_outfit_view_actions = {"今日穿搭图", "今日穿搭", "查看穿搭图", "查看穿搭", "穿搭图", "每日穿搭图", "每日穿搭", "当前穿搭图", "当前穿搭", "展示穿搭图"}
         if action in companion_manual_query_actions:
             inline_value = value.strip()
             if inline_value in {"确认", "应用", "执行", "确认执行", "应用建议"}:
@@ -6743,6 +6936,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *companion_manual_confirm_actions,
             *companion_manual_cancel_actions,
             *companion_manual_setting_actions,
+            *daily_outfit_view_actions,
         }
         if self.require_private_opt_in and not is_private and action not in public_safe_actions:
             await self._reply(event, self._private_only_text())
@@ -6835,6 +7029,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response = "正在结合说明书和当前运行状态做诊断。"
             elif action in {"参考图", "人设参考图", "自拍参考图"}:
                 response = await self._photo_reference_command_text(event, user_id, value)
+            elif action in daily_outfit_view_actions:
+                response, response_image_path = self._daily_outfit_command_payload()
             elif action in {"查看主动判定", "主动判定", "判定"}:
                 response = self._explain_proactive_decision(user)
             elif action in {"能力列表", "主动能力", "工具列表"}:
@@ -7311,7 +7507,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     str(fast_user.get("last_proactive_action") or "message"),
                     text,
                 )
-                self._mark_recent_proactive_reply_turn(fast_user, text, now=received_ts)
                 fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 2
                 fast_user["awaiting_reply_since"] = 0
                 fast_user["last_reply_at"] = received_ts
@@ -7584,7 +7779,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     str(user.get("last_proactive_action") or "message"),
                     text,
                 )
-                self._mark_recent_proactive_reply_turn(user, text, now=received_ts)
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
                 user["awaiting_reply_since"] = 0
                 user["last_reply_at"] = _now_ts()
@@ -7635,9 +7829,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user_is_owner = self._private_user_role(user, user_id) == "owner"
             food_feedback = self._detect_food_feedback(text) if text else {"is_food": False}
             food_feedback_applied = bool(text) and user_is_owner and self._apply_food_feedback_to_state(text)
-            if food_feedback.get("is_food"):
+            food_feedback_actionable = bool(
+                food_feedback.get("actionable")
+                or food_feedback.get("feeding")
+                or food_feedback.get("bot_directed")
+            )
+            if user_is_owner and food_feedback_actionable:
                 user["last_food_feedback_at"] = _now_ts()
                 user["last_food_feedback_text"] = _single_line(text, 120)
+            if food_feedback.get("is_food"):
                 used_food_items = self._mark_food_menu_item_used_from_text(text) if user_is_owner else []
                 if used_food_items:
                     user["last_food_menu_choice"] = {

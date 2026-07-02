@@ -889,7 +889,8 @@ class LlmToolActionsMixin:
                     {
                         "status": "success",
                         "destination": "group",
-                        "final_reply": "说过啦。",
+                        "final_reply": "带到了。",
+                        "final_reply_reference": "参考意图：转述已经成功发到目标群；只给用户一个很短的成功回执，不要复述转述正文，也不要写工具执行状态。",
                         "sent_text": send_text,
                         "recipient": recipient,
                         "group_id": group_id,
@@ -898,8 +899,9 @@ class LlmToolActionsMixin:
             return json.dumps(
                 {
                     "status": "success" if ok else "error",
-                    "message": "说过啦。" if ok else result,
-                    "final_reply": "说过啦。" if ok else "",
+                    "message": "带到了。" if ok else result,
+                    "final_reply": "带到了。" if ok else "",
+                    "final_reply_reference": "参考意图：转述已经成功发到目标群；只给用户一个很短的成功回执，不要复述转述正文，也不要写工具执行状态。" if ok else "",
                     "sent_text": send_text if ok else "",
                 },
                 ensure_ascii=False,
@@ -963,18 +965,32 @@ class LlmToolActionsMixin:
                 event,
                 "private_companion_atrelay_tool_result",
                 {
-                    "status": "success",
-                    "destination": "private",
-                    "final_reply": "说过啦。" if not need_receipt else "说过啦，有回复我再告诉你。",
-                    "sent_text": send_text,
-                    "recipient": target_user,
-                },
-            )
+                        "status": "success",
+                        "destination": "private",
+                        "final_reply": "带到了。" if not need_receipt else "带到了，有回复我再告诉你。",
+                        "final_reply_reference": (
+                            "参考意图：转述已经成功发给目标私聊用户，并且如果对方回复会再告诉当前用户；只给一个很短的成功回执。"
+                            if need_receipt
+                            else "参考意图：转述已经成功发给目标私聊用户；只给用户一个很短的成功回执，不要复述转述正文，也不要写工具执行状态。"
+                        ),
+                        "sent_text": send_text,
+                        "recipient": target_user,
+                    },
+                )
         return json.dumps(
             {
                 "status": "success" if ok else "error",
-                "message": "说过啦，有回复我再告诉你。" if ok and need_receipt else ("说过啦。" if ok else result),
-                "final_reply": "说过啦，有回复我再告诉你。" if ok and need_receipt else ("说过啦。" if ok else ""),
+                "message": "带到了，有回复我再告诉你。" if ok and need_receipt else ("带到了。" if ok else result),
+                "final_reply": "带到了，有回复我再告诉你。" if ok and need_receipt else ("带到了。" if ok else ""),
+                "final_reply_reference": (
+                    "参考意图：转述已经成功发给目标私聊用户，并且如果对方回复会再告诉当前用户；只给一个很短的成功回执。"
+                    if ok and need_receipt
+                    else (
+                        "参考意图：转述已经成功发给目标私聊用户；只给用户一个很短的成功回执，不要复述转述正文，也不要写工具执行状态。"
+                        if ok
+                        else ""
+                    )
+                ),
                 "sent_text": send_text if ok else "",
             },
             ensure_ascii=False,

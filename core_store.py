@@ -106,6 +106,7 @@ from .dreaming import (
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
 from .config_migration import _ensure_config_parent_dir
+from .storage.store_manager import StoreManager
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -243,6 +244,23 @@ _PLATFORM_DISPLAY_NAMES = {
 
 class CoreStoreMixin:
     """配置、数据存储、用户/群组基础访问"""
+
+    def _rebuild_store_manager(self, *, reload_data: bool = False) -> None:
+        backend = str(getattr(self, "storage_backend", "json") or "json").strip().lower() or "json"
+        if backend not in {"json", "sqlite"}:
+            backend = "json"
+        sqlite_path = str(getattr(self, "storage_sqlite_path", "") or "").strip() or os.path.join(self.data_dir, "companions.db")
+        self.storage_backend = backend
+        self.storage_sqlite_effective_path = sqlite_path
+        self.store_manager = StoreManager(
+            backend_name=backend,
+            data_file=self.data_file,
+            sqlite_path=sqlite_path,
+            ensure_defaults=self._ensure_store_defaults,
+            new_store=self._new_store,
+        )
+        if reload_data:
+            self.data = self.store_manager.load_initial_store()
 
     def _save_config_if_possible(self) -> None:
         for method_name in ("save_config", "save", "save_conf"):
@@ -451,6 +469,12 @@ class CoreStoreMixin:
             item["last_hit_detail" if hit else "last_miss_detail"] = _single_line(detail, 160)
 
     def _load_data_sync(self) -> dict[str, Any]:
+        manager = getattr(self, "store_manager", None)
+        if manager is not None:
+            try:
+                return manager.load_initial_store()
+            except Exception as exc:
+                logger.warning("[PrivateCompanion] StoreManager 读取失败,回退 JSON: %s", _single_line(exc, 160))
         if not os.path.exists(self.data_file):
             return self._new_store()
         try:
@@ -464,7 +488,15 @@ class CoreStoreMixin:
             return self._new_store()
 
     def _save_data_sync(self):
-        # Avoid losing migrated worldbook data if an older in-memory state is saved before reload finishes.
+        manager = getattr(self, "store_manager", None)
+        if manager is not None:
+            manager.save_store(self.data)
+            if getattr(self, "storage_backend", "json") == "sqlite":
+                try:
+                    manager.export_current_to_json(self.data)
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] SQLite 镜像 JSON 写出失败: %s", _single_line(exc, 160))
+            return
         if not self.data.get("worldbook_entries") and os.path.exists(self.data_file):
             try:
                 with open(self.data_file, "r", encoding="utf-8") as f:
@@ -482,6 +514,15 @@ class CoreStoreMixin:
         self._atomic_write_data_file_sync(self.data)
 
     def _write_data_snapshot_sync(self, data: dict[str, Any]) -> None:
+        manager = getattr(self, "store_manager", None)
+        if manager is not None:
+            manager.save_snapshot(data)
+            if getattr(self, "storage_backend", "json") == "sqlite":
+                try:
+                    manager.export_current_to_json(data)
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] SQLite 快照镜像 JSON 写出失败: %s", _single_line(exc, 160))
+            return
         self._atomic_write_data_file_sync(data)
 
     def _atomic_write_data_file_sync(self, data: dict[str, Any]) -> None:

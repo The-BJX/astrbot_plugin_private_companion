@@ -1648,7 +1648,7 @@ const configDescriptions = {
   enable_atrelay_llm_rewrite: "开启后先用模型把要转述的话改成 Bot 自然会说的短句；关闭后直接发送解析出的正文，速度更快。",
   atrelay_default_relay_style: "默认转述方式：persona 按人格改写，soft 委婉，original 原话。",
   atrelay_multi_target_limit: "一次转述最多允许几个目标，防止刷屏。",
-  response_review_mode: "控制回复/主动复核范围。主动消息发送前统一复核；full 会额外让较长被动回复参与模型改写，延迟更高。",
+  response_review_mode: "控制回复/主动复核范围。主动消息发送前统一复核；被动侧只处理严重复读、泄露内部提示等保护性问题；full 会额外让较长被动回复参与模型改写，延迟更高。",
   SMART_SILENCE_PROVIDER_ID: "用于用户表达“不想继续这个话题 / 别问了 / 换个话题 / 不用回复”时的发送前沉默判定。留空时跟随回复/主动复核模型。",
   smart_silence_min_confidence: "小模型判定 silent 且达到该置信度才会真正吞掉回复。值越高越保守，按百分比填写。",
   smart_silence_model_timeout_seconds: "智能沉默判定最长等待时间。超时默认放行，避免正常回复被拖慢。",
@@ -8540,6 +8540,7 @@ function renderProactiveCandidates() {
   const runtime = taskData.runtime || {};
   $("#proactiveSummary").innerHTML = [
     proactiveSummaryCard("候选总数", total, `${items.length || 0} 条合并记录`),
+    proactiveSummaryCard("未发送候选", selectedFilter === "all" ? (data.pending_total || 0) : sumObjectValues(counts) - Number(counts.sent || 0), "按每用户上限控制"),
     proactiveSummaryCard("已进入计划", counts.accepted || 0, "当前或历史接受候选"),
     proactiveSummaryCard("已发送", counts.sent || 0, "实际发出的主动"),
     proactiveSummaryCard("被拦截", counts.blocked || 0, "同类拦截已合并计数"),
@@ -8577,7 +8578,11 @@ function renderProactiveCandidates() {
             <b>${escapeHtml(item.topic || item.reason_label || item.reason || "未命名候选")}</b>
             <span>${escapeHtml(userLabel)} · ${escapeHtml(roleLabel)} · ${escapeHtml(sourceLabel)} · ${escapeHtml(item.reason_label || item.reason || "-")} · ${escapeHtml(item.action || "message")}</span>
           </div>
-          <span class="badge">${escapeHtml(repeat > 1 ? `${status} x${repeat}` : status)}</span>
+          <div class="toolbar">
+            <span class="badge">${escapeHtml(repeat > 1 ? `${status} x${repeat}` : status)}</span>
+            <button type="button" class="danger-outline" data-proactive-candidate-delete="${escapeHtml(item.id || "")}" data-proactive-user-id="${escapeHtml(item.user_id || "")}">删除</button>
+            <button type="button" class="danger-outline" data-proactive-candidate-prune="${escapeHtml(item.user_id || "")}" data-proactive-prune-keep="160">删一点</button>
+          </div>
         </div>
         <p>${escapeHtml(item.motive || "暂无动机记录")}</p>
         <div class="proactive-meta">
@@ -9167,11 +9172,38 @@ function renderConfig() {
   $("#groupAccessMode").value = group.access_mode || "whitelist";
   $("#groupWhitelist").value = (group.whitelist || []).join("\n");
   $("#groupBlacklist").value = (group.blacklist || []).join("\n");
+  renderStorageConfig();
   renderAccessManager(group);
   renderFeatureSwitches();
   renderConfigBackups();
   renderConfigImportChecks();
   renderConfigMigrationPreview();
+}
+
+function renderStorageConfig(options = {}) {
+  const overview = state.overview || {};
+  const settings = overview.settings || {};
+  const plugin = overview.plugin || {};
+  const preserveDraft = Boolean(options.preserveDraft);
+  const backendSelect = $("#storageBackendSelect");
+  const sqliteWrap = $("#storageSqlitePathWrap");
+  const sqliteInput = $("#storageSqlitePathInput");
+  const summary = $("#storageConfigSummary");
+  const selectedBackend = preserveDraft ? (backendSelect?.value || "") : "";
+  const backend = String(selectedBackend || settings.storage_backend || plugin.storage_backend || "json").trim().toLowerCase() || "json";
+  const sqlitePath = preserveDraft && sqliteInput
+    ? String(sqliteInput.value || "").trim()
+    : String(settings.storage_sqlite_path || plugin.storage_sqlite_path || "").trim();
+  if (backendSelect) backendSelect.value = backend;
+  if (sqliteInput) sqliteInput.value = sqlitePath;
+  if (sqliteWrap) sqliteWrap.hidden = backend !== "sqlite";
+  if (summary) {
+    summary.innerHTML = `
+      <span>当前后端：<b>${escapeHtml(backend)}</b></span>
+      <span>当前路径：<b>${escapeHtml(plugin.storage_sqlite_path || sqlitePath || "companions.json / 默认 companions.db")}</b></span>
+      <span>当前数据文件：<b>${escapeHtml(plugin.data_file || "-")}</b></span>
+    `;
+  }
 }
 
 function renderPrivateStrategyOverview(selector, info) {
@@ -13142,6 +13174,38 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("click", async (event) => {
   const element = event.target instanceof Element ? event.target : null;
+  const proactiveDeleteButton = element?.closest("[data-proactive-candidate-delete]");
+  if (proactiveDeleteButton) {
+    const candidateId = proactiveDeleteButton.dataset.proactiveCandidateDelete || "";
+    const userId = proactiveDeleteButton.dataset.proactiveUserId || "";
+    if (!candidateId) return;
+    if (!requireSecondClick(proactiveDeleteButton, `proactive-delete:${candidateId}`, "再次点击删除这条主动候选", "再次点击删除")) return;
+    await runAction(async () => {
+      const result = await postJson("/proactive/candidate/delete", { candidate_id: candidateId, user_id: userId });
+      if (state.overview) {
+        state.overview.proactive_candidates = result.proactive_candidates || state.overview.proactive_candidates;
+        state.overview.proactive_tasks = result.proactive_tasks || state.overview.proactive_tasks;
+      }
+      return state.overview || result;
+    }, "已删除主动候选", proactiveDeleteButton);
+    return;
+  }
+  const proactivePruneButton = element?.closest("[data-proactive-candidate-prune]");
+  if (proactivePruneButton) {
+    const userId = proactivePruneButton.dataset.proactiveCandidatePrune || "";
+    const keep = Number(proactivePruneButton.dataset.proactivePruneKeep || 160) || 160;
+    if (!userId) return;
+    if (!requireSecondClick(proactivePruneButton, `proactive-prune:${userId}:${keep}`, `再次点击将该用户未发送候选压到 ${keep} 条`, "再次点击删一点")) return;
+    await runAction(async () => {
+      const result = await postJson("/proactive/candidate/prune", { user_id: userId, keep });
+      if (state.overview) {
+        state.overview.proactive_candidates = result.proactive_candidates || state.overview.proactive_candidates;
+        state.overview.proactive_tasks = result.proactive_tasks || state.overview.proactive_tasks;
+      }
+      return state.overview || result;
+    }, "已压缩该用户未发送候选", proactivePruneButton);
+    return;
+  }
   const creativeReanalyze = element?.closest("[data-creative-reanalyze]");
   if (creativeReanalyze) {
     const projectId = creativeReanalyze.dataset.creativeReanalyze || "";
@@ -13890,6 +13954,26 @@ $("#configAllowChecksumMismatch").addEventListener("change", () => {
   renderConfigMigrationPreview();
 });
 
+$("#storageBackendSelect").addEventListener("change", () => {
+  renderStorageConfig({ preserveDraft: true });
+});
+
+$("#storageConfigForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const backend = String($("#storageBackendSelect")?.value || "json").trim().toLowerCase() || "json";
+  const sqlitePath = String($("#storageSqlitePathInput")?.value || "").trim();
+  await runAction(
+    () => postJson("/settings/update", {
+      settings: {
+        storage_backend: backend,
+        storage_sqlite_path: sqlitePath,
+      },
+    }),
+    "已保存存储方式",
+    event.submitter || $("#saveStorageConfigBtn")
+  );
+});
+
 $("#configBackupList").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-config-restore]");
   if (!button) return;
@@ -13981,11 +14065,11 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
   const provider_config_mode = currentProviderConfigMode();
   const providers = {};
   Object.keys(providerLabels).forEach((key) => {
-    if (visibleConfigKey(key) && providerAllowedInCurrentMode(key)) providers[key] = values[key] || "";
+    if (visibleConfigKey(key)) providers[key] = values[key] || "";
   });
   await runAction(
-    () => postJson("/settings/update", { settings: { provider_config_mode }, providers }),
-    "已保存模型配置",
+    () => postJson("/settings/update", { settings: { provider_config_mode }, providers, overwrite_provider_modes: true }),
+    "已保存模型配置，并覆盖 quick / precision 两套分流",
     $("#saveProvidersBtn")
   );
   state.overview = state.overview || {};

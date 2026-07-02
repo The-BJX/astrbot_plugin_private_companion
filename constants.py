@@ -224,6 +224,7 @@ _DEFAULT_USER_TEMPLATE = {
     "last_user_message": "",
     "last_user_message_at": 0,
     "last_companion_message": "",
+    "last_companion_message_at": 0,
     "last_proactive_reason": "",
     "last_proactive_action": "",
     "last_proactive_behavior_summary": "",

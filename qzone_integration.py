@@ -1192,6 +1192,20 @@ class QzoneMixin(QzoneMediaMixin):
             f"正文：{text}"
         )
 
+    async def _qzone_memory_companion_context(self, *, purpose: str, query: str = "") -> str:
+        getter = getattr(self, "_memory_companion_compose_feature_context", None)
+        if not callable(getter):
+            return ""
+        try:
+            return await getter(
+                kind=f"qzone_{_single_line(purpose, 40) or 'context'}",
+                query=query or "QQ空间公开动态 当前日程 最近生活 日记余味 今日穿搭 自我时间线",
+                top_k=5,
+                max_chars=760,
+            )
+        except Exception:
+            return ""
+
     async def _qzone_decide_comment_reply(self, post: Any, comment: Any, *, own_uin: int) -> dict[str, str]:
         content = _single_line(getattr(comment, "content", ""), 180)
         if not content:
@@ -1200,6 +1214,10 @@ class QzoneMixin(QzoneMediaMixin):
             return {"decision": "skip", "reply": "", "reason": "自己的评论"}
         author_context = self._qzone_comment_author_context(comment)
         post_context = self._qzone_post_brief_context(post)
+        memory_context = await self._qzone_memory_companion_context(
+            purpose="comment_reply",
+            query=f"QQ空间评论回复 {content} 所在说说 {_single_line(getattr(post, 'text', ''), 180)} 关系边界 最近公开生活",
+        )
         prompt = f"""
 你在处理 Bot 自己 QQ 空间说说下的新评论。请判断是否需要公开回复。
 只输出 JSON，不要解释。
@@ -1225,6 +1243,10 @@ class QzoneMixin(QzoneMediaMixin):
 {_single_line(getattr(comment, "name", ""), 40) or str(getattr(comment, "uin", "") or "对方")}
 
 {author_context}
+
+【RememberYou 公开边界参考】
+{memory_context or "暂无"}
+使用方式：只帮助判断公开回复边界和最近生活连续性；不要泄露私聊、记忆来源或内部记录。
 
 【评论内容】
 {content}
@@ -1578,6 +1600,10 @@ class QzoneMixin(QzoneMediaMixin):
         daily_state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         diary_context = self._recent_diary_context(count=2)
+        memory_context = await self._qzone_memory_companion_context(
+            purpose="publish_test",
+            query="QQ空间生活说说 今日公开可写生活 当前日程 今日穿搭 最近吃饭 日记余味 自我时间线",
+        )
         prompt = f"""
 请以当前 Bot 人格写一条 QQ 空间说说。
 只输出说说正文,不要解释,不要加标题。
@@ -1597,6 +1623,10 @@ class QzoneMixin(QzoneMediaMixin):
 
 【近日私密日记余味】
 {diary_context or "暂无"}
+
+【RememberYou 公开可写生活参考】
+{memory_context or "暂无"}
+使用方式：只选公开可写、不会泄露私聊或内部记忆来源的生活连续性。
 
 {self._format_worldview_adaptation_prompt()}
 """.strip()
@@ -1904,6 +1934,10 @@ class QzoneMixin(QzoneMediaMixin):
         daily_state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         diary_context = self._recent_diary_context(count=2)
+        memory_context = await self._qzone_memory_companion_context(
+            purpose="publish",
+            query="QQ空间生活说说 今日公开可写生活 当前日程 今日穿搭 最近吃饭 日记余味 自我时间线",
+        )
         if reusable_text:
             text = reusable_text
             logger.info(
@@ -1930,6 +1964,10 @@ class QzoneMixin(QzoneMediaMixin):
 
 【近日私密日记余味】
 {diary_context or "暂无"}
+
+【RememberYou 公开可写生活参考】
+{memory_context or "暂无"}
+使用方式：只选公开可写、不会泄露私聊或内部记忆来源的生活连续性。
 
 {self._format_worldview_adaptation_prompt()}
 """.strip()

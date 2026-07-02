@@ -249,6 +249,169 @@ class ProactiveEngineMixin:
             self.data["proactive_candidate_pool"] = raw
         return raw
 
+    def _pending_proactive_candidate_limit(self, user: dict[str, Any] | None = None) -> int:
+        if not isinstance(user, dict):
+            return 200
+        override = _safe_int(user.get("pending_proactive_candidate_limit"), -1, -1)
+        return override if override > 0 else 200
+
+    def _candidate_user_id(self, item: dict[str, Any]) -> str:
+        if not isinstance(item, dict):
+            return ""
+        return _single_line(item.get("user_id") or item.get("target_user_id") or item.get("id"), 40)
+
+    @staticmethod
+    def _pending_candidate_status(status: str) -> bool:
+        normalized = _single_line(status, 24).lower()
+        return normalized != "sent"
+
+    def _planned_candidate_ids_by_user(self) -> dict[str, str]:
+        users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+        planned: dict[str, str] = {}
+        for user_id, user in users.items():
+            if not isinstance(user, dict):
+                continue
+            candidate_id = _single_line(user.get("planned_candidate_id"), 40)
+            if candidate_id:
+                planned[str(user_id)] = candidate_id
+        return planned
+
+    def _trim_proactive_candidate_total(self, items: list[dict[str, Any]], *, limit: int = 2000) -> list[dict[str, Any]]:
+        if len(items) <= limit:
+            return items
+        planned_ids = set(self._planned_candidate_ids_by_user().values())
+        protected = [
+            item for item in items
+            if _single_line(item.get("id"), 40) in planned_ids
+        ]
+        protected_ids = {_single_line(item.get("id"), 40) for item in protected}
+        remaining = [
+            item for item in items
+            if _single_line(item.get("id"), 40) not in protected_ids
+        ]
+        keep_count = max(0, limit - len(protected))
+        trimmed = remaining[-keep_count:] if keep_count else []
+        result = protected + trimmed
+        result.sort(
+            key=lambda item: max(
+                _safe_float(item.get("updated_ts"), 0),
+                _safe_float(item.get("created_ts"), 0),
+                _safe_float(item.get("scheduled_ts"), 0),
+                _safe_float(item.get("last_seen_ts"), 0),
+            )
+        )
+        return result[-limit:]
+
+    def _candidate_trim_priority(self, item: dict[str, Any], *, planned_candidate_id: str = "") -> tuple[int, int, int, float]:
+        status = _single_line(item.get("status"), 24).lower()
+        note = _single_line(item.get("note"), 160)
+        item_id = _single_line(item.get("id"), 40)
+        updated = _safe_float(item.get("updated_ts"), 0)
+        created = _safe_float(item.get("created_ts"), 0)
+        scheduled = _safe_float(item.get("scheduled_ts"), 0)
+        last_seen = _safe_float(item.get("last_seen_ts"), 0)
+        repeat_count = _safe_int(item.get("repeat_count"), 1, 1)
+        protected = item_id and planned_candidate_id and item_id == planned_candidate_id
+        status_rank = {
+            "failed": 0,
+            "cancelled": 1,
+            "dropped": 2,
+            "blocked": 3,
+            "deferred": 4,
+            "accepted": 6,
+        }.get(status, 5)
+        note_penalty = 0 if note else 1
+        freshness = max(updated, scheduled, last_seen, created)
+        return (1 if protected else 0, status_rank, repeat_count + note_penalty, freshness)
+
+    def _apply_per_user_pending_candidate_cap(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        pending_cap: int | None = None,
+        target_user_id: str = "",
+    ) -> tuple[list[dict[str, Any]], int]:
+        users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+        planned_ids = self._planned_candidate_ids_by_user()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        passthrough: list[dict[str, Any]] = []
+        removed = 0
+        target = str(target_user_id or "").strip()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            user_id = self._candidate_user_id(item)
+            if not user_id:
+                passthrough.append(item)
+                continue
+            if target and user_id != target:
+                passthrough.append(item)
+                continue
+            grouped.setdefault(user_id, []).append(item)
+        kept: list[dict[str, Any]] = list(passthrough)
+        for user_id, user_items in grouped.items():
+            user = users.get(user_id) if isinstance(users, dict) else None
+            limit = pending_cap if pending_cap is not None else self._pending_proactive_candidate_limit(user if isinstance(user, dict) else None)
+            if limit <= 0:
+                kept.extend(user_items)
+                continue
+            pending_items = [item for item in user_items if self._pending_candidate_status(str(item.get("status") or ""))]
+            sent_items = [item for item in user_items if not self._pending_candidate_status(str(item.get("status") or ""))]
+            if len(pending_items) > limit:
+                planned_candidate_id = planned_ids.get(user_id, "")
+                pending_items.sort(
+                    key=lambda item: self._candidate_trim_priority(item, planned_candidate_id=planned_candidate_id),
+                    reverse=True,
+                )
+                trimmed_pending = pending_items[:limit]
+                removed += max(0, len(pending_items) - len(trimmed_pending))
+                pending_items = sorted(
+                    trimmed_pending,
+                    key=lambda item: max(
+                        _safe_float(item.get("updated_ts"), 0),
+                        _safe_float(item.get("created_ts"), 0),
+                        _safe_float(item.get("scheduled_ts"), 0),
+                    ),
+                )
+            kept.extend(sent_items)
+            kept.extend(pending_items)
+        kept.sort(
+            key=lambda item: max(
+                _safe_float(item.get("updated_ts"), 0),
+                _safe_float(item.get("created_ts"), 0),
+                _safe_float(item.get("scheduled_ts"), 0),
+                _safe_float(item.get("last_seen_ts"), 0),
+            )
+        )
+        return kept, removed
+
+    def _shrink_user_proactive_candidates(
+        self,
+        user_id: str,
+        *,
+        pending_cap: int | None = None,
+        note: str = "",
+    ) -> int:
+        target_user_id = str(user_id or "").strip()
+        if not target_user_id:
+            return 0
+        current = [item for item in self._proactive_candidate_pool() if isinstance(item, dict)]
+        kept, removed = self._apply_per_user_pending_candidate_cap(
+            current,
+            pending_cap=pending_cap,
+            target_user_id=target_user_id,
+        )
+        if removed > 0:
+            self.data["proactive_candidate_pool"] = kept
+            logger.info(
+                "[PrivateCompanion] 主动候选自动收缩: user=%s removed=%s cap=%s note=%s",
+                target_user_id,
+                removed,
+                pending_cap or "default",
+                _single_line(note, 120),
+            )
+        return removed
+
     def _cleanup_proactive_candidate_pool(self, *, now: float | None = None) -> list[dict[str, Any]]:
         now = now or _now_ts()
         kept: list[dict[str, Any]] = []
@@ -262,7 +425,8 @@ class ProactiveEngineMixin:
             anchor = max(created, scheduled)
             if anchor > 0 and now - anchor <= ttl:
                 kept.append(item)
-        self.data["proactive_candidate_pool"] = kept[-120:]
+        kept, _ = self._apply_per_user_pending_candidate_cap(kept)
+        self.data["proactive_candidate_pool"] = self._trim_proactive_candidate_total(kept, limit=2000)
         return self.data["proactive_candidate_pool"]
 
     def _proactive_impulse_pool(self, user: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1278,6 +1442,36 @@ class ProactiveEngineMixin:
             cached["cached"] = True
             return cached
         prompt = self._format_proactive_model_judge_prompt(user)
+        memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(memory_getter):
+            user_id = _single_line(user.get("user_id") or user.get("id"), 80)
+            query = " ".join(
+                part
+                for part in (
+                    "主动消息适合性",
+                    _single_line(user.get("planned_proactive_reason"), 80),
+                    _single_line(user.get("planned_proactive_topic"), 120),
+                    _single_line(user.get("planned_proactive_motive"), 180),
+                    "用户习惯 上次主动回应 边界 当前穿搭 当前日程 最近状态",
+                )
+                if part
+            )
+            memory_context = await memory_getter(
+                kind="proactive_review",
+                query=query,
+                user=user,
+                user_id=user_id,
+                top_k=5,
+                max_chars=800,
+            )
+            if memory_context:
+                prompt = (
+                    f"{prompt.rstrip()}\n\n"
+                    "<!-- private_companion_memory_review_context_v1 -->\n"
+                    "【RememberYou 相关记忆】\n"
+                    f"{memory_context}\n"
+                    "使用方式：只辅助判断是否适合主动、是否需要改写或延后；不要在理由里暴露检索过程。"
+                )
         started = time.perf_counter()
         raw = await self._llm_call(
             prompt,
@@ -1659,7 +1853,7 @@ class ProactiveEngineMixin:
             **(semantic_fields if semantics else {}),
         }
         pool.append(item)
-        del pool[:-120]
+        self._cleanup_proactive_candidate_pool(now=now)
         return item
 
     def _proactive_candidate_repeated(self, user: dict[str, Any], candidate: dict[str, Any]) -> bool:
@@ -2016,6 +2210,13 @@ class ProactiveEngineMixin:
             return False, "用户明确休息中"
         if not is_troubleshooting and self._is_quiet_time() and not self._can_send_insomnia_night_message(user):
             return False, "免打扰时段"
+        pre_gate_next_at = _safe_float(user.get("next_proactive_at"), 0)
+        if not is_troubleshooting and not due_timer_active:
+            if pre_gate_next_at <= 0:
+                self._schedule_next_proactive(user, now=now)
+                return False, "已安排下一次候选主动时间"
+            if now < pre_gate_next_at:
+                return False, "未到候选主动时间"
         rel_state = user.get("relationship_state")
         relationship_blocked = (
             not is_troubleshooting
@@ -2038,18 +2239,31 @@ class ProactiveEngineMixin:
                 _safe_float(rel_state.get("hurt_until"), 0),
                 _safe_float(rel_state.get("backoff_until"), 0),
             )
+            before_next_at = _safe_float(user.get("next_proactive_at"), 0)
             adjuster = getattr(self, "_defer_or_clean_emotion_blocked_plan", None)
             if callable(adjuster):
                 adjusted_reason = adjuster(user, now=now)
             else:
                 adjusted_reason = "情绪/关系状态处于收敛期"
+            after_next_at = _safe_float(user.get("next_proactive_at"), 0)
+            if after_next_at <= now and gate_until > now:
+                after_next_at = gate_until + random.uniform(15 * 60, 75 * 60)
+                user["next_proactive_at"] = after_next_at
+                user["planned_proactive_window_start_at"] = after_next_at
+                user["planned_proactive_best_until_at"] = after_next_at + 45 * 60
+                user["planned_proactive_expire_at"] = after_next_at + 90 * 60
             logger.info(
                 "[PrivateCompanion] 情绪/关系闸门拦截主动: user=%s mode=%s score=%s gate_until=%s reason=%s",
                 _single_line(user.get("user_id") or user.get("umo") or user.get("nickname"), 80),
                 _single_line(rel_state.get("mode"), 24),
                 _safe_int(rel_state.get("mood_score"), 0, -100, 100),
                 int(gate_until),
-                _single_line(rel_state.get("last_hurt_reason"), 80),
+                _single_line(
+                    rel_state.get("last_hurt_reason")
+                    or rel_state.get("last_backoff_reason")
+                    or rel_state.get("last_emotion_reason"),
+                    80,
+                ),
             )
             return False, adjusted_reason
 
@@ -2472,6 +2686,7 @@ class ProactiveEngineMixin:
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] 主动结果余韵记录失败: %s", _single_line(exc, 120))
             candidate_id = str(user.get("planned_candidate_id") or "")
+            user_id = str(user.get("user_id") or user.get("id") or "")
             if candidate_id:
                 for item in self._cleanup_proactive_candidate_pool():
                     if str(item.get("id") or "") == candidate_id:
@@ -2503,6 +2718,8 @@ class ProactiveEngineMixin:
                 else:
                     impulse["state"] = "queued"
                 break
+            if user_id and status in {"blocked", "cancelled", "dropped", "failed", "deferred"}:
+                self._shrink_user_proactive_candidates(user_id, note=note)
         finally:
             for key, value in restored_values.items():
                 user[key] = value

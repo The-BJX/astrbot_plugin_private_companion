@@ -95,6 +95,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/config/import/preview", self.preview_migration_config_import, ["POST"], "Private Companion Page preview migration config import"),
             ("/config/import/apply", self.apply_migration_config_import, ["POST"], "Private Companion Page apply migration config import"),
             ("/proactive_only/unlock", self.update_proactive_only_unlock, ["POST"], "Private Companion Page proactive-only temporary unlock"),
+            ("/proactive/candidate/delete", self.delete_proactive_candidate, ["POST"], "Private Companion Page delete proactive candidate"),
+            ("/proactive/candidate/prune", self.prune_proactive_candidates, ["POST"], "Private Companion Page prune proactive candidates"),
             ("/diagnostics", self.get_diagnostics, ["GET"], "Private Companion Page diagnostics"),
             ("/troubleshooting", self.get_troubleshooting, ["GET"], "Private Companion Page troubleshooting"),
             ("/troubleshooting/test", self.run_troubleshooting_test, ["POST"], "Private Companion Page troubleshooting test"),
@@ -168,6 +170,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "enabled": bool(getattr(self.plugin, "enabled", False)),
                     "bot_name": getattr(self.plugin, "bot_name", ""),
                     "data_file": getattr(self.plugin, "data_file", ""),
+                    "storage_backend": getattr(self.plugin, "storage_backend", "json"),
+                    "storage_sqlite_path": getattr(
+                        self.plugin,
+                        "storage_sqlite_effective_path",
+                        getattr(self.plugin, "storage_sqlite_path", ""),
+                    ),
                     "data_version": data.get("version"),
                 },
                 "private": {
@@ -841,14 +849,28 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     changed[key] = self._normalize_bool_value(value)
                 elif key in self._schema_bool_keys() and key in self._allowed_setting_keys():
                     changed[key] = self._normalize_bool_value(value)
+            provider_payload: dict[str, Any] = {}
             for key, value in (payload.get("providers") or {}).items():
                 if key in self._allowed_provider_keys():
-                    changed[key] = self._single_line(value, 160)
+                    provider_payload[key] = self._single_line(value, 160)
             for key, value in (payload.get("settings") or {}).items():
                 if key in self._allowed_setting_keys():
                     changed[key] = self._normalize_setting_value(key, value)
+            if provider_payload:
+                if bool(payload.get("overwrite_provider_modes")):
+                    mode_value = changed.get("provider_config_mode") or self._config_get("provider_config_mode") or getattr(self.plugin, "provider_config_mode", "quick")
+                    provider_payload = self._expand_provider_overwrite_bundle(str(mode_value), provider_payload)
+                changed.update(provider_payload)
+            storage_changed = bool({"storage_backend", "storage_sqlite_path"} & set(changed))
+            apply_overrides = dict(changed)
+            if storage_changed:
+                apply_overrides["__defer_storage_rebuild"] = True
             for key, value in changed.items():
-                self._apply_config_value(key, value, changed)
+                self._apply_config_value(key, value, apply_overrides)
+            if storage_changed:
+                rebuild = getattr(self.plugin, "_rebuild_store_manager", None)
+                if callable(rebuild):
+                    rebuild(reload_data=True)
             if any(key in self._allowed_provider_keys() for key in changed) or "provider_config_mode" in changed:
                 apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
                 if callable(apply_quick):
@@ -968,6 +990,90 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新主动专用临时放行失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def delete_proactive_candidate(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        candidate_id = self._single_line(payload.get("candidate_id") or payload.get("id"), 40)
+        if not candidate_id:
+            return self._error("缺少 candidate_id")
+        try:
+            async with self.plugin._data_lock:
+                raw = self.plugin.data.get("proactive_candidate_pool")
+                if not isinstance(raw, list):
+                    raw = []
+                    self.plugin.data["proactive_candidate_pool"] = raw
+                removed_item = None
+                kept = []
+                for item in raw:
+                    if not isinstance(item, dict):
+                        continue
+                    if self._single_line(item.get("id"), 40) == candidate_id and removed_item is None:
+                        removed_item = dict(item)
+                        continue
+                    kept.append(item)
+                if removed_item is None:
+                    return self._error("没有找到对应主动候选")
+                self.plugin.data["proactive_candidate_pool"] = kept
+                user_id = self._single_line(removed_item.get("user_id"), 40)
+                users = self.plugin.data.get("users") if isinstance(self.plugin.data.get("users"), dict) else {}
+                cleared_current_plan = False
+                if user_id and isinstance(users.get(user_id), dict):
+                    user = users[user_id]
+                    if self._single_line(user.get("planned_candidate_id"), 40) == candidate_id:
+                        clearer = getattr(self.plugin, "_clear_pending_proactive_plan", None)
+                        scheduler = getattr(self.plugin, "_schedule_next_proactive", None)
+                        if callable(clearer):
+                            clearer(user)
+                            cleared_current_plan = True
+                        if callable(scheduler):
+                            scheduler(user, now=time.time())
+                    shrinker = getattr(self.plugin, "_shrink_user_proactive_candidates", None)
+                    if callable(shrinker):
+                        shrinker(user_id, note="page_delete")
+                self.plugin._save_data_sync()
+                data = self._overview_data_snapshot_locked(self.plugin.data)
+            message = "已删除主动候选"
+            if cleared_current_plan:
+                message += "，并重新安排了下一次主动检查"
+            return self._ok(
+                {
+                    "message": message,
+                    "removed": True,
+                    "cleared_current_plan": cleared_current_plan,
+                    "proactive_candidates": self._proactive_candidate_summary(data),
+                    "proactive_tasks": self._proactive_task_summary(data),
+                }
+            )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 删除主动候选失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def prune_proactive_candidates(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        user_id = self._single_line(payload.get("user_id"), 40)
+        if not user_id:
+            return self._error("缺少 user_id")
+        keep = self._int(payload.get("keep"), 160, 1, 400)
+        try:
+            async with self.plugin._data_lock:
+                shrinker = getattr(self.plugin, "_shrink_user_proactive_candidates", None)
+                if not callable(shrinker):
+                    return self._error("当前插件缺少主动候选收缩能力")
+                removed = int(shrinker(user_id, pending_cap=keep, note="page_prune") or 0)
+                self.plugin._save_data_sync()
+                data = self._overview_data_snapshot_locked(self.plugin.data)
+            return self._ok(
+                {
+                    "message": f"已为用户压缩 {removed} 条未发送候选",
+                    "removed": removed,
+                    "kept_limit": keep,
+                    "proactive_candidates": self._proactive_candidate_summary(data),
+                    "proactive_tasks": self._proactive_task_summary(data),
+                }
+            )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 压缩主动候选失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def get_diagnostics(self) -> dict[str, Any]:
@@ -5972,6 +6078,99 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             values["tts_conversion_provider_id"] = str(getattr(self.plugin, "tts_conversion_provider_id", "") or "")
         return values
 
+    @staticmethod
+    def _normalize_provider_mode_value(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        return "precision" if text in {"precision", "precise", "advanced", "精准", "精准配置", "分流"} else "quick"
+
+    def _precision_bundle_from_quick(self, values: dict[str, str]) -> dict[str, str]:
+        fast = self._single_line(values.get("FAST_RESPONSE_PROVIDER_ID"), 160)
+        complex_model = self._single_line(values.get("COMPLEX_REASONING_PROVIDER_ID") or values.get("LLM_PROVIDER_ID"), 160)
+        creative = self._single_line(values.get("CREATIVE_MODEL_PROVIDER_ID"), 160)
+        plugin_vision = self._single_line(values.get("PLUGIN_VISION_PROVIDER_ID"), 160)
+        return {
+            "LLM_PROVIDER_ID": complex_model,
+            "MAI_STYLE_PROVIDER_ID": fast or complex_model,
+            "DAILY_PLAN_PROVIDER_ID": complex_model,
+            "DETAIL_ENHANCEMENT_PROVIDER_ID": complex_model,
+            "HISTORY_SUMMARY_PROVIDER_ID": complex_model,
+            "RELATIONSHIP_ANALYSIS_PROVIDER_ID": complex_model,
+            "COMPANION_MEMORY_PROVIDER_ID": complex_model,
+            "DIALOGUE_EPISODE_PROVIDER_ID": complex_model,
+            "GROUP_EPISODE_PROVIDER_ID": complex_model,
+            "FORWARD_MESSAGE_PROVIDER_ID": complex_model,
+            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": complex_model,
+            "RESPONSE_REVIEW_PROVIDER_ID": fast or complex_model,
+            "SMART_SILENCE_PROVIDER_ID": fast or complex_model,
+            "TROUBLESHOOTING_PROVIDER_ID": fast or complex_model,
+            "EMOTION_JUDGEMENT_PROVIDER_ID": fast or complex_model,
+            "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": fast or complex_model,
+            "REST_WAKEUP_PROVIDER_ID": fast or complex_model,
+            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": fast,
+            "GROUP_INTERJECT_PROVIDER_ID": fast or complex_model,
+            "GROUP_SLANG_PROVIDER_ID": fast or complex_model,
+            "VOICE_PROMPT_PROVIDER_ID": fast or complex_model,
+            "tts_conversion_provider_id": fast or complex_model,
+            "NARRATION_PROVIDER_ID": fast or complex_model,
+            "NEWS_PROVIDER_ID": fast or complex_model,
+            "WEB_EXPLORATION_PROVIDER_ID": fast or complex_model,
+            "CREATIVE_PROVIDER_ID": creative or complex_model,
+            "CREATIVE_OUTLINE_PROVIDER_ID": creative or complex_model,
+            "CREATIVE_REVIEW_PROVIDER_ID": creative or complex_model,
+            "DREAM_DIARY_PROVIDER_ID": creative or complex_model,
+            "PHOTO_PROMPT_PROVIDER_ID": creative or complex_model,
+            "PRIVATE_READING_VISION_PROVIDER_ID": plugin_vision,
+        }
+
+    def _quick_bundle_from_precision(self, values: dict[str, str]) -> dict[str, str]:
+        fast = self._single_line(
+            values.get("FAST_RESPONSE_PROVIDER_ID")
+            or values.get("RESPONSE_REVIEW_PROVIDER_ID")
+            or values.get("SMART_MESSAGE_DEBOUNCE_PROVIDER_ID")
+            or values.get("SMART_SILENCE_PROVIDER_ID")
+            or values.get("MAI_STYLE_PROVIDER_ID"),
+            160,
+        )
+        complex_model = self._single_line(
+            values.get("COMPLEX_REASONING_PROVIDER_ID")
+            or values.get("LLM_PROVIDER_ID")
+            or values.get("DAILY_PLAN_PROVIDER_ID")
+            or values.get("COMPANION_MEMORY_PROVIDER_ID")
+            or values.get("MAI_STYLE_PROVIDER_ID"),
+            160,
+        )
+        creative = self._single_line(
+            values.get("CREATIVE_MODEL_PROVIDER_ID")
+            or values.get("CREATIVE_PROVIDER_ID")
+            or values.get("DREAM_DIARY_PROVIDER_ID")
+            or values.get("PHOTO_PROMPT_PROVIDER_ID")
+            or complex_model,
+            160,
+        )
+        plugin_vision = self._single_line(
+            values.get("PLUGIN_VISION_PROVIDER_ID")
+            or values.get("PRIVATE_READING_VISION_PROVIDER_ID")
+            or values.get("NARRATION_PROVIDER_ID"),
+            160,
+        )
+        return {
+            "FAST_RESPONSE_PROVIDER_ID": fast,
+            "COMPLEX_REASONING_PROVIDER_ID": complex_model,
+            "CREATIVE_MODEL_PROVIDER_ID": creative,
+            "PLUGIN_VISION_PROVIDER_ID": plugin_vision,
+        }
+
+    def _expand_provider_overwrite_bundle(self, mode: str, values: dict[str, str]) -> dict[str, str]:
+        merged = {key: self._single_line(value, 160) for key, value in self._provider_settings().items()}
+        for key, value in values.items():
+            if key in self._allowed_provider_keys():
+                merged[key] = self._single_line(value, 160)
+        if self._normalize_provider_mode_value(mode) == "quick":
+            merged.update(self._precision_bundle_from_quick(merged))
+        else:
+            merged.update(self._quick_bundle_from_precision(merged))
+        return {key: self._single_line(value, 160) for key, value in merged.items() if key in self._allowed_provider_keys()}
+
     def _migration_export_options_from_request(self) -> set[str]:
         raw = request.args.get("sections") or ""
         if not raw:
@@ -5997,6 +6196,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if self._should_apply_migration_value(current_value, normalized_value, conflict):
                 changed_config[key] = normalized_value
         for key, value in normalized.get("settings", {}).items():
+            if key in {"storage_backend", "storage_sqlite_path"}:
+                continue
             if key in {"group_whitelist_ids", "group_blacklist_ids"}:
                 normalized_value = self._normalize_id_list(value)
             elif key == "group_access_mode":
@@ -6074,6 +6275,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "最近消息和输入状态",
                 "主动消息审计与冷却队列",
                 "临时任务、排障记录和运行时缓存",
+                "本机存储后端与 SQLite 路径",
             ],
         }
         if "providers" in selected:
@@ -6089,6 +6291,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         allowed = self._allowed_setting_keys()
         settings = {}
         for key, value in runtime.items():
+            if key in {"storage_backend", "storage_sqlite_path"}:
+                continue
             if key not in allowed:
                 continue
             group = self._migration_setting_group(key)
@@ -6169,6 +6373,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     @staticmethod
     def _migration_setting_group(key: str) -> str:
         text = str(key)
+        if text in {"storage_backend", "storage_sqlite_path"}:
+            return "environment"
         if text == "provider_config_mode":
             return "providers"
         if text == "QZONE_COOKIE":
@@ -6245,6 +6451,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         settings: dict[str, Any] = {}
         raw_settings = overview.get("settings") if isinstance(overview.get("settings"), dict) else {}
         for key, value in raw_settings.items():
+            if key in {"storage_backend", "storage_sqlite_path"}:
+                continue
             if key in self._allowed_setting_keys():
                 settings[key] = deepcopy(value)
         group_overview = overview.get("group") if isinstance(overview.get("group"), dict) else {}
@@ -6295,6 +6503,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
         raw_settings = package.get("settings") if isinstance(package.get("settings"), dict) else {}
         for key, value in raw_settings.items():
+            if key in {"storage_backend", "storage_sqlite_path"}:
+                ignored.append(str(key))
+                continue
             if key == "group_access_mode":
                 mode = str(value or "").strip().lower()
                 if mode in {"whitelist", "blacklist"}:
@@ -7624,6 +7835,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 else str(value or "quick").strip().lower()
             )
             return
+        if key == "storage_backend":
+            backend = str(value or "json").strip().lower() or "json"
+            self.plugin.storage_backend = backend if backend in {"json", "sqlite"} else "json"
+            rebuild = getattr(self.plugin, "_rebuild_store_manager", None)
+            if callable(rebuild) and not bool((overrides or {}).get("__defer_storage_rebuild")):
+                rebuild(reload_data=True)
+            return
+        if key == "storage_sqlite_path":
+            self.plugin.storage_sqlite_path = str(value or "").strip()
+            rebuild = getattr(self.plugin, "_rebuild_store_manager", None)
+            if callable(rebuild) and not bool((overrides or {}).get("__defer_storage_rebuild")):
+                rebuild(reload_data=True)
+            return
         attr_map = {
             "FAST_RESPONSE_PROVIDER_ID": "fast_response_provider_id",
             "COMPLEX_REASONING_PROVIDER_ID": "complex_reasoning_provider_id",
@@ -8513,6 +8737,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             }
             text = aliases.get(text, text)
             return text if text in {"quick", "precision"} else "quick"
+        if key == "storage_backend":
+            text = str(value or "json").strip().lower()
+            return text if text in {"json", "sqlite"} else "json"
+        if key == "storage_sqlite_path":
+            return str(value or "").strip()[:1000]
         if key == "passive_injection_position":
             normalizer = getattr(self.plugin, "_normalize_passive_injection_position", None)
             if callable(normalizer):
@@ -10554,6 +10783,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         source_counts: dict[str, int] = {}
         user_counts: dict[str, dict[str, Any]] = {}
         total_attempts = 0
+        pending_total = 0
 
         def candidate_user_meta(user_id: str, user: Any) -> dict[str, str]:
             if not isinstance(user, dict):
@@ -10596,6 +10826,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ):
                 continue
             total_attempts += repeat_count
+            if status != "sent":
+                pending_total += repeat_count
             user_meta = candidate_user_meta(user_id, user)
             user_bucket = user_counts.setdefault(
                 user_id or "unknown",
@@ -10605,10 +10837,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "role": user_meta["role"],
                     "role_label": user_meta["role_label"],
                     "total": 0,
+                    "pending_total": 0,
                     "counts": {},
                 },
             )
             user_bucket["total"] = self._int(user_bucket.get("total")) + repeat_count
+            if status != "sent":
+                user_bucket["pending_total"] = self._int(user_bucket.get("pending_total")) + repeat_count
             bucket_counts = user_bucket.get("counts")
             if not isinstance(bucket_counts, dict):
                 bucket_counts = {}
@@ -10736,6 +10971,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         items.sort(key=lambda item: item.get("last_seen_ts") or item.get("scheduled_ts") or 0, reverse=True)
         return {
             "total": total_attempts,
+            "pending_total": pending_total,
             "visible_total": len(items),
             "counts": counts,
             "source_counts": source_counts,

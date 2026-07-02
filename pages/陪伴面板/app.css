@@ -11932,6 +11932,30 @@ tbody tr.is-selected {
   grid-column: 1 / -1;
 }
 
+.storage-config-form {
+  display: grid;
+  gap: 12px;
+}
+
+.storage-config-summary {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(185, 200, 226, 0.68);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.storage-config-summary b {
+  color: var(--accent-strong);
+}
+
+.storage-config-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .migration-card {
   position: relative;
   overflow: hidden;

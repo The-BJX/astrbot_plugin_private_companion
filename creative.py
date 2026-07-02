@@ -525,11 +525,30 @@ class CreativeMixin:
         source_text = _single_line(source.get("text"), 220)
         source_label = _single_line(source.get("label"), 24) or "小灵感"
         persona_context = self._creative_persona_style_context()
+        memory_context = ""
+        composer = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(composer):
+            try:
+                memory_context = await composer(
+                    kind="creative_project",
+                    query=(
+                        f"私下创作立项：灵感={source_label} {source_text}；"
+                        "用户创作偏好、长期项目、最近修订、避雷、喜欢的题材、上次写到哪里"
+                    ),
+                    top_k=5,
+                    max_chars=900,
+                )
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 创作立项 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你是一个拟人化 Bot 的私人创作状态生成器。她因为一个生活小事、日记碎片或梦境灵感,突然想开一个自己的创作项目。
 
 【人格与身份】
 {persona_context}
+
+【RememberYou 创作连续性参考】
+{memory_context or '暂无外部长期创作记忆。'}
+使用方式：优先尊重用户长期偏好、已有项目、人工修订和避雷；不要说自己“查了记忆”。
 
 要求：
 1. 只设计“正在做的创作计划”,不要写正文。
@@ -630,6 +649,22 @@ class CreativeMixin:
         manual_outline_ctx = self._creative_manual_outline_context(project)
         character_ctx = self._creative_character_context(project)
         revision_ctx = self._creative_manual_revision_context(project)
+        companion_memory_ctx = ""
+        composer = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(composer):
+            try:
+                companion_memory_ctx = await composer(
+                    kind="creative_outline",
+                    query=(
+                        f"私下创作大纲：{_single_line(project.get('title'), 40)}；"
+                        f"{_single_line(project.get('premise'), 160)}；"
+                        "用户修订、角色设定、上次写到哪里、创作偏好、避雷、连续性"
+                    ),
+                    top_k=5,
+                    max_chars=850,
+                )
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 创作大纲 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你在为一个私人创作项目安排本次要写的一小段,先给出简短大纲。
 
@@ -650,6 +685,8 @@ class CreativeMixin:
 {recent_outlines or '暂无'}
 相关记忆：
 {memory_ctx or '暂无相关记忆。'}
+RememberYou 项目参考：
+{companion_memory_ctx or '暂无外部项目参考。'}
 
 要求：
 1. 输出 3 到 5 条短项目符号,每条不超过 22 字。
@@ -686,6 +723,21 @@ class CreativeMixin:
         manual_outline_ctx = self._creative_manual_outline_context(project)
         character_ctx = self._creative_character_context(project)
         revision_ctx = self._creative_manual_revision_context(project)
+        companion_memory_ctx = ""
+        composer = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(composer):
+            try:
+                companion_memory_ctx = await composer(
+                    kind="creative_review",
+                    query=(
+                        f"私下创作审稿：{_single_line(project.get('title'), 40)}；"
+                        "人格边界、用户修订、重复问题、长期项目连续性、角色关系、避雷"
+                    ),
+                    top_k=5,
+                    max_chars=850,
+                )
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 创作审稿 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你是一个严格但懂文风的审稿人。检查这段私人创作片段是否满足：贴合人格、推进作品、避免重复。
 
@@ -704,6 +756,8 @@ class CreativeMixin:
 {outline or '暂无大纲'}
 最近片段摘要：
 {recent_digest}
+RememberYou 项目参考：
+{companion_memory_ctx or '暂无外部项目参考。'}
 
 待审片段：
 {chunk_text}
@@ -744,6 +798,21 @@ class CreativeMixin:
         manual_outline_ctx = self._creative_manual_outline_context(project)
         character_ctx = self._creative_character_context(project)
         revision_ctx = self._creative_manual_revision_context(project)
+        companion_memory_ctx = ""
+        composer = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(composer):
+            try:
+                companion_memory_ctx = await composer(
+                    kind="creative_extract",
+                    query=(
+                        f"私下创作抽取：{_single_line(project.get('title'), 40)}；"
+                        "需要长期记住的角色、线索、用户修订、下一步、避雷"
+                    ),
+                    top_k=4,
+                    max_chars=700,
+                )
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 创作抽取 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 整理一个长期创作项目刚写出的新片段,提取对后续续写最有用的结构化信息。
 
@@ -756,6 +825,8 @@ class CreativeMixin:
 {character_ctx or '暂无角色表。'}
 人工修订约束：
 {revision_ctx or '暂无人工修订。'}
+RememberYou 项目参考：
+{companion_memory_ctx or '暂无外部项目参考。'}
 新片段：{_single_line(new_chunk_text, 420)}
 
 输出 JSON：
@@ -1022,6 +1093,22 @@ class CreativeMixin:
         character_ctx = self._creative_character_context(project)
         revision_ctx = self._creative_manual_revision_context(project)
         outline = await self._generate_outline_for_chunk(project, story_bible, memories, budget)
+        companion_memory_ctx = ""
+        composer = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(composer):
+            try:
+                companion_memory_ctx = await composer(
+                    kind="creative_writing",
+                    query=(
+                        f"私下创作续写：{_single_line(project.get('title'), 40)}；"
+                        f"{_single_line(project.get('premise'), 160)}；"
+                        "上次写到哪里、用户修订、角色设定、项目连续性、喜欢的文风、避雷"
+                    ),
+                    top_k=6,
+                    max_chars=1000,
+                )
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 创作续写 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
 
         async def _do_generate(extra_notice: str = "") -> str:
             prompt = f"""
@@ -1045,6 +1132,8 @@ class CreativeMixin:
 {revision_ctx or '暂无人工修订。'}
 相关记忆：
 {memory_ctx or '暂无。'}
+RememberYou 项目参考：
+{companion_memory_ctx or '暂无外部项目参考。'}
 最近片段摘要：
 {recent_digest}
 上一段：{recent or "还没有正文。"}
@@ -1158,6 +1247,7 @@ class CreativeMixin:
         projects = self._creative_projects()
         now = _now_ts()
         changed = False
+        creative_record_payload: tuple[dict[str, Any], str, dict[str, Any] | None] | None = None
         for project in projects:
             if project.get("status") != "drafting":
                 continue
@@ -1200,6 +1290,7 @@ class CreativeMixin:
             project["next_advance_at"] = now + random.randint(95, 320) * 60
             if project["current_chars"] >= _safe_int(project.get("target_chars"), 2400, 300, 5200):
                 project["status"] = "finished"
+            creative_record_payload = (dict(project), chunk, extract if isinstance(extract, dict) else None)
             changed = True
             break
         self.data["creative_projects"] = projects
@@ -1208,6 +1299,11 @@ class CreativeMixin:
                 changed = True
             if changed:
                 self._save_data_sync()
+        if creative_record_payload is not None:
+            recorder = getattr(self, "_memory_companion_record_creative_progress", None)
+            if callable(recorder):
+                project_snapshot, chunk_snapshot, extract_snapshot = creative_record_payload
+                await recorder(project=project_snapshot, chunk=chunk_snapshot, extract=extract_snapshot)
 
     def _latest_creative_share_candidate(self) -> dict[str, Any] | None:
         projects = self._creative_projects()

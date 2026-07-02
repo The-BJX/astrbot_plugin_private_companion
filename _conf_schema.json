@@ -30,6 +30,25 @@
         "_special": "select_provider",
         "hint": "插件所有未单独指定模型的 LLM 任务都会回退到这里；留空则使用 AstrBot 默认会话模型。"
       },
+      "storage_backend": {
+        "description": "主数据保存方式",
+        "type": "string",
+        "default": "json",
+        "options": [
+          "json",
+          "sqlite"
+        ],
+        "hint": "json 为兼容旧模式，直接保存 companions.json；sqlite 为本地数据库模式，按 section 存储插件主数据。默认推荐先保持 json，确认稳定后再切换。"
+      },
+      "storage_sqlite_path": {
+        "description": "SQLite 数据文件路径",
+        "type": "string",
+        "default": "",
+        "hint": "仅在保存方式为 sqlite 时使用。留空时自动使用插件数据目录下的 companions.db。建议填写本机绝对路径或保持留空。",
+        "condition": {
+          "storage_backend": "sqlite"
+        }
+      },
       "daily_token_limit": {
         "description": "每日插件 Token 限额",
         "type": "int",
@@ -4580,7 +4599,7 @@
       "enable_response_self_review": {
         "description": "启用回复/主动复核",
         "type": "bool",
-        "hint": "开启后，被动回复保留自检保护；主动消息会在发送前读取最近私聊记录，判断原样发送、轻改写、延后或取消。",
+        "hint": "开启后，被动回复保留自检保护；主动消息会在发送前读取最近私聊记录，判断原样发送、轻改写、延后或取消。不会再按旧主动消息改写被动回复。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true

@@ -1159,7 +1159,7 @@ class ProactiveMessageMixin:
             "过程中的执行状态只供系统判断，不需要写进正文。"
         )
 
-    def _build_framework_proactive_prompt(
+    async def _build_framework_proactive_prompt(
         self,
         *,
         user: dict[str, Any],
@@ -1239,6 +1239,37 @@ class ProactiveMessageMixin:
         delivery_hint = self._proactive_natural_delivery_hint()
         if delivery_hint and "自然交付提醒" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{delivery_hint}"
+        memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(memory_getter):
+            user_id = _single_line(user.get("user_id") or user.get("id"), 80)
+            query = " ".join(
+                part
+                for part in (
+                    "主动消息正文生成",
+                    reason,
+                    action,
+                    topic_hint,
+                    compact_motive,
+                    "用户习惯 最近互动 当前穿搭 当前日程 自我时间线 避雷",
+                )
+                if _single_line(part, 180)
+            )
+            memory_context = await memory_getter(
+                kind="proactive_generation",
+                query=query,
+                user=user,
+                user_id=user_id,
+                top_k=5,
+                max_chars=760,
+            )
+            if memory_context:
+                prompt = (
+                    f"{prompt.rstrip()}\n\n"
+                    "<!-- private_companion_memory_generation_context_v1 -->\n"
+                    "【RememberYou 可用记忆】\n"
+                    f"{memory_context}\n"
+                    "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
+                )
         return prompt.strip()
 
     def _format_proactive_generation_intent_hint(
@@ -1312,8 +1343,11 @@ class ProactiveMessageMixin:
             lines.append("这是有来源的续接/提醒：可以顺着来源，但不要写成用户刚刚又发了新消息。")
         elif kind in {"self_share", "external_share", "observation"}:
             lines.append("这是分享/观察型主动：只取一个最小切口，不写成报告、推荐文或观察总结。")
-            if kind == "external_share" or anchor_type == "external_info":
+            true_external_info = reason in {"bili_video_share", "news_share", "web_exploration_share"} or anchor_type == "external_info"
+            if true_external_info:
                 lines.append("外界分享必须贴住这次看到的标题、视频、新闻或资料本身；如果只是低压地放一句，也要围绕来源表达感受，不要改成无关的个人状态或泛泛压力询问。")
+            elif anchor_type == "group_context":
+                lines.append("群聊见闻只是一段共同群里的小片段：可以轻轻转述一个具体笑点或画面，不要把内部话题名写成“标题/新闻/资料”。")
         elif kind in {"care", "check_in", "light_touch"}:
             lines.append("这是靠近型主动：不要直接说想念、关心或刷存在感，要侧着落到一个小动作或小片段。")
 
@@ -1924,7 +1958,7 @@ class ProactiveMessageMixin:
         umo = str(user.get("umo") or "").strip()
         if not umo:
             return ""
-        prompt = self._build_framework_proactive_prompt(
+        prompt = await self._build_framework_proactive_prompt(
             user=user,
             name=name,
             reason=reason,
@@ -2019,6 +2053,106 @@ class ProactiveMessageMixin:
                 lines.append(f"用户: {last_user}")
         return "\n".join(lines[-max(1, limit):])
 
+    def _clean_persona_reference_rewrite_text(self, text: Any, *, limit: int = 160) -> str:
+        cleaned = self._sanitize_proactive_text(str(text or ""))
+        if not cleaned:
+            return ""
+        cleaned = _strip_internal_message_blocks(cleaned)
+        cleaned = self._strip_parenthetical_stage_directions(cleaned)
+        cleaned = re.sub(r"^(?:最终(?:聊天)?正文|正文|输出|回复)[:：]\s*", "", cleaned).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip().strip('"').strip("'")
+        if not cleaned:
+            return ""
+        forbidden = (
+            "参考意图", "参考文案", "兜底", "模板", "系统", "提示词", "工具调用",
+            "执行状态", "已发送给用户", "消息已发送", "发送成功", "无文字",
+        )
+        if any(token in cleaned for token in forbidden):
+            return ""
+        if self._framework_agent_meta_summary_leak(cleaned):
+            return ""
+        return _single_line(cleaned, limit)
+
+    async def _rewrite_reference_reply_with_persona(
+        self,
+        reference_text: str,
+        *,
+        scene: str = "",
+        user: dict[str, Any] | None = None,
+        event: AstrMessageEvent | None = None,
+        history: str = "",
+        fallback_text: str = "",
+        task: str = "persona_reference_rewrite",
+        max_chars: int = 120,
+        allow_fallback: bool = False,
+        preserve_status: bool = False,
+    ) -> str:
+        reference = _single_line(reference_text, 420)
+        if not reference:
+            return _single_line(fallback_text, max_chars) if allow_fallback else ""
+        umo = ""
+        if event is not None:
+            umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not umo and isinstance(user, dict):
+            umo = str(user.get("umo") or "").strip()
+        refresher = getattr(self, "_refresh_default_persona_prompt", None)
+        if callable(refresher):
+            try:
+                await refresher(umo)
+            except Exception:
+                pass
+        persona = self._get_default_persona_prompt()
+        reply_style = self._format_reply_style_prompt()
+        if not history and isinstance(user, dict):
+            try:
+                history = await self._recent_private_conversation_for_proactive_review(user, limit=6)
+            except Exception:
+                history = ""
+        prompt = f"""
+你要把一条“参考意图”改写成当前人格会自然说出的聊天正文。参考意图只说明要表达什么，不是要照抄的句子。
+
+【当前人格】
+{persona or "保持自然、简洁、有边界。"}
+
+【回复风格】
+{reply_style or "像日常聊天一样短一点，不要报告式。"}
+
+【最近对话】
+{history or "（无可用历史）"}
+
+【场景】
+{_single_line(scene, 180) or "普通聊天回执"}
+
+【参考意图】
+{reference}
+
+要求：
+- 只输出最终聊天正文，不要解释。
+- 1 句，最多 2 句；尽量像这个人格平时聊天，不要像客服、公告或模板。
+- 不要照抄参考意图里的固定说法；只保留事实和语义。
+- 不要出现“参考/兜底/模板/系统/工具/执行/已发送给用户/消息已发送”等字样。
+- 不要新增事实、承诺、动作小剧场或没有发生的状态。
+{"- 必须保留成功/失败/等待/完成/稍后再说等状态语义，不要把失败说成成功。" if preserve_status else "- 如果只是轻轻递一句，不要补多余解释。"}
+""".strip()
+        try:
+            raw = await self._llm_call(
+                prompt,
+                max_tokens=140,
+                provider_id=self._task_provider(
+                    getattr(self, "response_review_provider_id", ""),
+                    getattr(self, "mai_style_provider_id", ""),
+                    getattr(self, "llm_provider_id", ""),
+                ),
+                task=task,
+            )
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 人格参考意图改写失败: %s", _single_line(exc, 120))
+            raw = ""
+        cleaned = self._clean_persona_reference_rewrite_text(raw, limit=max_chars)
+        if cleaned:
+            return cleaned
+        return _single_line(fallback_text, max_chars) if allow_fallback else ""
+
     def _local_proactive_send_decision(
         self,
         user: dict[str, Any],
@@ -2046,10 +2180,14 @@ class ProactiveMessageMixin:
             except Exception:
                 semantics = {}
         semantic_kind = _single_line(semantics.get("kind"), 40)
+        semantic_anchor_type = _single_line(semantics.get("anchor_type"), 40)
         semantic_score = _safe_float(semantics.get("score"), 0.5)
         semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
         semantic_risk = _safe_float(semantics.get("risk"), 0.0)
-        external_share_active = semantic_kind == "external_share" or reason in {"bili_video_share", "news_share", "web_exploration_share"}
+        external_info_reasons = {"bili_video_share", "news_share", "web_exploration_share"}
+        external_share_active = reason in external_info_reasons or (
+            semantic_kind == "external_share" and semantic_anchor_type == "external_info"
+        )
         default_hard_risk = 0.70 if strength == "lenient" else 0.45
         hard_risk_threshold = max(
             0.0,
@@ -2149,12 +2287,13 @@ class ProactiveMessageMixin:
             return None
         if self._external_share_text_mentions_source(cleaned, source_text):
             return None
-        rewrite = self._external_share_fallback_text(source_text)
-        if rewrite:
+        reference = self._external_share_fallback_reference(source_text)
+        if reference:
             return {
                 "decision": "rewrite",
                 "reason": "外界分享正文偏离来源",
-                "text": rewrite,
+                "text": "",
+                "reference_text": reference,
                 "hard": True,
             }
         return {
@@ -2258,7 +2397,7 @@ class ProactiveMessageMixin:
             if token not in generic and not any(token in phrase for phrase in generic_phrases)
         ][:24]
 
-    def _external_share_fallback_text(self, source_text: str) -> str:
+    def _external_share_fallback_reference(self, source_text: str) -> str:
         source = _single_line(source_text, 760)
         if not source:
             return ""
@@ -2282,7 +2421,7 @@ class ProactiveMessageMixin:
         title = title.strip(" ，。！？；：、,.!?;:|｜")
         if not title:
             return ""
-        return _single_line(f"刚看到“{title}”这个标题，有点沉，就放这儿了。", 120)
+        return _single_line(f"外部分享偏离来源时的参考意图：低压提到刚看到的内容“{title}”，像日常分享一样递给对方。", 180)
 
     def _strip_proactive_motive_leak_text(self, text: str) -> str:
         cleaned = str(text or "").strip()
@@ -2373,6 +2512,36 @@ class ProactiveMessageMixin:
         )
         if local.get("decision") in {"drop", "defer"} and (strength != "lenient" or bool(local.get("hard"))):
             return local
+        if local.get("decision") == "rewrite" and str(local.get("reference_text") or "").strip():
+            rewritten_reference = await self._rewrite_reference_reply_with_persona(
+                str(local.get("reference_text") or ""),
+                scene=_single_line(f"主动消息兜底改写；reason={reason or 'check_in'}；action={action or 'message'}", 180),
+                user=user,
+                fallback_text="",
+                task="proactive_reference_rewrite",
+                max_chars=140,
+                allow_fallback=False,
+            )
+            if rewritten_reference:
+                rewritten_reference = self._sanitize_action_boundaries(
+                    self._sanitize_proactive_text(rewritten_reference),
+                    reason=reason,
+                    action=action,
+                    action_context=review_context,
+                    has_real_image=bool(image_path) or "真实图片文件：" in review_context or "图片路径：" in review_context,
+                )
+                rewritten_reference = self._normalize_proactive_sentence_flow(rewritten_reference)
+            if rewritten_reference:
+                local = dict(local)
+                local["text"] = rewritten_reference
+                local.pop("reference_text", None)
+            else:
+                return {
+                    "decision": "defer",
+                    "reason": _single_line(local.get("reason"), 80) or "兜底参考意图未能按人格改写",
+                    "delay_minutes": 60,
+                    "hard": True,
+                }
         if local.get("decision") == "rewrite" and bool(local.get("hard")):
             return local
         if not bool(getattr(self, "enable_response_self_review", True)):
@@ -3140,14 +3309,20 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             cleaned = cleaned.replace("要听吗", "你有空再听嘛")
         if action == "photo_text":
             if has_real_image:
+                if reason not in {"bili_video_share", "news_share", "web_exploration_share"}:
+                    cleaned = self._repair_non_external_title_share_text(
+                        cleaned,
+                        reason=reason,
+                        action_context=action_context,
+                    )
                 replacements = {
-                    "我画了一张图": "刚看到一个画面",
-                    "我刚画了张图": "刚看到一个画面",
-                    "我生成了一张图": "刚看到一个画面",
-                    "我做了张图": "刚看到一个画面",
-                    "我生了一张图": "刚看到一个画面",
-                    "我渲染了一张图": "刚看到一个画面",
-                    "画面是": "刚好是",
+                    "我画了一张图": "这个画面",
+                    "我刚画了张图": "这个画面",
+                    "我生成了一张图": "这个画面",
+                    "我做了张图": "这个画面",
+                    "我生了一张图": "这个画面",
+                    "我渲染了一张图": "这个画面",
+                    "画面是": "画面里是",
                 }
                 for old, new in replacements.items():
                     cleaned = cleaned.replace(old, new)
@@ -3167,7 +3342,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 for old, new in queue_replacements.items():
                     cleaned = cleaned.replace(old, new)
                 for old in ("要看看吗", "要看吗", "想看吗"):
-                    cleaned = cleaned.replace(old, "我先发你看")
+                    cleaned = cleaned.replace(old, "")
                 cleaned = self._deemphasize_state_report_preamble(cleaned, reason=reason)
                 return self._soften_social_proactive_text(cleaned, action=action)
             replacements = {
@@ -3183,6 +3358,36 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 cleaned = cleaned.replace(old, new)
         cleaned = self._deemphasize_state_report_preamble(cleaned, reason=reason)
         return self._soften_social_proactive_text(cleaned, action=action)
+
+    def _repair_non_external_title_share_text(
+        self,
+        text: str,
+        *,
+        reason: str = "",
+        action_context: str = "",
+    ) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        if reason in {"bili_video_share", "news_share", "web_exploration_share"}:
+            return cleaned
+        title_leak_pattern = r"刚看到[，,、\s]*[“\"『「].{2,60}[”\"』」](?:这个)?标题"
+        if not re.search(title_leak_pattern, cleaned):
+            return cleaned
+        context = _single_line(action_context, 520)
+        if reason == "group_share" or "群" in context:
+            repaired = re.sub(rf"{title_leak_pattern}[，,。！？!?\s]*", "", cleaned, count=1).strip()
+            return repaired if len(repaired) >= 2 else ""
+        if "图片路径：" in context or "真实图片文件：" in context or "photo_text" in context:
+            repaired = re.sub(rf"{title_leak_pattern}[，,。！？!?\s]*", "", cleaned, count=1).strip()
+            return repaired if len(repaired) >= 2 else ""
+        repaired = re.sub(
+            r"刚看到[，,、\s]*[“\"『「]([^”\"』」]{2,60})[”\"』」](?:这个)?标题[，,。！？!?\s]*",
+            "",
+            cleaned,
+            count=1,
+        )
+        return repaired.strip()
 
     def _remove_unbacked_media_claims(self, text: str) -> str:
         cleaned = str(text or "").strip()
@@ -3266,7 +3471,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if reason == "noon_greeting":
             return "中午了诶。你吃东西没有,别又随便糊弄过去。"
         if reason in {"activity_share", "diary_share", "background_schedule"}:
-            return "我刚刚想到一件小事,就想跟你说一下。"
+            return "有件小事想跟你说一下。"
         return "刚好到能休息一小会儿的时候,想问你一句。"
 
     async def _execute_proactive_action(
@@ -4480,7 +4685,25 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return await self._record_daily_outfit_photo_result(today, "", "主动拍照/生图未开启")
         if not self._photo_text_available():
             return await self._record_daily_outfit_photo_result(today, "", "当前没有可用的生图后端")
-        prompt_text = self._build_daily_outfit_photo_prompt(diary if isinstance(diary, dict) else {})
+        memory_context = ""
+        composer = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(composer):
+            try:
+                memory_context = await composer(
+                    kind="daily_outfit_photo",
+                    query=(
+                        "今日穿搭生成：历史穿搭、今天日程、天气、地点、用户常问衣服颜色、"
+                        "最近自拍、服装连续性、需要避免的造型重复"
+                    ),
+                    top_k=5,
+                    max_chars=900,
+                )
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 每日穿搭 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+        prompt_text = self._build_daily_outfit_photo_prompt(
+            diary if isinstance(diary, dict) else {},
+            memory_context=memory_context,
+        )
         backend_name, image_path, note = await self._generate_photo_image(
             workflow_kind="selfie",
             prompt_text=prompt_text,
@@ -4529,6 +4752,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             self.data["daily_outfit_photo"] = item
             self._save_data_sync()
         if image_path:
+            await self._memory_companion_record_daily_outfit(item)
             logger.info(
                 "[PrivateCompanion] 每日穿搭照片已生成: backend=%s path=%s",
                 _single_line(backend, 80) or "-",
@@ -4560,7 +4784,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             lines.append(line)
         return _single_line("；".join(lines), 620)
 
-    def _build_daily_outfit_photo_prompt(self, diary: dict[str, Any]) -> str:
+    def _build_daily_outfit_photo_prompt(self, diary: dict[str, Any], *, memory_context: str = "") -> str:
         persona = self._daily_outfit_role_appearance_text()
         style_name, style_instruction = self._get_photo_style_instruction()
         state = self.data.get("daily_state", {}) if isinstance(getattr(self, "data", {}), dict) else {}
@@ -4581,6 +4805,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             f"今日日程穿搭依据：{schedule_hint or '没有明确日程时,按普通居家日常处理。'}",
             "穿搭决策：优先服从日程里明确出现的衣服、外套、校服、睡衣、发夹、饰品、出门、上课、运动、雨天或居家线索；如果一天有多段活动,选最能代表白天主要生活/外出安排的一套,不要只按深夜睡前状态生成睡衣。",
             f"补充生活余味：{diary_hint or '暂无额外余味,主要服从今日日程、天气和状态来决定当天搭配。'}",
+            (
+                "RememberYou 穿搭连续性参考："
+                f"{_single_line(memory_context, 700)}。使用方式：优先保持今日穿搭、近期自拍、用户常问衣服颜色和当前地点的一致性；不要在最终图片中出现文字说明。"
+                if memory_context
+                else ""
+            ),
             "画面要求：角色本人必须露脸,头部、脸、发型和表情完整入镜；可以是半身、七分身或全身,但绝不能裁掉头、遮住脸或只拍衣服。衣服搭配要清楚,姿态自然,像今天顺手拍下来的 selfie outfit photo。",
             "尺寸与安全区：按 1:1 方形头像/封面构图生成,角色的脸、头发、肩颈和主要穿搭都要落在画面中央安全区内,四周留出足够边距,缩进方形卡片时也不能裁脸或裁身体主体。",
             "构图要求：主体居中或略偏中,脸部位于画面上半部但要和画面上边缘保持明显留白,肩颈和上半身自然可见；不要极近自拍、手臂占据前景、无头构图、背影、低头挡脸、书本/手机/头发遮脸、只拍身体局部、只拍裙子或外套。",
@@ -7797,14 +8027,14 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         cleaned = re.sub(r"^(?:早上好|早安|上午好|中午好|午安|下午好|晚上好)[,,\s]*", "", cleaned)
 
         _SOCIAL_REPLACEMENTS = [
-            ("刷一下存在感", "来打个招呼"),
-            ("冒个泡", "来打个招呼"),
-            ("冒个头", "来打个招呼"),
-            ("顺手冒了个头", "来打个招呼"),
-            ("突然想起你", "想到一件小事"),
-            ("刚好想到你", "想到一件小事"),
-            ("我刚刚想到你了。", "想到一件小事。"),
-            ("我刚刚想到你了", "想到一件小事"),
+            ("刷一下存在感", ""),
+            ("冒个泡", ""),
+            ("冒个头", ""),
+            ("顺手冒了个头", ""),
+            ("突然想起你", ""),
+            ("刚好想到你", ""),
+            ("我刚刚想到你了。", ""),
+            ("我刚刚想到你了", ""),
             ("没什么大不了的,就是", ""),
             ("没什么大道理,就是", ""),
             ("免得你又忘了我", "怕你忙过头"),
@@ -7845,11 +8075,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 ("刚给你留了句语音,", "刚给你留了句语音,"),
             ],
             "photo_text": [
-                ("路边的植物看着很有生机,给你拍了张照片。", "路边那点绿刚好有点顺眼,就顺手发你了。"),
-                ("给你拍了张照片。", "顺手拍给你了。"),
-                ("给你拍了张照片", "顺手拍给你了"),
-                ("给你拍了照片", "顺手拍给你了"),
-                ("发给你啦。", "就丢给你啦。"),
+                ("路边的植物看着很有生机,给你拍了张照片。", "路边那点绿刚好有点顺眼。"),
+                ("给你拍了张照片。", ""),
+                ("给你拍了张照片", ""),
+                ("给你拍了照片", ""),
+                ("发给你啦。", ""),
             ],
         }
         if action in _ACTION_SPECIFIC_REPLACEMENTS:

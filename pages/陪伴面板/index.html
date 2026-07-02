@@ -1287,6 +1287,29 @@ QQ空间 = 公开札记
               </div>
             </div>
           </article>
+          <article class="config-card">
+            <h2>存储方式</h2>
+            <form id="storageConfigForm" class="storage-config-form">
+              <div class="form-grid">
+                <label>
+                  主数据保存方式
+                  <select id="storageBackendSelect" name="storage_backend">
+                    <option value="json">json</option>
+                    <option value="sqlite">sqlite</option>
+                  </select>
+                </label>
+                <label id="storageSqlitePathWrap">
+                  SQLite 数据文件路径
+                  <input id="storageSqlitePathInput" name="storage_sqlite_path" type="text" placeholder="留空时自动使用插件数据目录下 companions.db" />
+                </label>
+              </div>
+              <div id="storageConfigSummary" class="storage-config-summary"></div>
+              <p class="storage-config-note">这里控制陪伴插件主数据的保存后端。配置备份导入/导出不会携带这一项，避免换机器时误改本机存储路径。</p>
+              <div class="actions">
+                <button id="saveStorageConfigBtn" type="submit">保存存储方式</button>
+              </div>
+            </form>
+          </article>
           <article class="config-card wide">
             <h2>群聊名单覆盖</h2>
             <div id="listCoverage" class="coverage-grid"></div>
@@ -1369,7 +1392,7 @@ QQ空间 = 公开札记
           </div>
           <div class="provider-toolbar-actions">
             <button id="testAllProvidersBtn" type="button">测试全部模型</button>
-            <button id="saveProvidersBtn" type="button">保存模型配置</button>
+            <button id="saveProvidersBtn" type="button">保存并覆盖两套模型配置</button>
           </div>
         </div>
         <form id="providerForm" class="provider-groups"></form>
