@@ -7910,13 +7910,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self._message_debounce_command_text(event, text):
             return
         existing_reply_preview = self._event_existing_reply_result_preview(event)
-        if existing_reply_preview:
-            logger.info(
-                "[PrivateCompanion] 已有其他链路回复,跳过群聊被动观察: text=%s result=%s",
-                _single_line(text, 80),
-                _single_line(existing_reply_preview, 120),
-            )
-            return
         if self._proactive_only_blocks_passive_event(event, "group_event_pipeline"):
             logger.debug("[PrivateCompanion] 主动消息专用模式已跳过群聊被动观察")
             return
@@ -7928,6 +7921,35 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception:
             sender_id = ""
         sender_name = self._sender_display_name(event)
+        if existing_reply_preview:
+            async with self._data_lock:
+                if self._is_duplicate_inbound_message(event, scope=f"group:{group_id}", sender_id=sender_id, text=text):
+                    self._save_data_sync()
+                    return
+                group = self._get_group(group_id)
+                group["umo"] = _single_line(getattr(event, "unified_msg_origin", ""), 160)
+                scene = self._infer_group_scene(event, group, sender_id=sender_id, sender_name=sender_name, text=text)
+                self._update_group_observation(
+                    group,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    text=text,
+                    group_id=group_id,
+                    scene=scene,
+                    message_id=self._event_message_id(event),
+                )
+                self._save_data_sync()
+                group_snapshot = deepcopy(group)
+            logger.info(
+                "[PrivateCompanion] 已有其他链路回复,仅记录群聊观察: group=%s sender=%s text=%s result=%s",
+                group_id,
+                sender_id,
+                _single_line(text, 80),
+                _single_line(existing_reply_preview, 120),
+            )
+            asyncio.create_task(self._maybe_refresh_group_episode(group_id, group_snapshot))
+            asyncio.create_task(self._maybe_refresh_group_slang_meanings(group_id, group_snapshot))
+            return
         try:
             signals = self._event_scene_signals(event)
         except Exception:
