@@ -23,6 +23,8 @@ from .qzone_media import QzoneIntegrationError, QzoneMediaMixin
 class QzoneMixin(QzoneMediaMixin):
     """QQ Zone integration helpers."""
 
+    _QZONE_COOKIE_DOMAIN = "user.qzone.qq.com"
+
     def _qzone_plugin_dir(self) -> Path:
         candidates = [
             Path(__file__).resolve().parent.parent / "astrbot_plugin_qzone",
@@ -95,6 +97,21 @@ class QzoneMixin(QzoneMediaMixin):
         bot = getattr(self, "_qzone_last_bot", None)
         if self._qzone_runtime_bot_usable(bot):
             return bot
+        context = getattr(self, "context", None)
+        if context is not None:
+            try:
+                platform = context.get_platform("aiocqhttp")
+            except Exception:
+                platform = None
+            if platform is not None:
+                direct_bot = getattr(platform, "bot", None)
+                if self._qzone_runtime_bot_usable(direct_bot):
+                    self._qzone_last_bot = direct_bot
+                    return direct_bot
+                for candidate in self._qzone_runtime_bot_candidates(platform):
+                    if self._qzone_runtime_bot_usable(candidate):
+                        self._qzone_last_bot = candidate
+                        return candidate
         for candidate in self._qzone_runtime_bot_candidates(bot):
             if self._qzone_runtime_bot_usable(candidate):
                 self._qzone_last_bot = candidate
@@ -119,6 +136,35 @@ class QzoneMixin(QzoneMediaMixin):
                         self._qzone_last_bot = candidate
                         return candidate
         return None
+
+    async def _qzone_try_direct_cookie_fetch(self, bot: Any, domain: str) -> dict[str, str]:
+        direct = getattr(bot, "get_cookies", None)
+        result = None
+        if callable(direct):
+            try:
+                maybe = direct(domain=domain)
+                result = await maybe if hasattr(maybe, "__await__") else maybe
+            except TypeError:
+                try:
+                    maybe = direct()
+                    result = await maybe if hasattr(maybe, "__await__") else maybe
+                except Exception:
+                    result = None
+            except Exception:
+                result = None
+        if result is None:
+            api = getattr(bot, "api", None)
+            call_action = getattr(api, "call_action", None)
+            if not callable(call_action):
+                call_action = getattr(bot, "call_action", None)
+            if callable(call_action):
+                try:
+                    maybe = call_action("get_cookies", domain=domain)
+                    result = await maybe if hasattr(maybe, "__await__") else maybe
+                except Exception:
+                    result = None
+        cookie_text = self._qzone_extract_cookie_text(result)
+        return self._qzone_parse_cookie_text(cookie_text) if cookie_text else {}
 
     @staticmethod
     def _qzone_gtk(p_skey: str) -> str:
@@ -337,9 +383,15 @@ class QzoneMixin(QzoneMediaMixin):
             self._qzone_last_bot = bot
         if bot is None:
             raise RuntimeError("没有可用的 OneBot 连接，无法获取 QQ 空间 Cookie")
+        direct_cookies = await self._qzone_try_direct_cookie_fetch(bot, self._QZONE_COOKIE_DOMAIN)
+        if self._qzone_normalize_uin(direct_cookies) and (direct_cookies.get("p_skey") or direct_cookies.get("pskey") or direct_cookies.get("skey")):
+            cookie_text = self._qzone_cookie_header(direct_cookies)
+            ctx = self._qzone_context_from_cookies(cookie_text)
+            logger.debug("[PrivateCompanion] QQ 空间直接获取 Cookie 成功: uin=%s domain=%s", ctx.get("uin"), self._QZONE_COOKIE_DOMAIN)
+            return ctx["cookie_header"]
         merged: dict[str, str] = {}
         domains = [
-            "user.qzone.qq.com",
+            self._QZONE_COOKIE_DOMAIN,
             "qzone.qq.com",
             "h5.qzone.qq.com",
             "mobile.qzone.qq.com",
@@ -402,7 +454,12 @@ class QzoneMixin(QzoneMediaMixin):
                 pass
             if self._qzone_normalize_uin(merged):
                 return cookie_text
-        raise RuntimeError("获取 QQ 空间 Cookie 失败")
+        raise RuntimeError(
+            "获取 QQ 空间 Cookie 失败"
+            f"（uin={'有' if self._qzone_normalize_uin(merged) else '无'}"
+            f"，skey={'有' if bool(merged.get('skey')) else '无'}"
+            f"，p_skey={'有' if bool(merged.get('p_skey') or merged.get('pskey')) else '无'}）"
+        )
 
     @staticmethod
     def _qzone_parse_response(text: str) -> dict[str, Any]:
@@ -416,8 +473,18 @@ class QzoneMixin(QzoneMediaMixin):
         payload = raw[start : end + 1].replace("undefined", "null")
         try:
             parsed = json.loads(payload)
-        except Exception as exc:
-            return {"code": -1, "message": f"JSON 解析失败：{_single_line(exc, 80)}"}
+        except Exception:
+            try:
+                relaxed = re.sub(r",\s*([}\]])", r"\1", payload)
+                relaxed = re.sub(r"([{,]\s*)([A-Za-z_$][\w$]*)\s*:", r'\1"\2":', relaxed)
+                parsed = json.loads(relaxed)
+            except Exception:
+                try:
+                    import json5  # type: ignore
+
+                    parsed = json5.loads(payload)
+                except Exception as exc:
+                    return {"code": -1, "message": f"JSON 解析失败：{_single_line(exc, 80)}"}
         if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict):
             nested = dict(parsed.get("data") or {})
             nested.setdefault("_raw_code", parsed.get("code", parsed.get("ret")))
@@ -448,7 +515,7 @@ class QzoneMixin(QzoneMediaMixin):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
             "Cookie": ctx["cookie_header"],
             "Referer": f"https://user.qzone.qq.com/{ctx['uin']}",
-            "Origin": origin,
+            "Origin": "https://user.qzone.qq.com",
             "Host": parsed_url.netloc or "user.qzone.qq.com",
             "Connection": "keep-alive",
         }
@@ -665,10 +732,45 @@ class QzoneMixin(QzoneMediaMixin):
                     images=images,
                     comments=self._qzone_parse_comments_from_msg(msg),
                     create_time=msg.get("created_time") or 0,
+                    appid=str(msg.get("appid") or "311"),
+                    typeid=str(msg.get("typeid") or msg.get("type") or "0"),
+                    abstime=_safe_int(msg.get("created_time") or msg.get("abstime"), 0, 0),
+                    fid=str(msg.get("tid") or msg.get("fid") or ""),
+                    unikey=str(msg.get("unikey") or msg.get("likeKey") or msg.get("like_key") or ""),
+                    curkey=str(msg.get("curkey") or msg.get("curlikekey") or msg.get("likeKey") or msg.get("like_key") or ""),
+                    raw=msg,
                     status="approved",
                 )
             )
         return posts
+
+    @staticmethod
+    def _qzone_post_value(post: Any, key: str, default: Any = "") -> Any:
+        value = getattr(post, key, None)
+        if value not in (None, ""):
+            return value
+        raw = getattr(post, "raw", None)
+        if isinstance(raw, dict):
+            value = raw.get(key)
+            if value not in (None, ""):
+                return value
+        return default
+
+    def _qzone_post_like_url(self, post: Any, *, uin: str, tid: str) -> str:
+        raw = getattr(post, "raw", None)
+        for key in ("unikey", "curkey", "curlikekey", "likeKey", "like_key", "url"):
+            value = getattr(post, key, None)
+            if value not in (None, ""):
+                return str(value)
+            if isinstance(raw, dict) and raw.get(key) not in (None, ""):
+                return str(raw.get(key))
+        html_text = str(raw.get("html") or "") if isinstance(raw, dict) else ""
+        if html_text:
+            for attr in ("data-unikey", "data-curkey", "unikey", "curkey"):
+                match = re.search(rf"""{re.escape(attr)}\s*=\s*["']([^"']+)["']""", html_text, flags=re.IGNORECASE)
+                if match:
+                    return html.unescape(match.group(1)).strip()
+        return f"https://user.qzone.qq.com/{uin}/mood/{tid}"
 
     async def _qzone_query_feeds(
         self,
@@ -721,6 +823,15 @@ class QzoneMixin(QzoneMediaMixin):
         uin = str(getattr(post, "uin", "") or "")
         if not tid or not uin:
             raise RuntimeError("说说 tid 或 uin 为空，无法点赞")
+        like_url = self._qzone_post_like_url(post, uin=uin, tid=tid)
+        curkey = str(self._qzone_post_value(post, "curkey", "") or "") or like_url
+        unikey = str(self._qzone_post_value(post, "unikey", "") or "") or like_url
+        appid = str(self._qzone_post_value(post, "appid", "311") or "311")
+        typeid = str(self._qzone_post_value(post, "typeid", "0") or "0")
+        fid = str(self._qzone_post_value(post, "fid", tid) or tid)
+        abstime = _safe_int(self._qzone_post_value(post, "abstime", 0), 0, 0)
+        if abstime <= 0:
+            abstime = _safe_int(getattr(post, "create_time", 0), 0, 0) or int(time.time())
         payload = await self._qzone_request(
             event,
             "POST",
@@ -729,22 +840,46 @@ class QzoneMixin(QzoneMediaMixin):
             data={
                 "qzreferrer": f"https://user.qzone.qq.com/{ctx['uin']}",
                 "opuin": ctx["uin"],
-                "unikey": f"https://user.qzone.qq.com/{uin}/mood/{tid}",
-                "curkey": f"https://user.qzone.qq.com/{uin}/mood/{tid}",
-                "appid": 311,
+                "unikey": unikey,
+                "curkey": curkey,
+                "appid": appid,
                 "from": 1,
-                "typeid": 0,
-                "abstime": int(time.time()),
-                "fid": tid,
+                "typeid": typeid,
+                "abstime": abstime,
+                "fid": fid,
                 "active": 0,
                 "format": "json",
                 "fupdate": 1,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                "Referer": f"https://user.qzone.qq.com/{uin}/mood/{tid}",
+                "Origin": "https://user.qzone.qq.com",
             },
             cookie_header=cookie_header,
         )
         code = payload.get("code", 0)
         if code not in {0, "0"}:
+            logger.warning(
+                "[PrivateCompanion] QQ 空间点赞失败: code=%s message=%s uin=%s tid=%s appid=%s typeid=%s fid=%s http=%s",
+                code,
+                _single_line(payload.get("message") or payload.get("msg") or payload.get("_raw_message"), 100),
+                uin,
+                tid,
+                appid,
+                typeid,
+                fid,
+                payload.get("_http_status"),
+            )
             raise RuntimeError(_single_line(payload.get("message") or payload.get("msg") or f"点赞失败 code={code}", 160))
+        logger.info(
+            "[PrivateCompanion] QQ 空间点赞成功: uin=%s tid=%s appid=%s typeid=%s fid=%s",
+            uin,
+            tid,
+            appid,
+            typeid,
+            fid,
+        )
 
     async def _qzone_generate_comment(self, post: Any) -> str:
         prompt = f"""

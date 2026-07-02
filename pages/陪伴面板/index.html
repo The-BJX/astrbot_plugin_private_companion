@@ -79,6 +79,13 @@
       </div>
 
       <div class="folio-tools">
+        <label class="page-font-picker" for="pageFontSelect">
+          <span>字体</span>
+          <select id="pageFontSelect">
+            <option value="original">原始字体</option>
+            <option value="cheng">13.woff2</option>
+          </select>
+        </label>
         <button id="refreshBtn" class="seal" title="刷新" aria-label="刷新">
           <span class="seal-mark">↻</span>
           <small>REFRESH</small>
@@ -97,11 +104,12 @@
         <button class="tab" data-tab="memory"><i>06</i><span>观察</span></button>
         <button class="tab" data-tab="proactive"><i>07</i><span>主动</span></button>
         <button class="tab" data-tab="bookshelf"><i>08</i><span>书柜</span></button>
-        <button class="tab" data-tab="tokens"><i>09</i><span>Token</span></button>
-        <button class="tab" data-tab="troubleshooting"><i>10</i><span>排障</span></button>
-        <button class="tab" data-tab="modules"><i>11</i><span>模块</span></button>
-        <button class="tab" data-tab="config"><i>12</i><span>配置</span></button>
-        <button class="tab" data-tab="models"><i>13</i><span>模型</span></button>
+        <button class="tab" data-tab="qzone"><i>09</i><span>QQ空间</span></button>
+        <button class="tab" data-tab="tokens"><i>10</i><span>Token</span></button>
+        <button class="tab" data-tab="troubleshooting"><i>11</i><span>排障</span></button>
+        <button class="tab" data-tab="modules"><i>12</i><span>模块</span></button>
+        <button class="tab" data-tab="config"><i>13</i><span>配置</span></button>
+        <button class="tab" data-tab="models"><i>14</i><span>模型</span></button>
       </nav>
 
       <section class="panel is-active" id="panel-dashboard">
@@ -1362,9 +1370,83 @@ QQ空间 = 公开札记
         </div>
         <form id="providerForm" class="provider-groups"></form>
       </section>
+
+      <section class="panel" id="panel-qzone">
+        <div class="section-head">
+          <div>
+            <h2>QQ 空间</h2>
+            <span class="muted">整合查看、点赞、评论和发布说说入口，布局沿用陪伴面板风格。</span>
+          </div>
+          <div class="actions compact">
+            <button id="qzoneRefreshCookiesBtn" type="button">刷新 Cookies</button>
+            <button id="qzoneRefreshBtn" type="button">刷新动态</button>
+          </div>
+        </div>
+        <div class="qzone-shell">
+          <aside class="qzone-rail">
+            <article class="qzone-card qzone-account-card">
+              <div>
+                <h3 id="qzoneAccountName">QQ 空间</h3>
+                <p id="qzoneAccountMeta" class="muted">等待加载</p>
+              </div>
+              <div id="qzoneQuickSummary" class="qzone-mini-summary"></div>
+            </article>
+
+            <article class="qzone-card qzone-filter-card">
+              <div class="qzone-scope-switch">
+                <button type="button" class="active" data-qzone-scope="friends">好友动态</button>
+                <button type="button" data-qzone-scope="self">我的空间</button>
+                <button type="button" data-qzone-scope="profile">指定 QQ</button>
+              </div>
+              <form id="qzoneTargetForm" class="inline-form compact-form">
+                <input id="qzoneTargetUin" inputmode="numeric" placeholder="输入 QQ 号后查看" />
+                <button type="submit">查看</button>
+              </form>
+            </article>
+
+            <article class="qzone-card qzone-compose-card">
+              <h3>发布说说</h3>
+              <form id="qzonePublishForm" class="stack-form">
+                <textarea id="qzonePublishContent" rows="5" placeholder="写点公开发到 QQ 空间的话"></textarea>
+                <button type="submit">发布到空间</button>
+              </form>
+            </article>
+          </aside>
+
+          <div class="qzone-main">
+            <div id="qzoneNotice" class="qzone-notice" hidden></div>
+            <div class="qzone-feed-head">
+              <div>
+                <h3>空间动态</h3>
+                <span id="qzoneFeedMeta" class="muted">准备加载</span>
+              </div>
+            </div>
+            <div id="qzoneFeed" class="qzone-feed-list"></div>
+          </div>
+
+          <aside class="qzone-detail-pane">
+            <div id="qzoneDetailEmpty" class="qzone-empty detail-empty">
+              <b>选择一条说说</b>
+              <span>这里会显示完整内容和评论。</span>
+            </div>
+            <div id="qzoneDetailContent" hidden></div>
+          </aside>
+        </div>
+      </section>
     </section>
   </main>
 
-  <script src="./app.js?v=20260702-provider-mode"></script>
+  <div id="dailyOutfitPreview" class="daily-outfit-preview" aria-hidden="true">
+    <div class="daily-outfit-preview__dialog" role="dialog" aria-modal="true" aria-label="今日穿搭预览">
+      <button id="dailyOutfitPreviewClose" type="button" class="daily-outfit-preview__close" data-preview-dismiss="1" aria-label="关闭预览">×</button>
+      <img id="dailyOutfitPreviewImage" class="daily-outfit-preview__image" alt="今日穿搭预览" />
+      <div id="dailyOutfitPreviewMeta" class="daily-outfit-preview__meta"></div>
+    </div>
+  </div>
+
+  <script src="./js/features/daily-outfit.js?v=20260702-outfit-preview"></script>
+  <script src="./js/panels/provider-tree.js?v=20260702-provider-tree"></script>
+  <script src="./js/panels/qzone-panel.js?v=20260702-qzone-panel"></script>
+  <script src="./app.js?v=20260702-provider-tree"></script>
 </body>
 </html>

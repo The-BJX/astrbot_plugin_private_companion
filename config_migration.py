@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -457,6 +458,7 @@ def _save_config_after_schema_migration(config: Any, *, logger: Any | None = Non
         if not callable(save):
             continue
         try:
+            _ensure_config_parent_dir(config, logger=logger)
             result = save()
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 try:
@@ -470,10 +472,84 @@ def _save_config_after_schema_migration(config: Any, *, logger: Any | None = Non
             return
         except TypeError:
             continue
+        except FileNotFoundError as exc:
+            if _ensure_config_parent_dir(config, error=exc, logger=logger):
+                try:
+                    result = save()
+                    if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                        try:
+                            asyncio.get_running_loop().create_task(result)
+                        except RuntimeError:
+                            close = getattr(result, "close", None)
+                            if callable(close):
+                                close()
+                    return
+                except Exception as retry_exc:
+                    if logger is not None:
+                        logger.warning("[PrivateCompanion] 重试保存配置分组迁移结果失败: %s", _single_line(retry_exc, 160))
+                    return
+            if logger is not None:
+                logger.warning("[PrivateCompanion] 保存配置分组迁移结果失败: %s", _single_line(exc, 160))
+            return
         except Exception as exc:
             if logger is not None:
                 logger.warning("[PrivateCompanion] 保存配置分组迁移结果失败: %s", _single_line(exc, 160))
             return
+
+
+def _ensure_config_parent_dir(
+    config: Any,
+    *,
+    error: BaseException | None = None,
+    logger: Any | None = None,
+) -> bool:
+    paths: list[str] = []
+    for attr in (
+        "path",
+        "file",
+        "filepath",
+        "file_path",
+        "config_path",
+        "_path",
+        "_file",
+        "_filepath",
+        "_file_path",
+        "_config_path",
+    ):
+        try:
+            value = getattr(config, attr, None)
+        except Exception:
+            value = None
+        if value:
+            paths.append(str(value))
+    if isinstance(config, dict):
+        for key in ("path", "file", "filepath", "file_path", "config_path"):
+            value = config.get(key)
+            if value:
+                paths.append(str(value))
+    if error is not None:
+        match = re.search(r"['\"]([^'\"]+?\.tmp)['\"]", str(error))
+        if match:
+            paths.append(match.group(1))
+    changed = False
+    for raw in paths:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if text.endswith(".tmp"):
+            parent = Path(text).expanduser().parent
+        else:
+            candidate = Path(text).expanduser()
+            parent = candidate if text.endswith(("/", "\\")) else candidate.parent
+        if not str(parent):
+            continue
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            changed = True
+        except Exception as exc:
+            if logger is not None:
+                logger.debug("[PrivateCompanion] 创建配置目录失败: %s", _single_line(exc, 160))
+    return changed
 
 
 def _is_empty(value: Any) -> bool:

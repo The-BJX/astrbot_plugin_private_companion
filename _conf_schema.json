@@ -3157,6 +3157,16 @@
     ],
     "invisible": true
   },
+  "page_font_family": {
+    "description": "Legacy flat config: 拓展页面字体",
+    "type": "string",
+    "default": "original",
+    "options": [
+      "original",
+      "cheng"
+    ],
+    "invisible": true
+  },
   "model_assignment_config": {
     "description": "模型分流",
     "type": "object",

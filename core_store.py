@@ -105,6 +105,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .config_migration import _ensure_config_parent_dir
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -249,6 +250,7 @@ class CoreStoreMixin:
             if not callable(save):
                 continue
             try:
+                _ensure_config_parent_dir(self.config, logger=logger)
                 result = save()
                 if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                     close = getattr(result, "close", None)
@@ -258,6 +260,20 @@ class CoreStoreMixin:
                 return
             except TypeError:
                 continue
+            except FileNotFoundError as exc:
+                if _ensure_config_parent_dir(self.config, error=exc, logger=logger):
+                    try:
+                        result = save()
+                        if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                            close = getattr(result, "close", None)
+                            if callable(close):
+                                close()
+                        return
+                    except Exception as retry_exc:
+                        logger.debug("[PrivateCompanion] 自动保存配置重试失败: %s", _single_line(retry_exc, 120))
+                        return
+                logger.debug("[PrivateCompanion] 自动保存配置失败: %s", _single_line(exc, 120))
+                return
             except Exception as exc:
                 logger.debug("[PrivateCompanion] 自动保存配置失败: %s", _single_line(exc, 120))
                 return

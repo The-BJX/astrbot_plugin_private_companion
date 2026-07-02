@@ -427,7 +427,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.6.2",
+    "5.6.4",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -1247,6 +1247,7 @@ class PrivateCompanionPlugin(
         self._passive_input_status_tasks: dict[str, asyncio.Task] = {}
         self._recent_inbound_activity_by_scope: dict[str, dict[str, Any]] = {}
         self._startup_maintenance_task: asyncio.Task | None = None
+        self._qzone_last_bot = None
         startup_load_started = time.perf_counter()
         self.data = self._load_data_sync()
         self._apply_tts_runtime_overrides()

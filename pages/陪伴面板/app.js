@@ -55,6 +55,7 @@ const state = {
     tokenStats: false,
     configBackups: false,
   },
+  pageFontFamily: "original",
 };
 
 const hiddenCompatibilityConfigKeys = new Set([
@@ -2511,41 +2512,8 @@ async function hydrateBookshelfImages(root = document) {
 }
 
 async function hydrateDailyOutfitLogo() {
-  const plate = document.querySelector(".folio-plate");
-  const img = $("#dailyOutfitLogo");
-  if (!plate || !img) return;
-  const outfit = state.overview?.daily_outfit || {};
-  const endpoint = String(outfit.image_data_url || "");
-  if (!outfit.available || !endpoint) {
-    plate.classList.remove("has-daily-outfit");
-    img.removeAttribute("src");
-    img.dataset.source = "";
-    img.dataset.loading = "0";
-    plate.title = "";
-    return;
-  }
-  if (img.dataset.source === endpoint && plate.classList.contains("has-daily-outfit")) return;
-  if (img.dataset.loading === "1" && img.dataset.source === endpoint) return;
-  img.dataset.source = endpoint;
-  img.dataset.loading = "1";
-  try {
-    const result = await fetchJson(endpoint);
-    if (img.dataset.source !== endpoint) return;
-    if (!result?.data_url) throw new Error("每日穿搭图片为空");
-    img.src = result.data_url;
-    img.alt = `今日穿搭照片${outfit.date ? ` · ${outfit.date}` : ""}`;
-    plate.classList.add("has-daily-outfit");
-    plate.title = [
-      outfit.date ? `每日穿搭：${outfit.date}` : "每日穿搭",
-      outfit.backend ? `后端：${outfit.backend}` : "",
-      outfit.generated_at ? `生成：${outfit.generated_at}` : "",
-    ].filter(Boolean).join(" · ");
-  } catch (error) {
-    plate.classList.remove("has-daily-outfit");
-    img.removeAttribute("src");
-    img.dataset.source = "";
-  } finally {
-    img.dataset.loading = "0";
+  if (window.PrivateCompanionDailyOutfit?.hydrateDailyOutfitLogo) {
+    await window.PrivateCompanionDailyOutfit.hydrateDailyOutfitLogo({ state, fetchJson, document });
   }
 }
 
@@ -2969,6 +2937,14 @@ function applyOverviewData(overview) {
   hydrateTokenStatsFromOverview(overview);
   state.featureDraft = featureDraftFromOverview(overview);
   state.providerConfigMode = inferProviderConfigMode(overview);
+  state.pageFontFamily = String(overview?.settings?.page_font_family || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
+  applyPageFontFamily();
+}
+
+function applyPageFontFamily() {
+  document.body.dataset.pageFont = state.pageFontFamily === "cheng" ? "cheng" : "original";
+  const select = document.getElementById("pageFontSelect");
+  if (select) select.value = document.body.dataset.pageFont;
 }
 
 function applyUserGroupLists(users, groups) {
@@ -3048,6 +3024,10 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     renderProactiveCandidates();
   } else if (tabName === "bookshelf") {
     renderBookshelf();
+  } else if (tabName === "qzone") {
+    if (window.PrivateCompanionQzonePanel?.render) {
+      window.PrivateCompanionQzonePanel.render({ fetchJson, postJson, showToast, escapeHtml });
+    }
   } else if (tabName === "image-cache") {
     renderImageCache();
   } else if (tabName === "troubleshooting") {
@@ -3143,15 +3123,15 @@ function renderStats() {
   const energyNumber = daily.energy === undefined || daily.energy === "" ? "" : `${formatNumber(Number(daily.energy || 0))}/100`;
   const mood = normalizeRoleplayStateText(daily.mood_bias) || daily.note || "暂无状态";
   $("#stats").innerHTML = [
-    statCard(`私聊 ${privateInfo.enabled_user_count || 0} · 群聊 ${groupInfo.enabled_group_count || 0}`, `总数：对象 ${privateInfo.user_count || 0} · 群聊 ${groupInfo.group_count || 0}`),
-    statCard(dailyLimit > 0 ? `${formatCompactNumber(dailyUsed)} / ${formatCompactNumber(dailyLimit)}` : `${formatCompactNumber(dailyUsed)} / 不限`, "今日 Token 消耗 / 上限"),
-    statCard(energyLabel || "-", `心理能量${energyNumber ? ` ${energyNumber}` : ""} · ${mood}`),
-    statCard(`${enabledFeatures}/${featureKeys.length}`, "开启主开关 / 主开关总数"),
+    statCard(`私聊 ${privateInfo.enabled_user_count || 0} · 群聊 ${groupInfo.enabled_group_count || 0}`, `总数：对象 ${privateInfo.user_count || 0} · 群聊 ${groupInfo.group_count || 0}`, "private"),
+    statCard(dailyLimit > 0 ? `${formatCompactNumber(dailyUsed)} / ${formatCompactNumber(dailyLimit)}` : `${formatCompactNumber(dailyUsed)} / 不限`, "今日 Token 消耗 / 上限", "tokens"),
+    statCard(energyLabel || "-", `心理能量${energyNumber ? ` ${energyNumber}` : ""} · ${mood}`, "memory"),
+    statCard(`${enabledFeatures}/${featureKeys.length}`, "开启主开关 / 主开关总数", "config"),
   ].join("");
 }
 
-function statCard(value, label) {
-  return `<article class="stat"><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></article>`;
+function statCard(value, label, jumpTab = "") {
+  return `<article class="stat ${jumpTab ? "is-link" : ""}" ${jumpTab ? `data-jump-tab="${escapeHtml(jumpTab)}"` : ""}><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></article>`;
 }
 
 function renderDashboard() {
@@ -12483,440 +12463,61 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
 }
 
 function renderProviders() {
-  syncProviderConfigModeControls();
-  const providers = providerValuesForRender();
-  renderProviderSummary(providers);
-  renderProviderFlow(providers);
-  const entries = Object.entries(providerLabels)
-    .filter(([key]) => visibleConfigKey(key))
-    .filter(([key]) => providerAllowedInCurrentMode(key))
-    .filter(([key, label]) => providerMatchesFilter(key, label, providers));
-  const groups = providerGroups
-    .map((group) => {
-      const groupEntries = entries.filter(([key]) => providerGroupByKey[key]?.id === group.id);
-      if (!groupEntries.length) return "";
-      return `
-        <section class="provider-group" data-provider-group="${escapeHtml(group.id)}">
-          <div class="provider-group-head">
-            <div>
-              <h3>${escapeHtml(group.title)}</h3>
-              <p>${escapeHtml(group.desc)}</p>
-            </div>
-            <span>${groupEntries.length} 项</span>
-          </div>
-          <div class="provider-grid">
-            ${groupEntries.map(([key, label]) => providerCardMarkup(key, label, providers)).join("")}
-          </div>
-        </section>
-      `;
-    })
-    .join("");
-  $("#providerForm").innerHTML = groups || `
-    <div class="empty provider-empty">
-      <b>没有匹配的模型配置</b>
-      <span>换个关键词，或切回“全部”查看完整模型分工。</span>
-    </div>
-  `;
-  bindProviderTests();
+  if (window.PrivateCompanionProviderTree?.renderProviders) {
+    window.PrivateCompanionProviderTree.renderProviders({
+      window,
+      document,
+      state,
+      escapeHtml,
+      providerLabels,
+      providerGuides,
+      providerPreferenceMeta,
+      providerPassiveImpactMeta,
+      providerGroups,
+      providerGroupByKey,
+      noFallbackProviderKeys,
+      optionalNoFallbackProviderKeys,
+      visibleConfigKey,
+      providerAllowedInCurrentMode,
+      providerNeedsLowLatency,
+      currentProviderConfigMode,
+      syncProviderConfigModeControls,
+      setProviderConfigMode,
+      postJson,
+    });
+  }
 }
 
 function providerValuesForRender() {
+  if (window.PrivateCompanionProviderTree?.currentProviderValues) {
+    return window.PrivateCompanionProviderTree.currentProviderValues({ document, state });
+  }
   return {
     ...(state.overview?.providers || {}),
     ...(state.providerDraft || {}),
   };
 }
 
-function providerCardMarkup(key, label, providers) {
-  const selected = providers[key] || "";
-  const resolved = resolveProviderId(key, providers);
-  const configured = Boolean(selected);
-  const noFallback = noFallbackProviderKeys.has(key);
-  const optionalNoFallback = optionalNoFallbackProviderKeys.has(key);
-  const group = providerGroupByKey[key];
-  const statusLabel = configured ? "已单独配置" : (noFallback ? "未配置" : (optionalNoFallback ? "可选未启用" : "自动回退"));
-  const guide = providerGuides[key] || {};
-  const preference = providerPreferenceMeta[guide.preference || "balanced"];
-  const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
-  return `
-    <article class="provider-card ${configured ? "configured" : "inherited"}">
-      <div class="provider-card-head">
-        <div>
-          <span class="provider-card-kicker">${escapeHtml(group?.title || "模型配置")}</span>
-          <h3>${escapeHtml(label)}</h3>
-        </div>
-        <span class="provider-badge ${configured ? "configured" : "inherited"}">${escapeHtml(statusLabel)}</span>
-      </div>
-      <div class="provider-tags">
-        ${preference ? `<span class="provider-tag ${escapeHtml(preference.className)}" title="${escapeHtml(preference.text)}">${escapeHtml(preference.label)}</span>` : ""}
-        ${impact ? `<span class="provider-tag impact-${escapeHtml(impact.className)}" title="${escapeHtml(impact.text)}">${escapeHtml(impact.label)}</span>` : ""}
-      </div>
-      <label class="provider-field">
-        <span>Provider</span>
-        ${providerSelect(key, selected)}
-      </label>
-      <div class="provider-current">
-        <span>当前使用</span>
-        <b>${escapeHtml(resolved || (noFallback ? "未配置" : (optionalNoFallback ? "未启用" : "AstrBot 默认模型")))}</b>
-      </div>
-      ${providerGuideMarkup(key)}
-      <div class="provider-row">
-        <span class="hint">${escapeHtml(key)}</span>
-        <button type="button" data-provider-test="${escapeHtml(key)}">测试</button>
-      </div>
-      <span class="provider-status" data-provider-status="${escapeHtml(key)}"></span>
-    </article>
-  `;
-}
-
-function providerGuideMarkup(key) {
-  const guide = providerGuides[key];
-  if (!guide) return "";
-  const preference = providerPreferenceMeta[guide.preference || ""];
-  const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
-  return `
-    <span class="provider-guide">
-      <span><b>用途</b>${escapeHtml(guide.purpose)}</span>
-      <span><b>适合</b>${escapeHtml(guide.fit)}</span>
-      ${preference ? `<span><b>取向</b>${escapeHtml(preference.text)}</span>` : ""}
-      ${impact ? `<span><b>速度</b>${escapeHtml(impact.text)}</span>` : ""}
-      ${guide.note ? `<span><b>注意</b>${escapeHtml(guide.note)}</span>` : ""}
-      <span><b>回退</b>${escapeHtml(guide.fallback)}</span>
-    </span>
-  `;
-}
-
-function providerMatchesFilter(key, label, providers) {
-  const mode = state.providerMode || "all";
-  const configured = Boolean(providers[key]);
-  const group = providerGroupByKey[key];
-  if (mode === "configured" && !configured) return false;
-  if (mode === "inherited" && configured) return false;
-  if (mode === "vision" && group?.id !== "media") return false;
-  const guide = providerGuides[key] || {};
-  if (mode === "speed" && !providerNeedsLowLatency(key)) return false;
-  if (mode === "quality" && guide.preference !== "quality") return false;
-  const query = (state.providerFilter || "").trim().toLowerCase();
-  if (!query) return true;
-  const preference = providerPreferenceMeta[guide.preference || ""];
-  const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
-  const haystack = [
-    key,
-    label,
-    group?.title || "",
-    guide.purpose || "",
-    guide.fit || "",
-    guide.note || "",
-    guide.fallback || "",
-    preference?.label || "",
-    preference?.text || "",
-    impact?.label || "",
-    impact?.text || "",
-    providers[key] || "",
-  ].join(" ").toLowerCase();
-  return haystack.includes(query);
-}
-
-function renderProviderSummary(providers) {
-  const keys = Object.keys(providerLabels)
-    .filter((key) => visibleConfigKey(key))
-    .filter((key) => providerAllowedInCurrentMode(key));
-  const configured = keys.filter((key) => Boolean(providers[key])).length;
-  const inherited = keys.filter((key) => !providers[key] && !noFallbackProviderKeys.has(key) && !optionalNoFallbackProviderKeys.has(key)).length;
-  const requiredMissing = keys.filter((key) => !providers[key] && noFallbackProviderKeys.has(key)).length;
-  const available = state.availableProviders.length;
-  const passiveSensitive = keys.filter((key) => providerGuides[key]?.passiveImpact === "direct").length;
-  const speedRecommended = keys.filter((key) => providerNeedsLowLatency(key)).length;
-  const qualityRecommended = keys.filter((key) => providerGuides[key]?.preference === "quality").length;
-  const providerConfigMode = currentProviderConfigMode();
-  const vision = providerConfigMode === "quick"
-    ? (providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述")
-    : (providers.PRIVATE_READING_VISION_PROVIDER_ID || providers.NARRATION_PROVIDER_ID || "精准分流 / 默认链路");
-  $("#providerSummary").innerHTML = `
-    <div class="provider-cost-notice">
-      <b>成本提醒</b>
-      <span>火山方舟协作计划免费额度已延期到 2026-07-31 左右，具体以控制台/官方活动页为准。使用火山方舟 Provider 时，请检查每日 Token 限额和后台任务开关，注意成本控制。</span>
-    </div>
-    <div class="provider-summary-card strong">
-      <span>单独配置</span>
-      <b>${configured}/${keys.length}</b>
-      <small>已指定专用 Provider</small>
-    </div>
-    <div class="provider-summary-card">
-      <span>自动回退</span>
-      <b>${inherited}</b>
-      <small>留空项会按兜底链路执行</small>
-    </div>
-    <div class="provider-summary-card speed">
-      <span>被动速度相关</span>
-      <b>${passiveSensitive}</b>
-      <small>这些项建议优先关注延迟</small>
-    </div>
-    <div class="provider-summary-card quality">
-      <span>效果优先项</span>
-      <b>${qualityRecommended}</b>
-      <small>适合更强推理或多模态模型</small>
-    </div>
-    <div class="provider-summary-card">
-      <span>低延迟优先项</span>
-      <b>${speedRecommended}</b>
-      <small>卡顿时优先检查这些项</small>
-    </div>
-    ${requiredMissing ? `
-    <div class="provider-summary-card warn">
-      <span>未配置专用项</span>
-      <b>${requiredMissing}</b>
-      <small>这些任务留空时不会回退</small>
-    </div>
-    ` : ""}
-    <div class="provider-summary-card">
-      <span>可选 Provider</span>
-      <b>${available}</b>
-      <small>${escapeHtml(available ? "来自 AstrBot 当前配置" : "暂无可选项，可手动输入 ID")}</small>
-    </div>
-    <div class="provider-summary-card">
-      <span>视觉通道</span>
-      <b>${escapeHtml(vision)}</b>
-      <small>${escapeHtml(providerConfigMode === "quick" ? "图片、识屏与素材理解" : "精准模式不使用快速视觉入口")}</small>
-    </div>
-  `;
-}
-
-function providerSelect(key, value) {
-  const known = state.availableProviders.some((item) => item.id === value);
-  const customValue = value && !known ? value : "";
-  const options = [
-    `<option value="">${noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
-    ...state.availableProviders.map((item) => {
-      const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
-      return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
-    }),
-    `<option value="__custom__" ${customValue ? "selected" : ""}>手动输入 Provider ID</option>`,
-  ].join("");
-  return `
-    <select data-provider-select="${escapeHtml(key)}">${options}</select>
-    <input data-provider-key="${escapeHtml(key)}" value="${escapeHtml(value || "")}" placeholder="自定义 Provider ID" ${customValue ? "" : "hidden"} />
-  `;
-}
-
 function currentProviderValues() {
-  const values = {
-    ...(state.overview?.providers || {}),
-    ...(state.providerDraft || {}),
-  };
-  document.querySelectorAll("[data-provider-key]").forEach((input) => {
-    values[input.dataset.providerKey] = input.value.trim();
-  });
-  return values;
-}
-
-function resolveProviderId(key, values = currentProviderValues()) {
-  if (values[key]) return values[key];
-  if (noFallbackProviderKeys.has(key)) return "";
-  if (optionalNoFallbackProviderKeys.has(key)) return "";
-  const fast = values.FAST_RESPONSE_PROVIDER_ID || "";
-  const complex = values.COMPLEX_REASONING_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
-  const creative = values.CREATIVE_MODEL_PROVIDER_ID || complex || fast;
-  if (key === "LLM_PROVIDER_ID") return complex || "";
-  if (key === "MAI_STYLE_PROVIDER_ID") return fast || complex || "";
-  if ([
-    "DAILY_PLAN_PROVIDER_ID",
-    "DETAIL_ENHANCEMENT_PROVIDER_ID",
-    "HISTORY_SUMMARY_PROVIDER_ID",
-    "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
-    "COMPANION_MEMORY_PROVIDER_ID",
-    "DIALOGUE_EPISODE_PROVIDER_ID",
-    "GROUP_EPISODE_PROVIDER_ID",
-    "FORWARD_MESSAGE_PROVIDER_ID",
-  ].includes(key)) {
-    return complex || fast || "";
-  }
-  if ([
-    "CREATIVE_PROVIDER_ID",
-    "CREATIVE_OUTLINE_PROVIDER_ID",
-    "CREATIVE_REVIEW_PROVIDER_ID",
-    "DREAM_DIARY_PROVIDER_ID",
-    "PHOTO_PROMPT_PROVIDER_ID",
-  ].includes(key)) {
-    return creative || values.MAI_STYLE_PROVIDER_ID || fast || complex || "";
-  }
-  if ([
-    "RESPONSE_REVIEW_PROVIDER_ID",
-    "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
-    "TROUBLESHOOTING_PROVIDER_ID",
-    "EMOTION_JUDGEMENT_PROVIDER_ID",
-    "GROUP_INTERJECT_PROVIDER_ID",
-    "GROUP_SLANG_PROVIDER_ID",
-    "VOICE_PROMPT_PROVIDER_ID",
-    "tts_conversion_provider_id",
-    "NARRATION_PROVIDER_ID",
-    "NEWS_PROVIDER_ID",
-    "WEB_EXPLORATION_PROVIDER_ID",
-  ].includes(key)) {
-    return fast || values.MAI_STYLE_PROVIDER_ID || complex || "";
-  }
-  if (key === "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID") {
-    return fast || complex || "";
-  }
-  if (key === "SMART_SILENCE_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || values.SMART_MESSAGE_DEBOUNCE_PROVIDER_ID || fast || values.MAI_STYLE_PROVIDER_ID || complex || "";
-  }
-  if (key === "REST_WAKEUP_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || fast || complex || "";
-  }
-  if (key === "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID") {
-    return fast || "";
-  }
-  if (key !== "LLM_PROVIDER_ID" && values.MAI_STYLE_PROVIDER_ID) return values.MAI_STYLE_PROVIDER_ID;
-  return complex || "";
-}
-
-function setProviderStatus(key, message, level = "info") {
-  const status = document.querySelector(`[data-provider-status="${key}"]`);
-  if (!status) return;
-  status.className = `provider-status ${level}`;
-  status.textContent = message;
-}
-
-function bindProviderTests() {
-  document.querySelectorAll("[data-provider-select]").forEach((select) => {
-    syncProviderInput(select);
-    select.addEventListener("change", () => {
-      syncProviderInput(select);
-      rememberProviderDraft(select.dataset.providerSelect);
-    });
-  });
-  document.querySelectorAll("[data-provider-key]").forEach((input) => {
-    input.addEventListener("input", () => rememberProviderDraft(input.dataset.providerKey));
-  });
-  document.querySelectorAll("[data-provider-test]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await testProvider(button.dataset.providerTest);
-    });
-  });
+  return providerValuesForRender();
 }
 
 function bindProviderToolbar() {
-  const filter = $("#providerFilter");
-  if (filter) {
-    filter.addEventListener("input", () => {
-      state.providerFilter = filter.value;
-      renderProviders();
-    });
+  if (window.PrivateCompanionProviderTree?.bindProviderToolbar) {
+    window.PrivateCompanionProviderTree.bindProviderToolbar({ document, state, setProviderConfigMode });
   }
-  document.querySelectorAll("[data-provider-config-mode]").forEach((button) => {
-    button.addEventListener("click", () => {
-      setProviderConfigMode(button.dataset.providerConfigMode || "quick");
-    });
-  });
-  document.querySelectorAll("[data-provider-mode]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.providerMode = button.dataset.providerMode || "all";
-      document.querySelectorAll("[data-provider-mode]").forEach((item) => {
-        item.classList.toggle("active", item === button);
-      });
-      renderProviders();
-    });
-  });
-}
-
-function syncProviderInput(select) {
-  const key = select.dataset.providerSelect;
-  const input = document.querySelector(`[data-provider-key="${key}"]`);
-  if (!input) return;
-  if (select.value === "__custom__") {
-    input.hidden = false;
-    input.focus();
-  } else {
-    input.hidden = true;
-    input.value = select.value;
-  }
-}
-
-function rememberProviderDraft(key) {
-  const input = document.querySelector(`[data-provider-key="${key}"]`);
-  if (!input) return;
-  state.providerDraft[key] = input.value.trim();
 }
 
 async function testProvider(key) {
-  const providerId = resolveProviderId(key);
-  setProviderStatus(key, "测试中...", "info");
-  if (!providerId && (noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key))) {
-    setProviderStatus(key, optionalNoFallbackProviderKeys.has(key) ? "未单独配置：当前不会调用该模型" : "未配置，无法测试", "warn");
-    return;
+  if (window.PrivateCompanionProviderTree?.testProvider) {
+    await window.PrivateCompanionProviderTree.testProvider({
+      document,
+      state,
+      postJson,
+      noFallbackProviderKeys,
+      optionalNoFallbackProviderKeys,
+    }, key);
   }
-  try {
-    const result = await postJson("/provider/test", { key, provider_id: providerId });
-    if (result.ok) {
-      const suffix = result.sample ? ` · ${result.sample}` : "";
-      setProviderStatus(key, `正常 ${result.elapsed_ms}ms${suffix}`, "ok");
-    } else {
-      setProviderStatus(key, result.error || "未返回内容", "warn");
-    }
-  } catch (error) {
-    setProviderStatus(key, error.message, "warn");
-  }
-}
-
-function renderProviderFlow(providers) {
-  const mode = currentProviderConfigMode();
-  const fast = providers.FAST_RESPONSE_PROVIDER_ID || "未配置";
-  const complex = providers.COMPLEX_REASONING_PROVIDER_ID || "未配置";
-  const creative = providers.CREATIVE_MODEL_PROVIDER_ID || "未配置";
-  const quickVision = providers.PLUGIN_VISION_PROVIDER_ID || "未配置";
-  const main = resolveProviderId("LLM_PROVIDER_ID", providers) || "AstrBot 默认模型";
-  const mai = resolveProviderId("MAI_STYLE_PROVIDER_ID", providers) || main;
-  const pluginVision = providers.NARRATION_PROVIDER_ID || "跟随工具结果转述 / 主模型";
-  if (mode === "quick") {
-    $("#providerFlow").innerHTML = `
-      <div class="flow-lane">
-        <span class="flow-node primary">快速响应<br><b>${escapeHtml(fast)}</b></span>
-        <span class="flow-arrow">·</span>
-        <span class="flow-node primary">复杂推理<br><b>${escapeHtml(complex)}</b></span>
-        <span class="flow-arrow">·</span>
-        <span class="flow-node primary">创作模型<br><b>${escapeHtml(creative)}</b></span>
-        <span class="flow-arrow">·</span>
-        <span class="flow-node primary">插件识图<br><b>${escapeHtml(quickVision)}</b></span>
-      </div>
-      <div class="flow-tasks">
-        <span class="flow-node inherited">当前为快速配置<br><b>细分任务会按场景套用上方入口</b></span>
-      </div>
-    `;
-    return;
-  }
-  const tasks = Object.entries(providerLabels).filter(([key]) => (
-    !["FAST_RESPONSE_PROVIDER_ID", "COMPLEX_REASONING_PROVIDER_ID", "CREATIVE_MODEL_PROVIDER_ID"].includes(key)
-    && key !== "LLM_PROVIDER_ID"
-    && key !== "MAI_STYLE_PROVIDER_ID"
-    && key !== "PLUGIN_VISION_PROVIDER_ID"
-    && visibleConfigKey(key)
-    && providerAllowedInCurrentMode(key)
-  ));
-  $("#providerFlow").innerHTML = `
-    <div class="flow-lane">
-      <span class="flow-node primary">主模型<br><b>${escapeHtml(main)}</b></span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">陪伴通用<br><b>${escapeHtml(mai)}</b></span>
-    </div>
-    <div class="flow-lane">
-      <span class="flow-node primary">默认图片转述<br><b>AstrBot 本体配置</b></span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node ${providers.NARRATION_PROVIDER_ID ? "primary" : "inherited"}">插件识图链路<br><b>${escapeHtml(pluginVision)}</b></span>
-    </div>
-    <div class="flow-tasks">
-      ${tasks.map(([key, label]) => {
-        const resolved = resolveProviderId(key, providers);
-        const value = providers[key] || (
-          noFallbackProviderKeys.has(key)
-            ? "未配置"
-            : (optionalNoFallbackProviderKeys.has(key) ? "未启用" : (resolved || "AstrBot 默认模型"))
-        );
-        const inherited = !providers[key];
-        return `<span class="flow-node ${inherited ? "inherited" : "primary"}">${escapeHtml(label)}<br><b>${escapeHtml(value)}</b></span>`;
-      }).join("")}
-    </div>
-  `;
 }
 
 function miniStat(label, value) {
@@ -13929,6 +13530,22 @@ document.addEventListener("change", (event) => {
 });
 
 $("#refreshBtn").addEventListener("click", loadAll);
+
+document.getElementById("pageFontSelect")?.addEventListener("change", async (event) => {
+  const select = event.currentTarget;
+  const value = String(select?.value || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
+  const previous = state.pageFontFamily;
+  state.pageFontFamily = value;
+  applyPageFontFamily();
+  try {
+    await postJson("/settings/update", { settings: { page_font_family: value } });
+    showToast("页面字体已保存");
+  } catch (error) {
+    state.pageFontFamily = previous;
+    applyPageFontFamily();
+    showToast(`字体保存失败：${error.message}`, "error");
+  }
+});
 $("#refreshImageCacheBtn")?.addEventListener("click", () => {
   loadImageCache().catch((error) => showToast(`刷新失败：${error.message}`, "error"));
 });

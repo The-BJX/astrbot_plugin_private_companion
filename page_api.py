@@ -21,14 +21,16 @@ from astrbot.api import logger
 from quart import request, send_file
 
 from .constants import _REASON_TEXT
+from .config_migration import _ensure_config_parent_dir
 from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
+from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 
 
-class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
+class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanionPageApiUsersGroupsMixin):
     """AstrBot 官方插件拓展页面 API。"""
 
     PERCENT_PROBABILITY_KEYS = {
@@ -111,6 +113,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/bookshelf/rate", self.rate_bookshelf_item, ["POST"], "Private Companion Page rate bookshelf item"),
             ("/bookshelf/tags", self.update_bookshelf_item_tags, ["POST"], "Private Companion Page update bookshelf item tags"),
             ("/bookshelf/comments/update", self.update_bookshelf_item_comments, ["POST"], "Private Companion Page update bookshelf item comments"),
+            ("/qzone/status", self.get_qzone_status, ["GET"], "Private Companion Page qzone status"),
+            ("/qzone/feed", self.get_qzone_feed, ["GET"], "Private Companion Page qzone feed"),
+            ("/qzone/detail", self.get_qzone_detail, ["GET"], "Private Companion Page qzone detail"),
+            ("/qzone/refresh_cookies", self.refresh_qzone_cookies, ["POST"], "Private Companion Page qzone refresh cookies"),
+            ("/qzone/publish", self.publish_qzone_post, ["POST"], "Private Companion Page qzone publish"),
+            ("/qzone/like", self.like_qzone_post, ["POST"], "Private Companion Page qzone like"),
+            ("/qzone/comment", self.comment_qzone_post, ["POST"], "Private Companion Page qzone comment"),
             ("/creative/project", self.get_creative_project, ["GET"], "Private Companion Page creative project detail"),
             ("/creative/project/update", self.update_creative_project, ["POST"], "Private Companion Page update creative project"),
             ("/creative/project/chunk/update", self.update_creative_chunk, ["POST"], "Private Companion Page update creative chunk"),
@@ -6785,6 +6794,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _runtime_settings(self) -> dict[str, Any]:
         keys = [
             "bot_name",
+            "page_font_family",
             "provider_config_mode",
             "plugin_specific_persona_id",
             "target_user_ids",
@@ -7947,12 +7957,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             save = getattr(config, method_name, None)
             if callable(save):
                 try:
+                    _ensure_config_parent_dir(config, logger=logger)
                     result = save()
                     if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                         await result
                     return True
                 except TypeError:
                     continue
+                except FileNotFoundError as exc:
+                    if _ensure_config_parent_dir(config, error=exc, logger=logger):
+                        try:
+                            result = save()
+                            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                                await result
+                            return True
+                        except Exception as retry_exc:
+                            logger.warning("[PrivateCompanionPage] 配置保存重试失败(%s): %s", method_name, self._single_line(retry_exc, 160))
+                            return False
+                    logger.warning("[PrivateCompanionPage] 配置保存失败(%s): %s", method_name, self._single_line(exc, 160))
+                    return False
                 except Exception as exc:
                     logger.warning("[PrivateCompanionPage] 配置保存失败(%s): %s", method_name, self._single_line(exc, 160))
                     return False
@@ -8112,6 +8135,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _allowed_setting_keys(self) -> set[str]:
         keys = {
             "bot_name",
+            "page_font_family",
             "provider_config_mode",
             "enable_proactive_only_mode",
             "plugin_specific_persona_id",
@@ -8457,6 +8481,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             return self._normalize_id_list(value)
         if key == "plugin_specific_persona_id":
             return str(value or "").strip()[:160]
+        if key == "page_font_family":
+            text = str(value or "original").strip().lower()
+            return text if text in {"original", "cheng"} else "original"
         if key == "provider_config_mode":
             normalizer = getattr(self.plugin, "_normalize_provider_config_mode", None)
             if callable(normalizer):
