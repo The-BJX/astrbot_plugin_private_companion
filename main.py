@@ -427,7 +427,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.6.5",
+    "5.6.6",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
