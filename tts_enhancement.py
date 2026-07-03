@@ -1044,11 +1044,17 @@ TTS 朗读文本：
         )
 
     async def apply_tts_enhancement_request(self, event: Any, req: Any) -> None:
+        if bool(getattr(event, "_private_companion_tts_request_applied", False)):
+            return
         feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         tts_enabled = feature_enabled("enable_tts_enhancement") if callable(feature_enabled) else getattr(self, "enable_tts_enhancement", False)
         if not getattr(self, "enabled", False) or not tts_enabled:
             return
         if not hasattr(req, "system_prompt"):
+            logger.info(
+                "[PrivateCompanion] TTS请求注入跳过: req无system_prompt session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
             return
         try:
             config = self.context.get_config(str(getattr(event, "unified_msg_origin", "") or "")) or {}
@@ -1073,6 +1079,25 @@ TTS 朗读文本：
             return "system_prompt"
 
         async def record_tts_fragment(title: str, key: str, text: str, mode: str = "", placement: str = "system_prompt") -> None:
+            common_recorder = getattr(self, "_record_request_prompt_fragment", None)
+            if callable(common_recorder):
+                await common_recorder(
+                    event,
+                    title=title,
+                    key=key,
+                    text=text,
+                    source="tts_enhancement",
+                    mode=mode or str(getattr(self, "tts_generation_mode", "fast_tag") or ""),
+                    priority=20,
+                    metadata={
+                        "语种": self._tts_language_label(),
+                        "模式": getattr(self, "tts_generation_mode", "fast_tag"),
+                        "频控": getattr(self, "tts_frequency_control_mode", "global"),
+                        "provider": provider_kind,
+                        "注入位置": placement,
+                    },
+                )
+                return
             recorder = getattr(self, "_record_prompt_injection_snapshot", None)
             if not callable(recorder):
                 return
@@ -1100,6 +1125,10 @@ TTS 朗读文本：
                 },
             )
 
+        try:
+            setattr(event, "_private_companion_tts_request_applied", True)
+        except Exception:
+            pass
         user_requested_tts = self._event_explicitly_requests_tts(event)
         strong_block_reason = ""
         mode = getattr(self, "tts_generation_mode", "fast_tag")

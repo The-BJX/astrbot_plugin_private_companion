@@ -1004,6 +1004,7 @@ const configLabels = {
   plugin_specific_persona_id: "插件指定人格 ID",
   private_user_aliases: "私聊身份别名归并",
   private_user_delivery_aliases: "私聊主动发送目标映射",
+  proactive_intensity_preset: "主动强度预设",
   schedule_persona_prompt: "角色资料补充",
   schedule_worldview_prompt: "世界观/生活背景",
   roleplay_user_profile_prompt: "用户与关系补充",
@@ -1175,6 +1176,7 @@ const configLabels = {
   enable_yesterday_screen_diary_context: "昨日屏幕日记",
   screen_diary_context_max_chars: "昨日屏幕日记上下文字数",
   passive_topic_memory_hours: "话题抑制记忆小时",
+  proactive_intensity_preset: "主动强度预设",
   idle_minutes: "空闲门槛分钟",
   min_interval_minutes: "最小主动间隔分钟",
   proactive_unanswered_slowdown_start: "未回应降频起点",
@@ -1389,6 +1391,7 @@ const configDescriptions = {
   enable_yesterday_screen_diary_context: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，作为今日状态、日程和生活节奏背景；不会读取今天实时屏幕。",
   screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
   TROUBLESHOOTING_PROVIDER_ID: "用于排障中心的模型复核。留空时先跟随回复/主动复核模型，再回退到陪伴通用/主模型。",
+  proactive_intensity_preset: "默认关闭，完全沿用手动参数。开启后只在运行态调整私聊主动、群聊唤醒和插话的有效频率，并会在排障页显示当前预设；不会绕过免打扰、休息、用户拒绝、隐私和成本闸门。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
   proactive_unanswered_slowdown_start: "用户连续几次不回应 Bot 主动消息后，开始自动降低主动频率。",
@@ -1576,7 +1579,7 @@ const configDescriptions = {
   web_exploration_min_interval_hours: "两次自主搜索之间的最小间隔。",
   web_exploration_share_probability: "完成探索后，主动私聊分享的概率，按百分比填写。",
   web_exploration_max_results: "每次调用 AstrBot 网页搜索时最多读取多少条结果。",
-  QZONE_COOKIE: "可填写浏览器 QQ 空间 Cookie，作为查看、点赞、评论和发布说说的优先凭据；留空时仍使用 OneBot 自动 Cookie。",
+  QZONE_COOKIE: "可填写浏览器 QQ 空间 Cookie，作为查看、点赞、评论和发布说说的优先凭据；留空时仍使用 OneBot 自动 Cookie。需包含 uin/p_uin 与 p_skey 或 skey，填写后可在 QQ 空间页刷新 Cookies 或到排障中心测试链路。",
   qzone_life_publish_min_interval_hours: "两次低频生活说说之间的最小间隔。",
   qzone_life_publish_probability: "满足条件时发布生活说说的概率，按百分比填写。",
   enable_qzone_generated_image_publish: "开启后，生活说说或情绪说说发布前可按概率调用主动生图能力生成一张配图。需要同时启用 QQ 空间动态和可用的主动生图后端。",
@@ -2192,6 +2195,7 @@ const featureSettingTypes = {
   framework_session_lock_mode: { type: "select", options: [["auto", "自动（仅旧版兼容）"], ["off", "关闭（新版本推荐）"], ["always", "始终启用（旧版排障）"]] },
   expression_learning_mode: { type: "select", options: [["light", "轻量：只学节奏"], ["balanced", "标准：当前行为"], ["aggressive", "激进：参考审核样本"]] },
   response_review_mode: { type: "select", options: [["severe_only", "主动统一复核"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
+  proactive_intensity_preset: { type: "select", options: [["off", "关闭：手动参数"], ["balanced", "标准偏主动"], ["high_private", "私聊高频"], ["high_group", "群聊活跃"], ["live", "在线陪伴"]] },
   proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
   emotion_judgement_mode: { type: "select", options: [["suspicious", "仅复核可疑项"], ["always", "总是复核普通文本"], ["off", "关闭复核"]] },
   smart_silence_min_confidence: { type: "number", min: 0, max: 100, step: 1 },
@@ -3408,7 +3412,7 @@ function moduleShortcutNote(overview) {
   const settings = overview?.settings || {};
   const features = overview?.features || {};
   const items = [
-    ["私聊主动", Number(settings.max_daily_messages || 0) > 0],
+    ["主动触达", Number(settings.max_daily_messages || 0) > 0 || Boolean(features.enable_group_companion || settings.enable_group_companion)],
     ["状态日程", Boolean(features.enable_humanized_states || settings.enable_humanized_states)],
     ["群聊观察", Boolean(features.enable_group_companion || settings.enable_group_companion)],
     ["关系网", Boolean(features.enable_worldbook_member_recognition || settings.enable_worldbook_member_recognition)],
@@ -9356,15 +9360,22 @@ function renderModuleWorkbench(settings) {
   const bookshelf = overview.bookshelf || {};
   const qzone = overview.qzone || {};
   const privateReading = overview.private_reading || {};
+  const intensity = overview.proactive_intensity || {};
+  const intensityEnabled = Boolean(intensity.enabled);
+  const intensityLabel = intensityEnabled ? (intensity.label || intensity.preset || "预设开启") : "手动参数";
+  const proactiveMaxDaily = intensityEnabled ? (intensity.effective?.max_daily_messages ?? settings.max_daily_messages) : settings.max_daily_messages;
+  const proactiveIdle = intensityEnabled ? (intensity.effective?.idle_minutes ?? settings.idle_minutes) : settings.idle_minutes;
+  const proactiveMinInterval = intensityEnabled ? (intensity.effective?.min_interval_minutes ?? settings.min_interval_minutes) : settings.min_interval_minutes;
   const moduleCards = [
     {
-      title: "私聊主动",
+      title: "主动触达",
       kicker: "主动节奏",
-      status: Number(settings.max_daily_messages || 0) > 0 ? "运行中" : "已收起",
-      tone: Number(settings.max_daily_messages || 0) > 0 ? "ok" : "off",
-      body: `${settings.max_daily_messages ?? 0} 条/天，空闲 ${settings.idle_minutes ?? 0} 分钟后进入候选。`,
+      status: Number(proactiveMaxDaily || 0) > 0 ? "运行中" : "已收起",
+      tone: intensityEnabled ? "warn" : (Number(proactiveMaxDaily || 0) > 0 ? "ok" : "off"),
+      body: `私聊 ${proactiveMaxDaily ?? 0} 条/天，空闲 ${proactiveIdle ?? 0} 分钟后进入候选；群聊唤醒和插话按群聊开关参与。`,
       meta: [
-        `最小间隔 ${settings.min_interval_minutes ?? 0} 分钟`,
+        `强度：${intensityLabel}`,
+        `最小间隔 ${proactiveMinInterval ?? 0} 分钟`,
         toBool(settings.enable_unanswered_screen_peek_followup) ? "未回应后可轻窥屏" : "未回应不窥屏",
       ],
       actions: [
@@ -9512,12 +9523,18 @@ function renderCurrentPersonaStatus(settings) {
 function renderModuleSummary(settings) {
   const features = state.overview?.features || {};
   const groups = state.overview?.group || {};
+  const intensity = state.overview?.proactive_intensity || {};
+  const intensityEnabled = Boolean(intensity.enabled);
+  const proactiveMaxDaily = intensityEnabled ? (intensity.effective?.max_daily_messages ?? settings.max_daily_messages) : settings.max_daily_messages;
+  const proactiveIdle = intensityEnabled ? (intensity.effective?.idle_minutes ?? settings.idle_minutes) : settings.idle_minutes;
   const cards = [
     {
-      label: "私聊主动",
-      value: `${settings.max_daily_messages ?? 0}/天`,
-      note: `${settings.idle_minutes ?? 0} 分钟空闲后候选`,
-      tone: Number(settings.max_daily_messages || 0) > 0 ? "ok" : "off",
+      label: "主动触达",
+      value: `${proactiveMaxDaily ?? 0}/天`,
+      note: intensityEnabled
+        ? `${intensity.label || intensity.preset || "预设"} · 私聊空闲 ${proactiveIdle ?? 0} 分钟`
+        : `私聊空闲 ${proactiveIdle ?? 0} 分钟`,
+      tone: intensityEnabled ? "warn" : (Number(proactiveMaxDaily || 0) > 0 ? "ok" : "off"),
     },
     {
       label: "群聊观察",
@@ -11038,6 +11055,10 @@ function renderFeatureSwitches() {
   const groups = extraKeys.length
     ? [...featureGroups, { title: "其他", note: "来自配置但暂未归入固定分组的开关。", keys: extraKeys }]
     : featureGroups;
+  const overviewSettings = state.overview?.settings || {};
+  const intensity = state.overview?.proactive_intensity || {};
+  const intensitySearchText = "主动强度预设 主动触达 proactive_intensity_preset 私聊主动 群聊唤醒 群主动插话";
+  const intensityVisible = !filter || intensitySearchText.toLowerCase().includes(filter);
   const visibleDraftKeys = visibleTopLevelFeatureKeys(state.featureDraft || {});
   const total = visibleDraftKeys.length;
   const enabled = visibleDraftKeys.filter((key) => toBool(state.featureDraft[key])).length;
@@ -11082,17 +11103,23 @@ function renderFeatureSwitches() {
       if (!filter) return true;
       return featureSearchText(key).includes(filter);
     });
-    if (!visibleKeys.length) return "";
+    const hasIntensityCard = group.title === "通用能力" && intensityVisible;
+    if (!visibleKeys.length && !hasIntensityCard) return "";
     const groupEnabled = visibleKeys.filter((key) => toBool(state.featureDraft[key])).length;
+    const groupMeta = visibleKeys.length ? `${groupEnabled} / ${visibleKeys.length}` : "设置项";
+    const prefix = hasIntensityCard
+      ? proactiveIntensityCommonSettingCard(overviewSettings, intensity)
+      : "";
     return `
       <section class="feature-switch-group">
         <header>
           <div>
             <b>${escapeHtml(group.title)}</b>
           </div>
-          <small>${escapeHtml(groupEnabled)} / ${escapeHtml(visibleKeys.length)}</small>
+          <small>${escapeHtml(groupMeta)}</small>
         </header>
         <div class="feature-switch-list">
+          ${prefix}
           ${visibleKeys.map((key) => featureSwitchItem(key)).join("")}
         </div>
       </section>
@@ -11112,6 +11139,57 @@ function renderFeatureSwitches() {
     });
   });
   bindProactiveOnlyTempUnlockActions($("#featureFlags"));
+  bindProactiveIntensityCommonSetting();
+}
+
+function proactiveIntensityCommonSettingCard(settings = {}, intensity = {}) {
+  const current = String(settings.proactive_intensity_preset || intensity.preset || "off");
+  const enabled = Boolean(intensity?.enabled);
+  const effective = intensity?.effective || {};
+  const detail = enabled
+    ? `当前有效：私聊 ${effective.max_daily_messages ?? "-"} 条/天，空闲 ${effective.idle_minutes ?? "-"} 分钟，群唤醒冷却 ${effective.group_wakeup_cooldown_seconds ?? "-"} 秒，群插话间隔 ${effective.group_interject_min_interval_minutes ?? "-"} 分钟。`
+    : "关闭时完全沿用手动参数，不改变私聊、群聊唤醒或群主动插话频率。";
+  return `
+    <section class="feature-switch-item feature-setting-inline ${enabled ? "on" : "off"}">
+      <div class="feature-switch-body">
+        <button type="button" class="feature-switch-text" data-jump-tab="troubleshooting">
+          <b>主动强度预设</b>
+          <small>proactive_intensity_preset</small>
+        </button>
+        <div class="feature-switch-meta">
+          <span class="feature-state-text">${escapeHtml(enabled ? (intensity.label || current) : "关闭：手动参数")}</span>
+          <span class="feature-lock-note">影响私聊主动、群聊唤醒和群主动插话；排障页会显示当前覆盖项。</span>
+        </div>
+        <div class="feature-lock-related">${escapeHtml(detail)}</div>
+      </div>
+      <form class="feature-inline-setting-form" data-proactive-intensity-form>
+        <select name="proactive_intensity_preset">
+          ${[
+            ["off", "关闭：手动参数"],
+            ["balanced", "标准偏主动"],
+            ["high_private", "私聊高频"],
+            ["high_group", "群聊活跃"],
+            ["live", "在线陪伴"],
+          ].map(([value, label]) => `<option value="${escapeHtml(value)}"${current === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+        </select>
+        <button type="submit">保存</button>
+      </form>
+    </section>
+  `;
+}
+
+function bindProactiveIntensityCommonSetting() {
+  document.querySelectorAll("[data-proactive-intensity-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const value = form.querySelector('[name="proactive_intensity_preset"]')?.value || "off";
+      await runAction(
+        () => postJson("/settings/update", { settings: { proactive_intensity_preset: value } }),
+        "已保存主动强度预设",
+        form.querySelector("button[type='submit']"),
+      );
+    });
+  });
 }
 
 function syncFeatureFooterAction() {
@@ -14048,6 +14126,10 @@ $("#saveFeaturesBtn").addEventListener("click", async (event) => {
       features[key] = toBool(value);
     }
   });
+  const proactiveIntensitySelect = document.querySelector('[data-proactive-intensity-form] [name="proactive_intensity_preset"]');
+  if (proactiveIntensitySelect) {
+    settings.proactive_intensity_preset = proactiveIntensitySelect.value || "off";
+  }
   await runAction(() => postJson("/settings/update", { features, settings }), "已保存功能开关", button);
 });
 

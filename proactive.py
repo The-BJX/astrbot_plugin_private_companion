@@ -238,6 +238,195 @@ _PLATFORM_DISPLAY_NAMES = {
 class ProactiveMixin:
     """主动消息调度"""
 
+    _PROACTIVE_INTENSITY_PRESETS: dict[str, dict[str, Any]] = {
+        "off": {
+            "label": "关闭预设",
+            "description": "沿用手动配置，不覆盖任何主动频率参数。",
+            "effects": {},
+        },
+        "balanced": {
+            "label": "标准偏主动",
+            "description": "略微提高主动触达，仍保持低打扰边界。",
+            "effects": {
+                "max_daily_messages": 8,
+                "idle_minutes": 45,
+                "min_interval_minutes": 90,
+                "unanswered_slowdown_start": 2,
+                "unanswered_max_interval_multiplier": 1.8,
+                "friend_unanswered_max_cooldown_hours": 36,
+                "delay_factor": 0.82,
+                "proactive_persona_judge_send_threshold": 56,
+                "proactive_review_strength": "lenient",
+                "group_wakeup_cooldown_seconds": 60,
+                "group_high_intensity_cooldown_seconds": 120,
+                "group_interject_min_interval_minutes": 120,
+                "group_interject_max_daily": 3,
+            },
+        },
+        "high_private": {
+            "label": "私聊高频",
+            "description": "明显提高私聊主动频率，适合希望 Bot 经常来找的用户。",
+            "effects": {
+                "max_daily_messages": 12,
+                "idle_minutes": 20,
+                "min_interval_minutes": 35,
+                "unanswered_slowdown_start": 3,
+                "unanswered_max_interval_multiplier": 1.35,
+                "friend_unanswered_max_cooldown_hours": 18,
+                "delay_factor": 0.55,
+                "proactive_persona_judge_send_threshold": 48,
+                "proactive_review_strength": "lenient",
+                "group_wakeup_cooldown_seconds": 60,
+                "group_high_intensity_cooldown_seconds": 120,
+                "group_interject_min_interval_minutes": 120,
+                "group_interject_max_daily": 3,
+            },
+        },
+        "high_group": {
+            "label": "群聊活跃",
+            "description": "降低群聊唤醒和插话冷却，让 Bot 更容易参与群聊。",
+            "effects": {
+                "max_daily_messages": 8,
+                "idle_minutes": 45,
+                "min_interval_minutes": 90,
+                "unanswered_slowdown_start": 2,
+                "unanswered_max_interval_multiplier": 1.8,
+                "friend_unanswered_max_cooldown_hours": 36,
+                "delay_factor": 0.8,
+                "proactive_persona_judge_send_threshold": 55,
+                "proactive_review_strength": "lenient",
+                "group_wakeup_cooldown_seconds": 35,
+                "group_high_intensity_cooldown_seconds": 75,
+                "group_interject_min_interval_minutes": 45,
+                "group_interject_max_daily": 8,
+            },
+        },
+        "live": {
+            "label": "在线陪伴",
+            "description": "短间隔高频陪伴感；仍会尊重免打扰、休息、拒绝和隐私闸门。",
+            "effects": {
+                "max_daily_messages": 12,
+                "idle_minutes": 10,
+                "min_interval_minutes": 20,
+                "unanswered_slowdown_start": 4,
+                "unanswered_max_interval_multiplier": 1.2,
+                "friend_unanswered_max_cooldown_hours": 12,
+                "delay_factor": 0.38,
+                "proactive_persona_judge_send_threshold": 44,
+                "proactive_review_strength": "lenient",
+                "group_wakeup_cooldown_seconds": 20,
+                "group_high_intensity_cooldown_seconds": 45,
+                "group_interject_min_interval_minutes": 20,
+                "group_interject_max_daily": 12,
+            },
+        },
+    }
+
+    def _normalize_proactive_intensity_preset(self, value: Any) -> str:
+        preset = str(value or "off").strip().lower()
+        aliases = {
+            "": "off",
+            "manual": "off",
+            "none": "off",
+            "default": "off",
+            "standard": "balanced",
+            "active": "high_private",
+            "private": "high_private",
+            "group": "high_group",
+            "online": "live",
+            "直播": "live",
+            "高频": "live",
+        }
+        preset = aliases.get(preset, preset)
+        return preset if preset in self._PROACTIVE_INTENSITY_PRESETS else "off"
+
+    def _proactive_intensity_runtime(self) -> dict[str, Any]:
+        preset = self._normalize_proactive_intensity_preset(
+            getattr(self, "proactive_intensity_preset", "off")
+        )
+        spec = self._PROACTIVE_INTENSITY_PRESETS.get(preset) or self._PROACTIVE_INTENSITY_PRESETS["off"]
+        effects = dict(spec.get("effects") or {})
+        return {
+            "preset": preset,
+            "enabled": preset != "off",
+            "label": str(spec.get("label") or preset),
+            "description": str(spec.get("description") or ""),
+            "effects": effects,
+        }
+
+    def _proactive_intensity_effect(self, key: str, default: Any = None) -> Any:
+        runtime = self._proactive_intensity_runtime()
+        if not runtime.get("enabled"):
+            return default
+        return runtime.get("effects", {}).get(key, default)
+
+    def _effective_proactive_int(self, key: str, configured: int, *, minimum: int = 0, maximum: int | None = None) -> int:
+        value = configured
+        effect = self._proactive_intensity_effect(key, None)
+        if effect is not None:
+            value = _safe_int(effect, configured, minimum, maximum if maximum is not None else 10**9)
+        value = max(minimum, value)
+        if maximum is not None:
+            value = min(maximum, value)
+        return value
+
+    def _effective_proactive_float(self, key: str, configured: float, *, minimum: float = 0.0, maximum: float | None = None) -> float:
+        value = configured
+        effect = self._proactive_intensity_effect(key, None)
+        if effect is not None:
+            value = _safe_float(effect, configured, minimum)
+        value = max(minimum, float(value))
+        if maximum is not None:
+            value = min(maximum, value)
+        return value
+
+    def _effective_group_wakeup_cooldown_seconds(self) -> int:
+        return self._effective_proactive_int(
+            "group_wakeup_cooldown_seconds",
+            _safe_int(getattr(self, "group_wakeup_cooldown_seconds", 90), 90, 0, 3600),
+            minimum=0,
+            maximum=3600,
+        )
+
+    def _effective_group_high_intensity_cooldown_seconds(self) -> int:
+        return self._effective_proactive_int(
+            "group_high_intensity_cooldown_seconds",
+            _safe_int(getattr(self, "group_high_intensity_cooldown_seconds", 150), 150, 30, 1800),
+            minimum=30,
+            maximum=1800,
+        )
+
+    def _effective_group_interject_min_interval_minutes(self) -> int:
+        return self._effective_proactive_int(
+            "group_interject_min_interval_minutes",
+            _safe_int(getattr(self, "group_interject_min_interval_minutes", 180), 180, 10, 1440),
+            minimum=10,
+            maximum=1440,
+        )
+
+    def _effective_group_interject_max_daily(self) -> int:
+        return self._effective_proactive_int(
+            "group_interject_max_daily",
+            _safe_int(getattr(self, "group_interject_max_daily", 2), 2, 0, 12),
+            minimum=0,
+            maximum=12,
+        )
+
+    def _effective_proactive_persona_judge_send_threshold(self) -> int:
+        return self._effective_proactive_int(
+            "proactive_persona_judge_send_threshold",
+            _safe_int(getattr(self, "proactive_persona_judge_send_threshold", 62), 62, 0, 100),
+            minimum=0,
+            maximum=100,
+        )
+
+    def _effective_proactive_review_strength(self) -> str:
+        value = str(self._proactive_intensity_effect("proactive_review_strength", "") or "").strip().lower()
+        if value in {"lenient", "balanced", "strict"}:
+            return value
+        configured = str(getattr(self, "proactive_review_strength", "lenient") or "lenient").strip().lower()
+        return configured if configured in {"lenient", "balanced", "strict"} else "lenient"
+
     def _configured_target_ids(self) -> list[str]:
         raw = self.target_user_ids
         if isinstance(raw, str):
@@ -381,7 +570,7 @@ class ProactiveMixin:
     def _runtime_max_daily_messages(self) -> int:
         runtime_value = _safe_int(getattr(self, "max_daily_messages", 8), 8, 0, 12)
         if runtime_value > 0:
-            return runtime_value
+            return self._effective_proactive_int("max_daily_messages", runtime_value, minimum=0, maximum=12)
         config = getattr(self, "config", None)
         getter = getattr(config, "get", None)
         if callable(getter):
@@ -389,7 +578,7 @@ class ProactiveMixin:
                 configured_value = _safe_int(getter("max_daily_messages", runtime_value), runtime_value, 0, 12)
                 if configured_value > 0:
                     self.max_daily_messages = configured_value
-                    return configured_value
+                    return self._effective_proactive_int("max_daily_messages", configured_value, minimum=0, maximum=12)
             except Exception:
                 pass
         return runtime_value
@@ -411,9 +600,15 @@ class ProactiveMixin:
         override = self._user_profile_override_int(user, "proactive_idle_minutes")
         if override is not None:
             return override
+        base_idle = self._effective_proactive_int(
+            "idle_minutes",
+            _safe_int(getattr(self, "idle_minutes", 60), 60, 0, 1440),
+            minimum=0,
+            maximum=1440,
+        )
         if self._private_user_role(user) == "friend":
-            return max(self.idle_minutes, 180)
-        return max(0, self.idle_minutes)
+            return max(base_idle, 180)
+        return max(0, base_idle)
 
     def _effective_user_greeting_idle_minutes(self, user: dict[str, Any]) -> int:
         if self._private_user_role(user) == "friend":
@@ -424,9 +619,15 @@ class ProactiveMixin:
         override = self._user_profile_override_int(user, "proactive_min_interval_minutes")
         if override is not None:
             return override
+        base_interval = self._effective_proactive_int(
+            "min_interval_minutes",
+            _safe_int(getattr(self, "min_interval_minutes", 120), 120, 0, 2880),
+            minimum=0,
+            maximum=2880,
+        )
         if self._private_user_role(user) == "friend":
-            return max(self.min_interval_minutes, 360)
-        return max(0, self.min_interval_minutes)
+            return max(base_interval, 360)
+        return max(0, base_interval)
 
     def _effective_user_photo_daily_limit(self, user: dict[str, Any] | None = None) -> int:
         if isinstance(user, dict):
@@ -659,12 +860,22 @@ class ProactiveMixin:
 
     def _unanswered_slowdown_count(self, user: dict[str, Any]) -> int:
         ignored_streak = _safe_int(user.get("ignored_streak"), 0)
-        start = _safe_int(getattr(self, "proactive_unanswered_slowdown_start", 1), 1, 1, 10)
+        start = self._effective_proactive_int(
+            "unanswered_slowdown_start",
+            _safe_int(getattr(self, "proactive_unanswered_slowdown_start", 1), 1, 1, 10),
+            minimum=1,
+            maximum=10,
+        )
         return max(0, ignored_streak - start + 1)
 
     def _unanswered_interval_multiplier(self, user: dict[str, Any]) -> float:
         active_count = self._unanswered_slowdown_count(user)
-        max_multiplier = max(1.0, _safe_float(getattr(self, "proactive_unanswered_max_interval_multiplier", 2.2), 2.2, 1.0))
+        max_multiplier = self._effective_proactive_float(
+            "unanswered_max_interval_multiplier",
+            max(1.0, _safe_float(getattr(self, "proactive_unanswered_max_interval_multiplier", 2.2), 2.2, 1.0)),
+            minimum=1.0,
+            maximum=8.0,
+        )
         return min(max_multiplier, 1.0 + active_count * 0.35)
 
     def _effective_min_interval_seconds(self, user: dict[str, Any]) -> int:
@@ -879,7 +1090,12 @@ class ProactiveMixin:
         if daily_limit <= 1 or sent_today <= 0:
             return None
         ignored_slowdown = self._unanswered_slowdown_count(user)
-        max_cooldown = max(1.0, _safe_float(getattr(self, "friend_unanswered_max_cooldown_hours", 60.0), 60.0, 1.0))
+        max_cooldown = self._effective_proactive_float(
+            "friend_unanswered_max_cooldown_hours",
+            max(1.0, _safe_float(getattr(self, "friend_unanswered_max_cooldown_hours", 60.0), 60.0, 1.0)),
+            minimum=1.0,
+            maximum=168.0,
+        )
 
         def cap_delay(delay: tuple[float, float]) -> tuple[float, float]:
             low, high = delay
@@ -1446,6 +1662,12 @@ class ProactiveMixin:
         now = now or _now_ts()
         if delay_hours is None:
             delay_hours = self._fallback_proactive_delay_hours(user, now=now)
+        delay_factor = self._effective_proactive_float("delay_factor", 1.0, minimum=0.2, maximum=1.0)
+        if delay_hours is not None and delay_factor < 1.0:
+            delay_hours = (
+                max(0.05, delay_hours[0] * delay_factor),
+                max(0.08, delay_hours[1] * delay_factor),
+            )
         intensity_factor = self._daily_intensity_factor(user)
         if delay_hours is not None and intensity_factor > 0:
             widen = max(0.85, min(1.8, 1.25 - intensity_factor * 0.45))

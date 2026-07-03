@@ -2495,7 +2495,11 @@ class ProactiveMessageMixin:
         return "\n".join(kept)[:260].strip()
 
     def _proactive_review_strength(self) -> str:
-        strength = str(getattr(self, "proactive_review_strength", "lenient") or "lenient").strip().lower()
+        effective_getter = getattr(self, "_effective_proactive_review_strength", None)
+        if callable(effective_getter):
+            strength = str(effective_getter() or "lenient").strip().lower()
+        else:
+            strength = str(getattr(self, "proactive_review_strength", "lenient") or "lenient").strip().lower()
         return strength if strength in {"lenient", "balanced", "strict"} else "lenient"
 
     @staticmethod
@@ -8239,4 +8243,3 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         style = _single_line(user.get("style") or self.default_style, 24)
         style_hint = f"；参考语气偏好：{style}" if style else ""
         return "check_in", f"无明确来源时的轻量开场{style_hint}；优先贴近关系事实、当前状态或当前日程，不使用固定模板。"
-

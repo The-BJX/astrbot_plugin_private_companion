@@ -1296,7 +1296,12 @@ class ProactiveEngineMixin:
         if decision not in {"send", "rewrite", "defer", "drop"}:
             return None
         score = _safe_int(payload.get("score"), 0, 0, 100)
-        threshold = _safe_int(getattr(self, "proactive_persona_judge_send_threshold", 62), 62, 0, 100)
+        threshold_getter = getattr(self, "_effective_proactive_persona_judge_send_threshold", None)
+        threshold = (
+            threshold_getter()
+            if callable(threshold_getter)
+            else _safe_int(getattr(self, "proactive_persona_judge_send_threshold", 62), 62, 0, 100)
+        )
         if decision == "send" and score > 0 and score < threshold:
             decision = "defer"
         reason = self._normalize_legacy_proactive_text(payload.get("reason"), limit=140) or "模型人格判定"

@@ -122,6 +122,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/qzone/publish", self.publish_qzone_post, ["POST"], "Private Companion Page qzone publish"),
             ("/qzone/like", self.like_qzone_post, ["POST"], "Private Companion Page qzone like"),
             ("/qzone/comment", self.comment_qzone_post, ["POST"], "Private Companion Page qzone comment"),
+            ("/qzone/delete", self.delete_qzone_post, ["POST"], "Private Companion Page qzone delete"),
             ("/creative/project", self.get_creative_project, ["GET"], "Private Companion Page creative project detail"),
             ("/creative/project/update", self.update_creative_project, ["POST"], "Private Companion Page update creative project"),
             ("/creative/project/chunk/update", self.update_creative_chunk, ["POST"], "Private Companion Page update creative chunk"),
@@ -198,6 +199,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "repeat_follow_enabled": bool(getattr(self.plugin, "enable_group_repeat_follow", False)),
                 },
                 "features": self._feature_flags(),
+                "proactive_intensity": self._proactive_intensity_summary(),
                 "proactive_only": self._proactive_only_mode_snapshot(),
                 "providers": self._provider_settings(),
                 "settings": self._runtime_settings(),
@@ -1149,6 +1151,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "prompt_injections": self._prompt_injection_summary(data),
                     "screen_companion": screen_companion,
                     "qzone": qzone,
+                    "proactive_intensity": self._proactive_intensity_summary(),
                     "proactive_runtime": proactive_tasks.get("runtime", {}),
                     "token_budget": token_stats.get("budget", {}),
                     "cache": cache,
@@ -5562,6 +5565,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "episode_count": len(group.get("group_episodes") or []),
             "relationship_edge_count": len(group.get("relationship_edges") or {}),
             "interject_today": group.get("interject_today", 0),
+            "effective_interject_max_daily": (
+                self.plugin._effective_group_interject_max_daily()
+                if hasattr(self.plugin, "_effective_group_interject_max_daily")
+                else getattr(self.plugin, "group_interject_max_daily", 0)
+            ),
+            "effective_interject_min_interval_minutes": (
+                self.plugin._effective_group_interject_min_interval_minutes()
+                if hasattr(self.plugin, "_effective_group_interject_min_interval_minutes")
+                else getattr(self.plugin, "group_interject_min_interval_minutes", 0)
+            ),
             "last_interject": self.plugin._format_timestamp_elapsed(group.get("last_interject_at", 0)),
             "last_bot_interjection": last_interjection,
             "wakeup_log_count": len(wakeup_logs),
@@ -7101,6 +7114,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "rest_backlog_max_messages",
             "REST_WAKEUP_PROVIDER_ID",
             "check_interval_seconds",
+            "proactive_intensity_preset",
             "idle_minutes",
             "min_interval_minutes",
             "proactive_unanswered_slowdown_start",
@@ -7418,6 +7432,80 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 values[key] = self._normalize_bool_value(values[key])
         return values
 
+    def _proactive_intensity_summary(self) -> dict[str, Any]:
+        runtime_getter = getattr(self.plugin, "_proactive_intensity_runtime", None)
+        runtime = runtime_getter() if callable(runtime_getter) else {}
+        if not isinstance(runtime, dict):
+            runtime = {}
+        effects = runtime.get("effects") if isinstance(runtime.get("effects"), dict) else {}
+
+        def call_or_attr(method_name: str, attr_name: str, default: Any) -> Any:
+            method = getattr(self.plugin, method_name, None)
+            if callable(method):
+                try:
+                    return method()
+                except Exception:
+                    pass
+            return getattr(self.plugin, attr_name, default)
+
+        effective = {
+            "max_daily_messages": call_or_attr("_runtime_max_daily_messages", "max_daily_messages", 0),
+            "idle_minutes": effects.get("idle_minutes", getattr(self.plugin, "idle_minutes", 0)),
+            "min_interval_minutes": effects.get("min_interval_minutes", getattr(self.plugin, "min_interval_minutes", 0)),
+            "proactive_persona_judge_send_threshold": call_or_attr(
+                "_effective_proactive_persona_judge_send_threshold",
+                "proactive_persona_judge_send_threshold",
+                62,
+            ),
+            "proactive_review_strength": call_or_attr("_effective_proactive_review_strength", "proactive_review_strength", "lenient"),
+            "group_wakeup_cooldown_seconds": call_or_attr(
+                "_effective_group_wakeup_cooldown_seconds",
+                "group_wakeup_cooldown_seconds",
+                90,
+            ),
+            "group_high_intensity_cooldown_seconds": call_or_attr(
+                "_effective_group_high_intensity_cooldown_seconds",
+                "group_high_intensity_cooldown_seconds",
+                150,
+            ),
+            "group_interject_min_interval_minutes": call_or_attr(
+                "_effective_group_interject_min_interval_minutes",
+                "group_interject_min_interval_minutes",
+                180,
+            ),
+            "group_interject_max_daily": call_or_attr(
+                "_effective_group_interject_max_daily",
+                "group_interject_max_daily",
+                2,
+            ),
+        }
+        configured = {
+            "max_daily_messages": getattr(self.plugin, "max_daily_messages", 0),
+            "idle_minutes": getattr(self.plugin, "idle_minutes", 0),
+            "min_interval_minutes": getattr(self.plugin, "min_interval_minutes", 0),
+            "proactive_persona_judge_send_threshold": getattr(self.plugin, "proactive_persona_judge_send_threshold", 62),
+            "proactive_review_strength": getattr(self.plugin, "proactive_review_strength", "lenient"),
+            "group_wakeup_cooldown_seconds": getattr(self.plugin, "group_wakeup_cooldown_seconds", 90),
+            "group_high_intensity_cooldown_seconds": getattr(self.plugin, "group_high_intensity_cooldown_seconds", 150),
+            "group_interject_min_interval_minutes": getattr(self.plugin, "group_interject_min_interval_minutes", 180),
+            "group_interject_max_daily": getattr(self.plugin, "group_interject_max_daily", 2),
+        }
+        changed = [
+            key
+            for key, value in effective.items()
+            if str(value) != str(configured.get(key))
+        ]
+        return {
+            "preset": self._single_line(runtime.get("preset") or "off", 40),
+            "enabled": bool(runtime.get("enabled")),
+            "label": self._single_line(runtime.get("label") or "关闭预设", 40),
+            "description": self._single_line(runtime.get("description"), 160),
+            "configured": configured,
+            "effective": effective,
+            "changed_keys": changed,
+            "note": "预设只覆盖运行态有效频率，不改写手动参数；免打扰、休息、用户拒绝、隐私和成本闸门仍然生效。",
+        }
+
     def _build_diagnostics(self, users: dict[str, Any], groups: dict[str, Any]) -> list[dict[str, str]]:
         items: list[dict[str, str]] = []
 
@@ -7441,6 +7529,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             add("ok", "主模型可见", providers.get("LLM_PROVIDER_ID") or "运行态已配置")
         else:
             add("info", "主模型留空", "会回退到 AstrBot 默认模型；建议为陪伴插件单独配置主模型")
+
+        intensity = self._proactive_intensity_summary()
+        if intensity.get("enabled"):
+            effective = intensity.get("effective") if isinstance(intensity.get("effective"), dict) else {}
+            add(
+                "warn",
+                f"正在使用主动强度预设：{intensity.get('label') or intensity.get('preset')}",
+                (
+                    f"私聊有效上限 {effective.get('max_daily_messages')} 条/天，"
+                    f"空闲 {effective.get('idle_minutes')} 分钟，"
+                    f"最小间隔 {effective.get('min_interval_minutes')} 分钟；"
+                    f"群唤醒冷却 {effective.get('group_wakeup_cooldown_seconds')} 秒，"
+                    f"群插话间隔 {effective.get('group_interject_min_interval_minutes')} 分钟。"
+                    "预设只覆盖运行态有效频率，不改写手动参数，也不会绕过免打扰、休息、用户拒绝、隐私和成本闸门。"
+                ),
+                "需要恢复原配置时，将“主动强度预设”改为关闭",
+            )
+        else:
+            add(
+                "info",
+                "主动强度预设未启用",
+                "当前完全沿用手动主动频率参数；如果想要高频主动，可在配置 → 功能开关 → 通用能力里选择预设。",
+            )
 
         tts_summary = self._tts_runtime_summary(users)
         if tts_summary.get("enhancement_enabled"):
@@ -7477,8 +7588,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             add("warn", "暂无启用的私聊对象", "私聊主动陪伴没有明确目标", "在私聊页新增对象或配置 target_user_ids")
 
         max_daily = int(getattr(self.plugin, "max_daily_messages", 0) or 0)
-        if max_daily > 0:
-            add("ok", "私聊主动额度可用", f"每日上限 {max_daily} 条")
+        effective_max_daily = max_daily
+        max_daily_getter = getattr(self.plugin, "_runtime_max_daily_messages", None)
+        if callable(max_daily_getter):
+            try:
+                effective_max_daily = int(max_daily_getter() or 0)
+            except Exception:
+                effective_max_daily = max_daily
+        if effective_max_daily > 0:
+            detail = f"每日有效上限 {effective_max_daily} 条"
+            if effective_max_daily != max_daily:
+                detail += f"（手动配置 {max_daily} 条）"
+            add("ok", "私聊主动额度可用", detail)
         else:
             add("warn", "私聊主动已关闭", "每日主动上限为 0", "在模块配置里调高每日主动上限")
 
@@ -7584,7 +7705,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             add("info", "群聊陪伴未开启", "当前不会记录群聊上下文")
 
         if features.get("enable_group_interjection"):
-            limit = int(getattr(self.plugin, "group_interject_max_daily", 0) or 0)
+            limit_getter = getattr(self.plugin, "_effective_group_interject_max_daily", None)
+            limit = int(limit_getter() if callable(limit_getter) else getattr(self.plugin, "group_interject_max_daily", 0) or 0)
             if limit > 0:
                 add("ok", "群聊插话可用", f"每群每日上限 {limit} 次")
             else:
@@ -7833,6 +7955,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 normalizer(value, getattr(self.plugin, "config", None))
                 if callable(normalizer)
                 else str(value or "quick").strip().lower()
+            )
+            return
+        if key == "proactive_intensity_preset":
+            normalizer = getattr(self.plugin, "_normalize_proactive_intensity_preset", None)
+            self.plugin.proactive_intensity_preset = (
+                normalizer(value)
+                if callable(normalizer)
+                else str(value or "off").strip().lower()
             )
             return
         if key == "storage_backend":
@@ -8103,6 +8233,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "provider_config_mode":
             self._set_provider_config_mode_value(config, value)
             return
+        if key == "proactive_intensity_preset":
+            self._set_schema_compat_value(config, key, value)
+            return
         if _set_into_config(config, key, value, allow_flat_fallback=False):
             return
         if self._set_schema_group_config_value(config, key, value):
@@ -8116,6 +8249,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         # page/API paths still read or write the flat name directly.
         self._set_schema_group_config_value(config, "provider_config_mode", value, create_group=True)
         _set_into_config(config, "provider_config_mode", value)
+
+    def _set_schema_compat_value(self, config: Any, key: str, value: Any) -> None:
+        self._set_schema_group_config_value(config, key, value, create_group=True)
+        _set_into_config(config, key, value)
 
     def _set_schema_group_config_value(self, config: Any, key: str, value: Any, *, create_group: bool = False) -> bool:
         group_key = self._schema_group_for_key(key)
@@ -8409,6 +8546,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "worldview_adaptation_prompt",
             "quiet_hours",
             "framework_session_lock_mode",
+            "proactive_intensity_preset",
             "proactive_prompt_template",
             "proactive_persona_judge_send_threshold",
             "proactive_persona_judge_cache_minutes",
@@ -9066,6 +9204,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(0, min(100, int(value)))
             except (TypeError, ValueError):
                 return 62
+        if key == "proactive_intensity_preset":
+            normalizer = getattr(self.plugin, "_normalize_proactive_intensity_preset", None)
+            return normalizer(value) if callable(normalizer) else str(value or "off").strip().lower()
         if key == "quote_skip_short_reply_chars":
             try:
                 return max(0, min(120, int(value)))

@@ -77,6 +77,16 @@ class QzoneMediaMixin:
         if until <= current:
             return ""
         reason = _single_line(state.get("last_auth_failure_reason") or "QQ 空间登录状态异常", 100)
+        if (
+            ("没有可用的 OneBot 连接" in reason or "未配置手动 QZONE_COOKIE" in reason)
+            and callable(getattr(self, "_qzone_find_runtime_bot", None))
+            and self._qzone_find_runtime_bot() is not None
+        ):
+            self._qzone_clear_auth_failure(state)
+            return ""
+        if "qzonetoken 未在 H5 首页中找到" in reason:
+            self._qzone_clear_auth_failure(state)
+            return ""
         until_text = self._qzone_format_block_until(until)
         return f"{reason}，自动说说已暂停到 {until_text}" if until_text else reason
 
@@ -135,9 +145,20 @@ class QzoneMediaMixin:
         if not isinstance(state, dict):
             return
         changed = False
-        for key in ("auth_block_until", "last_auth_status", "auth_failure_count", "last_auth_failure_source"):
+        for key in (
+            "auth_block_until",
+            "last_auth_status",
+            "auth_failure_count",
+            "last_auth_failure_source",
+            "last_auth_failure_reason",
+        ):
             if key in state:
                 state.pop(key, None)
+                changed = True
+        for key in ("last_life_publish_status", "last_emotional_vent_status"):
+            value = str(state.get(key) or "")
+            if value.startswith("paused:auth:"):
+                state[key] = "ready:auth_ok"
                 changed = True
         if changed:
             saver = getattr(self, "_save_data_sync", None)
@@ -163,7 +184,10 @@ class QzoneMediaMixin:
             ctx = self._qzone_context_from_cookies(cookie_header)
             token = ctx.get("qzonetoken") or await self._qzone_ensure_qzonetoken(event, cookie_header=cookie_header, ctx=ctx)
             if not str(token or "").strip():
-                raise RuntimeError("qzonetoken 未在 H5 首页中找到，可能 Cookie 已失效")
+                state["last_qzonetoken_status"] = "missing:h5_index"
+                logger.info("[PrivateCompanion] QQ 空间自动发布预检继续: qzonetoken 未找到,纯文字发布仍可使用 g_tk")
+            else:
+                state["last_qzonetoken_status"] = "ok"
         except Exception as exc:
             reason = _single_line(exc, 160)
             self._qzone_mark_auth_failure(reason, source=source, state=state, save=False)

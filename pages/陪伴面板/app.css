@@ -1638,6 +1638,12 @@ input[type="search"] {
   box-shadow: none;
 }
 
+.danger-outline.is-confirming {
+  background: rgba(179, 42, 42, 0.1);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
 .inline-form,
 .form-grid,
 .provider-grid {
@@ -2118,6 +2124,13 @@ body.daily-outfit-preview-open {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.qzone-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .qzone-post-badge {
@@ -3636,6 +3649,37 @@ body.daily-outfit-preview-open {
   flex-wrap: wrap;
   gap: 8px;
   align-self: end;
+}
+
+.feature-switch-item.feature-setting-inline {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-right: 0;
+}
+
+.feature-inline-setting-form {
+  display: flex;
+  min-width: min(340px, 100%);
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.feature-inline-setting-form select {
+  width: 100%;
+  min-width: 170px;
+}
+
+.feature-inline-setting-form button {
+  min-height: 34px;
+  border: 1px solid rgba(26, 75, 140, 0.26);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+  background: rgba(255,255,255,0.86);
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-family: inherit;
 }
 
 .module-tuning-note {
@@ -13047,6 +13091,21 @@ pre {
   .feature-switch-item,
   .feature-switch-item:nth-child(2n) {
     border-right: 0;
+  }
+
+  .feature-switch-item.feature-setting-inline {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .feature-inline-setting-form {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .feature-inline-setting-form select {
+    min-width: 0;
   }
 
   .current-life-strip {

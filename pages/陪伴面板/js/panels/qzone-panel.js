@@ -10,6 +10,9 @@ window.PrivateCompanionQzonePanel = (() => {
     loaded: false,
     page: 1,
     pendingLikes: new Set(),
+    pendingDeletes: new Set(),
+    deleteConfirmId: "",
+    deleteConfirmAt: 0,
     detailLoadingId: "",
     context: null,
   };
@@ -82,6 +85,7 @@ window.PrivateCompanionQzonePanel = (() => {
         <footer>
           <button type="button" data-qzone-like="${escapeHtml(post.id)}" ${state.pendingLikes.has(post.id) ? "disabled" : ""}>点赞</button>
           <button type="button" data-qzone-open="${escapeHtml(post.id)}">评论 ${escapeHtml(post.stats?.comments ?? 0)}</button>
+          ${post.can_delete ? `<button type="button" class="danger-outline" data-qzone-delete="${escapeHtml(post.id)}" ${state.pendingDeletes.has(post.id) ? "disabled" : ""}>删除</button>` : ""}
         </footer>
       </article>
     `).join("");
@@ -109,7 +113,10 @@ window.PrivateCompanionQzonePanel = (() => {
             <b>${escapeHtml(post.author?.nickname || post.author?.uin || "QQ空间用户")}</b>
             <small>${escapeHtml(post.created_at_text || "刚刚")}</small>
           </div>
-          <button type="button" data-qzone-like="${escapeHtml(post.id)}" ${state.pendingLikes.has(post.id) ? "disabled" : ""}>点赞这条</button>
+          <div class="qzone-detail-actions">
+            <button type="button" data-qzone-like="${escapeHtml(post.id)}" ${state.pendingLikes.has(post.id) ? "disabled" : ""}>点赞这条</button>
+            ${post.can_delete ? `<button type="button" class="danger-outline" data-qzone-delete="${escapeHtml(post.id)}" ${state.pendingDeletes.has(post.id) ? "disabled" : ""}>删除说说</button>` : ""}
+          </div>
         </div>
         <p class="qzone-detail-text">${escapeHtml(post.content || "无正文")}</p>
         ${Array.isArray(post.images) && post.images.length ? `
@@ -256,6 +263,67 @@ window.PrivateCompanionQzonePanel = (() => {
     }
   }
 
+  function confirmDeletePost(id, button = null) {
+    const now = Date.now();
+    if (state.deleteConfirmId === id && now - state.deleteConfirmAt <= 6000) return true;
+    state.deleteConfirmId = id;
+    state.deleteConfirmAt = now;
+    if (button) {
+      if (!button.dataset.originalText) button.dataset.originalText = button.textContent || "删除";
+      button.textContent = "再次点击删除";
+      button.classList.add("is-confirming");
+      window.setTimeout(() => {
+        if (state.deleteConfirmId === id && Date.now() - state.deleteConfirmAt >= 5900) {
+          state.deleteConfirmId = "";
+          state.deleteConfirmAt = 0;
+        }
+        if (button.isConnected && button.dataset.originalText) {
+          button.textContent = button.dataset.originalText;
+          delete button.dataset.originalText;
+          button.classList.remove("is-confirming");
+        }
+      }, 6000);
+    }
+    state.context.showToast("再次点击会删除这条说说", "warn");
+    return false;
+  }
+
+  async function deletePost(id, button = null) {
+    const cleanId = text(id).trim();
+    if (!cleanId) {
+      state.context.showToast("没有拿到说说 ID，请刷新动态后重试", "error");
+      return;
+    }
+    const post = postById(cleanId);
+    if (!post) {
+      state.context.showToast("这条说说的页面引用已失效，请刷新动态后重试", "error");
+      return;
+    }
+    if (!post.can_delete) {
+      state.context.showToast("只能删除当前登录 QQ 自己发布的说说", "error");
+      return;
+    }
+    if (state.pendingDeletes.has(cleanId)) return;
+    if (!confirmDeletePost(cleanId, button)) return;
+    state.deleteConfirmId = "";
+    state.deleteConfirmAt = 0;
+    state.pendingDeletes.add(cleanId);
+    renderFeed();
+    try {
+      state.context.showToast("正在删除说说...");
+      await state.context.postJson("/qzone/delete", { id: cleanId });
+      state.posts = state.posts.filter((item) => item.id !== cleanId);
+      if (state.selectedId === cleanId) state.selectedId = state.posts[0]?.id || "";
+      state.context.showToast("说说已删除");
+    } catch (error) {
+      state.context.showToast(`删除失败：${error.message}`, "error");
+    } finally {
+      state.pendingDeletes.delete(cleanId);
+      renderAccount();
+      renderFeed();
+    }
+  }
+
   async function publish() {
     const input = document.getElementById("qzonePublishContent");
     const content = text(input?.value).trim();
@@ -273,20 +341,42 @@ window.PrivateCompanionQzonePanel = (() => {
     }
   }
 
+  function bindDeleteEvents() {
+    const panel = document.getElementById("panel-qzone");
+    if (!panel || panel.dataset.qzoneDeleteBound === "1") return;
+    panel.dataset.qzoneDeleteBound = "1";
+    panel.addEventListener("click", async (event) => {
+      const element = event.target instanceof Element ? event.target : null;
+      const deleteButton = element?.closest("[data-qzone-delete]");
+      if (!deleteButton || !panel.contains(deleteButton)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+      await deletePost(deleteButton.dataset.qzoneDelete || "", deleteButton);
+    }, true);
+  }
+
   function bindEvents() {
     const panel = document.getElementById("panel-qzone");
     if (!panel || panel.dataset.bound === "1") return;
     panel.dataset.bound = "1";
     panel.addEventListener("click", async (event) => {
       const element = event.target instanceof Element ? event.target : null;
-      const open = element?.closest("[data-qzone-open]");
-      if (open) {
-        await openDetail(open.dataset.qzoneOpen || "");
-        return;
-      }
       const like = element?.closest("[data-qzone-like]");
       if (like) {
         await likePost(like.dataset.qzoneLike || "");
+        return;
+      }
+      const deleteButton = element?.closest("[data-qzone-delete]");
+      if (deleteButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        await deletePost(deleteButton.dataset.qzoneDelete || "", deleteButton);
+        return;
+      }
+      const open = element?.closest("[data-qzone-open]");
+      if (open) {
+        await openDetail(open.dataset.qzoneOpen || "");
         return;
       }
       const scopeButton = element?.closest("[data-qzone-scope]");
@@ -344,6 +434,7 @@ window.PrivateCompanionQzonePanel = (() => {
 
   async function render(context) {
     state.context = context;
+    bindDeleteEvents();
     bindEvents();
     renderAccount();
     renderFeed();

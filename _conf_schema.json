@@ -543,6 +543,12 @@
     "default": 8,
     "invisible": true
   },
+  "proactive_intensity_preset": {
+    "description": "Legacy flat config: 主动强度预设",
+    "type": "string",
+    "default": "off",
+    "invisible": true
+  },
   "inbound_message_debounce_seconds": {
     "description": "Legacy flat config: 重复消息防抖秒数",
     "type": "float",
@@ -3407,10 +3413,23 @@
     }
   },
   "proactive_reach_config": {
-    "description": "主动触达上限",
+    "description": "主动频率与强度",
     "type": "object",
-    "hint": "控制私聊主动每日上限和入站消息合并等待。",
+    "hint": "控制主动频率、私聊主动每日上限和入站消息合并等待。主动强度预设默认关闭；开启后只作为运行态覆盖层，不会改写下方手动参数。",
     "items": {
+      "proactive_intensity_preset": {
+        "description": "主动强度预设",
+        "type": "string",
+        "hint": "默认 off 表示完全沿用手动参数。选择预设后，会在运行态降低/提高私聊主动、群聊唤醒和插话的有效频率，并在排障页显示当前覆盖项；扩展页入口位于配置 → 功能开关 → 通用能力。不会绕过免打扰、休息、用户拒绝、隐私和成本闸门。",
+        "default": "off",
+        "options": [
+          "off",
+          "balanced",
+          "high_private",
+          "high_group",
+          "live"
+        ]
+      },
       "max_daily_messages": {
         "description": "每日最多主动消息数",
         "type": "int",
@@ -5217,7 +5236,7 @@
       "QZONE_COOKIE": {
         "description": "QQ 空间手动 Cookie",
         "type": "text",
-        "hint": "可填写浏览器 QQ 空间 Cookie，作为查看、评论、点赞和发布说说的优先凭据。留空时仍使用 OneBot 自动 Cookie。需包含 uin/p_uin 与 p_skey 或 skey。",
+        "hint": "可填写浏览器 QQ 空间 Cookie，作为查看、评论、点赞和发布说说的优先凭据。留空时仍使用 OneBot 自动 Cookie。需包含 uin/p_uin 与 p_skey 或 skey；填写后可在 QQ 空间页点击刷新 Cookies，或到排障中心测试 QQ 空间链路。",
         "default": "",
         "condition": {
           "enable_qzone_integration": true

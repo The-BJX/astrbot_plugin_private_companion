@@ -534,6 +534,9 @@ class PrivateCompanionPlugin(
 
         self.enabled = self._cfg_bool(c, "enabled", True)
         self.enable_proactive_only_mode = self._cfg_bool(c, "enable_proactive_only_mode", False)
+        self.proactive_intensity_preset = self._normalize_proactive_intensity_preset(
+            self._cfg_str(c, "proactive_intensity_preset", "off", "off")
+        )
         self.check_interval_seconds = self._cfg_int(c, "check_interval_seconds", 60, 30)
         self.idle_minutes = self._cfg_int(c, "idle_minutes", 60, 5)
         self.min_interval_minutes = self._cfg_int(c, "min_interval_minutes", 120, 10)
@@ -1549,6 +1552,7 @@ class PrivateCompanionPlugin(
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
     async def observe_recall_enhancement_events(self, event: AstrMessageEvent):
         """记录普通消息和 QQ/OneBot 撤回事件，用于撤回增强。"""
+        self._qzone_note_event_bot(event)
         if not self.enabled:
             return
         self._note_inbound_activity_for_scope(event)
@@ -5538,6 +5542,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_llm_request()
+    async def inject_tts_enhancement_request_fallback(self, event: AstrMessageEvent, req: ProviderRequest):
+        """TTS 请求规则独立兜底，避免被状态注入链路早退顺手跳过。"""
+        if not self.enabled:
+            return
+        if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
+            return
+        await self.apply_tts_enhancement_request(event, req)
+
+    @filter.on_llm_request()
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM 请求前注入陪伴状态、群聊上下文、工具边界和合并消息阅读上下文。"""
         def log_bookshelf_secret_skip(reason: str, user: dict[str, Any] | None = None, text: str = "") -> None:
@@ -6869,6 +6882,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         companion_manual_cancel_actions = {"答疑取消", "排障取消", "诊断取消", "取消答疑建议", "取消建议"}
         companion_manual_setting_actions = {"答疑设置", "排障设置", "诊断设置", "答疑修改", "排障修改", "诊断修改"}
         daily_outfit_view_actions = {"今日穿搭图", "今日穿搭", "查看穿搭图", "查看穿搭", "穿搭图", "每日穿搭图", "每日穿搭", "当前穿搭图", "当前穿搭", "展示穿搭图"}
+        photo_command_actions = {"生图", "画图", "绘图", "生成图片", "出图", "自拍", "拍照", "拍一张", "改图", "修图", "重绘", "P图", "p图"}
         if action in companion_manual_query_actions:
             inline_value = value.strip()
             if inline_value in {"确认", "应用", "执行", "确认执行", "应用建议"}:
@@ -6928,6 +6942,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI日报", "ai日报", "日报", "AI早报", "ai早报", "早报",
             "TTS语种", "tts语种", "语音语种", "TTS", "tts",
             *companion_manual_query_actions,
+            *photo_command_actions,
         }
 
         is_private = bool(getattr(event, "is_private_chat", lambda: False)())
@@ -7031,6 +7046,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response = await self._photo_reference_command_text(event, user_id, value)
             elif action in daily_outfit_view_actions:
                 response, response_image_path = self._daily_outfit_command_payload()
+            elif action in photo_command_actions:
+                response = "正在准备图片。"
             elif action in {"查看主动判定", "主动判定", "判定"}:
                 response = self._explain_proactive_decision(user)
             elif action in {"能力列表", "主动能力", "工具列表"}:
@@ -7157,6 +7174,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if action in companion_manual_query_actions:
             await self._reply(event, await self._companion_manual_answer(event, value))
             event.stop_event()
+            return
+        if action in photo_command_actions:
+            await self._handle_companion_photo_command(event, user_id, action, value)
             return
         if action in {"发说说", "发QQ空间", "发布说说", "空间发布", "发布空间"}:
             image_sources = await self._qzone_image_sources_from_event(event)

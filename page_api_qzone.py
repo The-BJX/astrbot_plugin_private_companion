@@ -95,16 +95,31 @@ class PrivateCompanionPageApiQzoneMixin:
                 posts = parse_recent_feeds(raw)
                 return self._ok(
                     {
-                        "items": [self._qzone_page_post_payload(post, include_comments=False) for post in posts[:10]],
+                        "items": [
+                            self._qzone_page_post_payload(post, include_comments=False, viewer_uin=int(ctx.get("uin") or 0))
+                            for post in posts[:10]
+                        ],
                         "scope": scope,
                         "page": page,
                         "target_uin": target,
                     }
                 )
-            posts = await self.plugin._qzone_query_feeds(None, target_id=target or None, pos=0, num=10, with_detail=False)
+            cookie_header = await self.plugin._qzone_get_cookies(None)
+            ctx = self.plugin._qzone_context_from_cookies(cookie_header)
+            posts = await self.plugin._qzone_query_feeds(
+                None,
+                target_id=target or None,
+                pos=0,
+                num=10,
+                with_detail=False,
+                cookie_header=cookie_header,
+            )
             return self._ok(
                 {
-                    "items": [self._qzone_page_post_payload(post, include_comments=False) for post in posts],
+                    "items": [
+                        self._qzone_page_post_payload(post, include_comments=False, viewer_uin=int(ctx.get("uin") or 0))
+                        for post in posts
+                    ],
                     "scope": scope,
                     "page": page,
                     "target_uin": target,
@@ -117,9 +132,18 @@ class PrivateCompanionPageApiQzoneMixin:
         try:
             post_id = self._single_line(request.args.get("id"), 120)
             post = self._qzone_page_resolve_post(post_id)
-            refreshed = await self.plugin._qzone_query_feeds(None, target_id=str(getattr(post, "uin", "") or ""), pos=0, num=10, with_detail=True)
+            cookie_header = await self.plugin._qzone_get_cookies(None)
+            ctx = self.plugin._qzone_context_from_cookies(cookie_header)
+            refreshed = await self.plugin._qzone_query_feeds(
+                None,
+                target_id=str(getattr(post, "uin", "") or ""),
+                pos=0,
+                num=10,
+                with_detail=True,
+                cookie_header=cookie_header,
+            )
             matched = next((item for item in refreshed if str(getattr(item, "tid", "") or "") == str(getattr(post, "tid", "") or "")), post)
-            return self._ok({"post": self._qzone_page_post_payload(matched, include_comments=True)})
+            return self._ok({"post": self._qzone_page_post_payload(matched, include_comments=True, viewer_uin=int(ctx.get("uin") or 0))})
         except Exception as exc:
             return self._error(str(exc))
 
@@ -175,7 +199,23 @@ class PrivateCompanionPageApiQzoneMixin:
                 )
             )
             setattr(post, "comments", comments)
-            return self._ok({"post": self._qzone_page_post_payload(post, include_comments=True)})
+            return self._ok({"post": self._qzone_page_post_payload(post, include_comments=True, viewer_uin=author_uin)})
+        except Exception as exc:
+            return self._error(str(exc))
+
+    async def delete_qzone_post(self) -> dict[str, Any]:
+        try:
+            payload = await request.get_json(silent=True) or {}
+            post = self._qzone_page_resolve_post(self._single_line(payload.get("id"), 120))
+            cookie_header = await self.plugin._qzone_get_cookies(None)
+            ctx = self.plugin._qzone_context_from_cookies(cookie_header)
+            viewer_uin = int(ctx.get("uin") or 0)
+            if not self._qzone_page_can_delete(post, viewer_uin=viewer_uin):
+                return self._error("只能删除当前登录 QQ 自己发布的说说")
+            await self.plugin._qzone_delete_post(None, post, cookie_header=cookie_header)
+            post_id = self._qzone_page_post_id(post)
+            self._qzone_page_store().pop(post_id, None)
+            return self._ok({"deleted": True, "id": post_id})
         except Exception as exc:
             return self._error(str(exc))
 
@@ -248,7 +288,17 @@ class PrivateCompanionPageApiQzoneMixin:
                 return False
         return bool(getattr(post, "liked", False))
 
-    def _qzone_page_post_payload(self, post: Any, *, include_comments: bool = False) -> dict[str, Any]:
+    @staticmethod
+    def _qzone_page_can_delete(post: Any, *, viewer_uin: int = 0) -> bool:
+        if not viewer_uin:
+            return False
+        try:
+            post_uin = int(getattr(post, "uin", 0) or 0)
+        except Exception:
+            post_uin = 0
+        return bool(post_uin and post_uin == int(viewer_uin))
+
+    def _qzone_page_post_payload(self, post: Any, *, include_comments: bool = False, viewer_uin: int = 0) -> dict[str, Any]:
         payload = {
             "id": self._qzone_page_remember_post(post),
             "tid": self._single_line(getattr(post, "tid", ""), 80),
@@ -265,7 +315,7 @@ class PrivateCompanionPageApiQzoneMixin:
                 "comments": len(getattr(post, "comments", []) or []),
             },
             "liked": self._qzone_page_liked(post),
-            "can_delete": False,
+            "can_delete": self._qzone_page_can_delete(post, viewer_uin=viewer_uin),
         }
         if include_comments:
             payload["comments"] = [

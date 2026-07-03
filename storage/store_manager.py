@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 
+from . import cleanup_storage_bytecode_cache
 from .factory import build_store_backend
 from .json_backend import JsonStoreBackend
 from .migration import migrate_json_to_backend_if_needed
@@ -20,6 +21,7 @@ class StoreManager:
         ensure_defaults: Callable[[dict[str, Any]], dict[str, Any]],
         new_store: Callable[[], dict[str, Any]],
     ) -> None:
+        cleanup_storage_bytecode_cache()
         self.backend_name = str(backend_name or "json").strip().lower() or "json"
         self.data_file = Path(data_file)
         self.sqlite_path = Path(sqlite_path)

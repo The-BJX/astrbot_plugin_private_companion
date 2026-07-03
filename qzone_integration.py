@@ -44,8 +44,25 @@ class QzoneMixin(QzoneMediaMixin):
     def _qzone_note_event_bot(self, event: AstrMessageEvent | None) -> None:
         """Cache the latest OneBot connection for background Qzone jobs."""
         bot = getattr(event, "bot", None) if event is not None else None
-        if bot is not None:
-            self._qzone_last_bot = bot
+        if bot is None:
+            return
+        for candidate in self._qzone_runtime_bot_candidates(bot):
+            if self._qzone_runtime_bot_usable(candidate):
+                self._qzone_last_bot = candidate
+                self._qzone_clear_no_onebot_auth_failure()
+                return
+        self._qzone_last_bot = bot
+
+    def _qzone_clear_no_onebot_auth_failure(self) -> None:
+        state = self._qzone_state_dict()
+        if not isinstance(state, dict):
+            return
+        reason = str(state.get("last_auth_failure_reason") or "")
+        if "没有可用的 OneBot 连接" not in reason and "未配置手动 QZONE_COOKIE" not in reason:
+            return
+        clearer = getattr(self, "_qzone_clear_auth_failure", None)
+        if callable(clearer):
+            clearer(state)
 
     @staticmethod
     def _qzone_runtime_bot_usable(candidate: Any) -> bool:
@@ -366,7 +383,11 @@ class QzoneMixin(QzoneMediaMixin):
             try:
                 ctx = self._qzone_context_from_cookies(manual_cookie)
             except Exception as exc:
-                raise RuntimeError(f"手动 QZONE_COOKIE 不可用：{_single_line(exc, 120)}") from exc
+                raise RuntimeError(
+                    "手动 QZONE_COOKIE 不可用："
+                    f"{_single_line(exc, 120)}；"
+                    "需包含 uin/p_uin 与 p_skey 或 skey，可从已登录 QQ 空间的浏览器请求头 Cookie 复制"
+                ) from exc
             logger.debug("[PrivateCompanion] QQ 空间使用手动 QZONE_COOKIE: uin=%s", ctx.get("uin"))
             return ctx["cookie_header"]
         bot = getattr(event, "bot", None) if event is not None else None
@@ -382,7 +403,10 @@ class QzoneMixin(QzoneMediaMixin):
         if bot is not None:
             self._qzone_last_bot = bot
         if bot is None:
-            raise RuntimeError("没有可用的 OneBot 连接，无法获取 QQ 空间 Cookie")
+            raise RuntimeError(
+                "没有可用的 OneBot 连接，且未配置手动 QZONE_COOKIE；"
+                "请在配置页填写浏览器 QQ 空间 Cookie，或确认 OneBot 已连接并支持 get_cookies/get_credentials"
+            )
         direct_cookies = await self._qzone_try_direct_cookie_fetch(bot, self._QZONE_COOKIE_DOMAIN)
         if self._qzone_normalize_uin(direct_cookies) and (direct_cookies.get("p_skey") or direct_cookies.get("pskey") or direct_cookies.get("skey")):
             cookie_text = self._qzone_cookie_header(direct_cookies)
@@ -458,7 +482,8 @@ class QzoneMixin(QzoneMediaMixin):
             "获取 QQ 空间 Cookie 失败"
             f"（uin={'有' if self._qzone_normalize_uin(merged) else '无'}"
             f"，skey={'有' if bool(merged.get('skey')) else '无'}"
-            f"，p_skey={'有' if bool(merged.get('p_skey') or merged.get('pskey')) else '无'}）"
+            f"，p_skey={'有' if bool(merged.get('p_skey') or merged.get('pskey')) else '无'}）；"
+            "可改填手动 QZONE_COOKIE，需包含 uin/p_uin 与 p_skey 或 skey"
         )
 
     @staticmethod
@@ -880,6 +905,72 @@ class QzoneMixin(QzoneMediaMixin):
             typeid,
             fid,
         )
+
+    async def _qzone_delete_post(
+        self,
+        event: AstrMessageEvent | None,
+        post: Any,
+        *,
+        cookie_header: str | None = None,
+    ) -> None:
+        if cookie_header is None:
+            cookie_header = await self._qzone_get_cookies(event)
+        ctx = self._qzone_context_from_cookies(cookie_header)
+        tid = str(getattr(post, "tid", "") or "")
+        uin = str(getattr(post, "uin", "") or "")
+        if not tid or not uin:
+            raise RuntimeError("说说 tid 或 uin 为空，无法删除")
+        if str(ctx.get("uin") or "") != uin:
+            raise RuntimeError("只能删除当前登录 QQ 自己发布的说说")
+        appid = str(self._qzone_post_value(post, "appid", "311") or "311")
+        fid = str(self._qzone_post_value(post, "fid", tid) or tid)
+        unikey = str(self._qzone_post_value(post, "unikey", "") or "") or f"https://user.qzone.qq.com/{uin}/mood/{tid}"
+        curkey = str(self._qzone_post_value(post, "curkey", "") or "") or unikey
+        abstime = _safe_int(self._qzone_post_value(post, "abstime", 0), 0, 0)
+        if abstime <= 0:
+            abstime = _safe_int(getattr(post, "create_time", 0), 0, 0)
+        payload = await self._qzone_request(
+            event,
+            "POST",
+            "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_delete_v6",
+            params={"g_tk": ctx["gtk"]},
+            data={
+                "hostuin": uin,
+                "tid": tid,
+                "t1_source": 1,
+                "code_version": 1,
+                "format": "json",
+                "qzreferrer": f"https://user.qzone.qq.com/{uin}/mood/{tid}",
+                "topicId": f"{uin}_{tid}__1",
+                "uin": uin,
+                "feedsType": 100,
+                "feedsAppid": appid,
+                "feedsKey": fid or tid,
+                "feedsTime": abstime,
+                "unikey": unikey,
+                "curkey": curkey,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": f"https://user.qzone.qq.com/{uin}/mood/{tid}",
+                "Origin": "https://user.qzone.qq.com",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            cookie_header=cookie_header,
+        )
+        code = payload.get("code", payload.get("ret", payload.get("_raw_code", 0)))
+        if code not in {0, "0", None, ""}:
+            logger.warning(
+                "[PrivateCompanion] QQ 空间删除说说失败: code=%s message=%s uin=%s tid=%s http=%s",
+                code,
+                _single_line(payload.get("message") or payload.get("msg") or payload.get("_raw_message"), 100),
+                uin,
+                tid,
+                payload.get("_http_status"),
+            )
+            raise RuntimeError(_single_line(payload.get("message") or payload.get("msg") or f"删除失败 code={code}", 160))
+        logger.info("[PrivateCompanion] QQ 空间删除说说成功: uin=%s tid=%s", uin, tid)
 
     async def _qzone_generate_comment(self, post: Any) -> str:
         prompt = f"""

@@ -3441,6 +3441,180 @@ class CommandHandlersMixin:
         event.stop_event()
         return True
 
+    async def _handle_companion_photo_command(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        action: str,
+        value: str,
+    ) -> bool:
+        """Run the plugin image backend from an explicit /陪伴 command."""
+        action_text = _single_line(action, 24)
+        prompt = _single_line(value, 800).strip()
+        action_kind_map = {
+            "自拍": "selfie",
+            "拍照": "selfie",
+            "拍一张": "selfie",
+            "改图": "edit",
+            "修图": "edit",
+            "重绘": "edit",
+            "P图": "edit",
+            "p图": "edit",
+        }
+        forced_kind = action_kind_map.get(action_text, "text2img")
+        if not getattr(self, "enable_photo_text_action", False):
+            await self._reply(event, self._natural_language_photo_disabled_text("photo_off"))
+            event.stop_event()
+            return True
+
+        has_reference = bool(self._private_event_has_image(event) if callable(getattr(self, "_private_event_has_image", None)) else False)
+        has_reference = has_reference or bool(self._photo_reference_sources_from_reply_cache(event))
+        if not has_reference:
+            has_reference = bool(await self._photo_reference_sources_from_reply_event(event))
+
+        compact = re.sub(r"\s+", "", prompt)
+        if forced_kind == "text2img":
+            if any(marker in compact for marker in ("自拍", "拍照", "拍张照", "拍一张照", "来张自拍", "发张自拍")):
+                forced_kind = "selfie"
+            elif has_reference and any(marker in compact for marker in ("改图", "修图", "重绘", "p图", "P图", "改成", "改为", "换成", "变成", "加上", "去掉", "去除")):
+                forced_kind = "edit"
+
+        if forced_kind == "selfie" and not prompt:
+            prompt = "拍一张自拍"
+        if not prompt:
+            usage = (
+                "请这样使用：\n"
+                "陪伴 生图 <画面描述>\n"
+                "陪伴 自拍 [画面要求]\n"
+                "陪伴 改图 <修改要求>（需要带图或回复图片）"
+            )
+            await self._reply(event, usage)
+            event.stop_event()
+            return True
+
+        async with self._data_lock:
+            user = self._get_user(user_id)
+            if not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)):
+                await self._reply(event, "这个生图入口只对已启用的陪伴对象开放。")
+                event.stop_event()
+                return True
+            if self._private_user_role(user, user_id) == "friend":
+                await self._reply(event, "这个指令生图/改图入口只给主人开放。")
+                event.stop_event()
+                return True
+            if self._natural_language_photo_quota_left(user) <= 0:
+                await self._reply(event, "今天指令生图/改图额度用完了。")
+                event.stop_event()
+                return True
+
+        if not self._photo_text_available():
+            await self._reply(event, "现在没有可用的生图后端，先画不了。")
+            event.stop_event()
+            return True
+
+        reference_path = ""
+        reference_label = ""
+        if forced_kind == "edit":
+            reference_path, reference_label, saw_image = await self._photo_reference_image_from_command_context(event, user_id)
+            logger.info(
+                "[PrivateCompanion] 指令改图参考图解析: user=%s saw_image=%s label=%s path=%s exists=%s",
+                _single_line(user_id, 40),
+                saw_image,
+                _single_line(reference_label, 40),
+                _single_line(reference_path, 180),
+                bool(reference_path and Path(reference_path).exists()),
+            )
+            if not reference_path:
+                await self._reply(
+                    event,
+                    "我没拿到要改的图。可以把图片和“陪伴 改图 <要求>”一起发，或者引用近期图片再用这个指令。"
+                    if not saw_image
+                    else "看到了图片，但没能保存成可用参考图，暂时改不了。",
+                )
+                event.stop_event()
+                return True
+
+        memory_context = ""
+        memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
+        if callable(memory_getter):
+            try:
+                memory_context = await memory_getter(
+                    kind="command_photo",
+                    query=(
+                        f"指令生图 {forced_kind} {prompt} "
+                        "今日穿搭 当前地点 当前日程 最近自拍 用户偏好 衣服颜色"
+                    ),
+                    event=event,
+                    user_id=user_id,
+                    top_k=5,
+                    max_chars=760,
+                    timeout_seconds=1.5,
+                )
+            except Exception:
+                memory_context = ""
+
+        prompt_text = self._build_natural_language_photo_prompt(
+            prompt=prompt,
+            kind=forced_kind,
+            has_reference=bool(reference_path),
+            memory_context=memory_context,
+        )
+        workflow_kind = "selfie" if reference_path or forced_kind == "selfie" else "text2img"
+        async with self._data_lock:
+            user = self._get_user(user_id)
+            user_snapshot = dict(user)
+        ack_text = await self._natural_language_photo_ack_reply_text(
+            event,
+            user_snapshot,
+            kind=forced_kind,
+            has_reference=bool(reference_path),
+        )
+        await self._reply(event, ack_text)
+        backend_name, image_path, note = await self._generate_photo_image(
+            workflow_kind=workflow_kind,
+            prompt_text=prompt_text,
+            session_key=f"command_photo_{user_id}",
+            reference_image_path=reference_path,
+        )
+        logger.info(
+            "[PrivateCompanion] 指令生图结果: user=%s action=%s backend=%s ok=%s note=%s image=%s",
+            _single_line(user_id, 40),
+            action_text,
+            _single_line(backend_name, 80),
+            bool(image_path),
+            _single_line(note, 180),
+            _single_line(image_path, 180),
+        )
+        counted = bool(image_path)
+        if not image_path and callable(getattr(self, "_photo_generation_failure_counts_as_attempt", None)):
+            counted = bool(self._photo_generation_failure_counts_as_attempt(note))
+        if counted:
+            async with self._data_lock:
+                user = self._get_user(user_id)
+                self._note_natural_language_photo_generation_attempt(user, image_path=image_path)
+                self._save_data_sync()
+        if not image_path:
+            await self._reply(
+                event,
+                f"这次没生成出来：{_single_line(note, 160) or '后端没有返回图片'}"
+                + ("\n这次已经计入今日指令生图额度，避免后端异常时反复请求。" if counted else ""),
+            )
+            event.stop_event()
+            return True
+        caption = await self._natural_language_photo_done_reply_text(
+            event,
+            user_snapshot,
+            kind=forced_kind,
+            reference_label=reference_label,
+        )
+        chain = self._build_outbound_chain(caption, image_path)
+        try:
+            await event.send(self._build_result_from_chain(chain))
+        except Exception:
+            await event.send(event.chain_result(chain))
+        event.stop_event()
+        return True
+
     async def _group_companion_command_impl(self, event: AstrMessageEvent):
         group_id = self._extract_group_id_from_event(event)
         if not group_id:
