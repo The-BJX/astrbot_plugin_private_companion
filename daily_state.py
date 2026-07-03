@@ -375,6 +375,20 @@ class DailyStateMixin:
                     "[PrivateCompanion] 今日日记已保存,但梦境碎片合并失败: %s",
                     _single_line(exc, 180),
                 )
+            # Record dream fragments to memory plugin for cross-session continuity
+            try:
+                dream_fragments = diary.get("dream_fragments", []) if isinstance(diary, dict) else []
+                if isinstance(dream_fragments, list) and dream_fragments:
+                    fragment = dream_fragments[0] if isinstance(dream_fragments[0], dict) else {}
+                    content = _single_line(fragment.get("content") or fragment.get("text") or fragment.get("dream"), 600)
+                    if content:
+                        await self._memory_companion_record_dream_fragment(
+                            content=content,
+                            mood=_single_line(fragment.get("mood") or fragment.get("emotion"), 40),
+                            dream_type=_single_line(fragment.get("type") or fragment.get("theme"), 40),
+                        )
+            except Exception:
+                pass
             story_plan = diary.get("story_plan") if isinstance(diary, dict) else None
             if isinstance(story_plan, dict):
                 self.data["daily_story_plan"] = story_plan

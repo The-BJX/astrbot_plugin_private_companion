@@ -1196,6 +1196,22 @@ class ProactiveMessageMixin:
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
+        # Search for unresolved open-loop / promise memories from the memory plugin
+        open_loops_hint = ""
+        try:
+            umo = str(user.get("umo") or "").strip()
+            if umo:
+                open_loops = await self._memory_companion_search_open_loops(session_id=umo, limit=2)
+                if open_loops:
+                    loop_texts = []
+                    for loop in open_loops[:2]:
+                        content_preview = _single_line(loop.get("content"), 80)
+                        age = loop.get("age_days")
+                        age_str = f"（{age:.0f}天前）" if age is not None else ""
+                        loop_texts.append(f"- {content_preview}{age_str}")
+                    open_loops_hint = "你心里还挂着这些没完成的事，如果自然可以提一下：\n" + "\n".join(loop_texts)
+        except Exception:
+            pass
         current_schedule = self._sanitize_schedule_context_for_private_user(current_schedule, user)
         compact_motive = _single_line(motive, 36) or "有一点想靠近对方"
         topic_hint = _single_line(user.get("planned_proactive_topic"), 40)
@@ -1228,6 +1244,7 @@ class ProactiveMessageMixin:
             "{{action_context}}": action_prompt_context if action_prompt_context and action_prompt_context != "（无额外上下文）" else "什么都没做,就是忽然想来找你",
             "{{unanswered_count}}": str(unanswered_count) if unanswered_count > 0 else "",
             "{{unanswered_hint}}": unanswered_hint,
+            "{{open_loops_hint}}": open_loops_hint,
             "{{current_time}}": current_time,
         }
         for key, value in replacements.items():
@@ -1239,6 +1256,8 @@ class ProactiveMessageMixin:
         delivery_hint = self._proactive_natural_delivery_hint()
         if delivery_hint and "自然交付提醒" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{delivery_hint}"
+        if open_loops_hint and "没完成的事" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{open_loops_hint}"
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(memory_getter):
             user_id = _single_line(user.get("user_id") or user.get("id"), 80)
@@ -1958,6 +1977,11 @@ class ProactiveMessageMixin:
         umo = str(user.get("umo") or "").strip()
         if not umo:
             return ""
+        # Pull cross-session emotional drift before generating proactive message
+        try:
+            self._memory_companion_apply_emotional_drift(session_id="")
+        except Exception:
+            pass
         prompt = await self._build_framework_proactive_prompt(
             user=user,
             name=name,

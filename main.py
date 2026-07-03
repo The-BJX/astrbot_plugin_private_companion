@@ -427,7 +427,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.6.6",
+    "5.6.7",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -7490,6 +7490,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             safe_text = self._sanitize_orphan_tts_placeholders(text)
             fast_user["last_user_message"] = safe_text or text
             fast_user["last_user_message_at"] = received_ts
+            self._memory_companion_apply_emotional_drift(session_id=event.unified_msg_origin or "")
             self._memory_companion_attach_private_context(
                 event,
                 user_id=user_id,
@@ -8424,4 +8425,3 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if seconds < 86400:
             return f"{int(seconds // 3600)} 小时前"
         return f"{int(seconds // 86400)} 天前"
-

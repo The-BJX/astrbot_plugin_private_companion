@@ -4,7 +4,14 @@
 
 ## 5.6.7
 
-- 修复群聊观察可能完全没有数据的问题：当 AstrBot 默认主链或其他插件已提前设置回复结果时，陪伴插件不再整条跳过群聊观察，而是只记录消息、群友、话题和黑话，不再触发唤醒、收口或插话，避免出现“群名单可用但消息数一直为 0”。
+- 深化 RememberYou 拟人化联动：情绪漂移、梦境碎片、未完成话题和跨窗口情绪连续性全面接入。
+- 私聊消息处理前自动拉取 RememberYou 情绪漂移：`_memory_companion_apply_emotional_drift()` 在每次私聊前调用，从记忆插件拉取待处理情绪事件（伤痕触动/温暖回忆/脆弱共鸣），按安全阀（单次 ±10 能量上限）应用到 `daily_state` 的能量和心情底色。
+- 跨窗口情绪连续性：情绪漂移拉取时同时通过 `bridge.get_recent_emotional_state()` 获取全局跨会话情绪摘要，以 30% 强度叠加到当前会话（如窗口 A 刚翻到伤痕记忆，窗口 B 的 Bot 也会微妙低落），不泄露具体内容。
+- 主动消息生成前拉取跨会话情绪漂移：`proactive_message.py` 在构建主动消息提示词前以 `session_id=""` 调用 `_memory_companion_apply_emotional_drift()`，让主动消息也受全局情绪影响。
+- 主动消息从记忆 open-loop 取材：`proactive_message.py` 生成前通过 `_memory_companion_search_open_loops()` 检索未完成的承诺和话题，注入到主动消息提示词中，形成承诺兑现闭环。
+- 梦境碎片写入记忆库：`daily_state.py` 日记生成后，将首条梦境碎片通过 `_memory_companion_record_dream_fragment()` 写入 RememberYou，带上 `dream_fragment` 标签和查询锚点（"梦境/梦到/做梦/梦见"），支持跨会话梦境连续性。
+- 新增 `_memory_companion_get_relationship_phase()` 方法：可从 RememberYou 拉取当前关系阶段状态（phase/momentum/touch_count），供主动陪伴决策参考。
+- 情绪漂移日志增强：`mood_drift_log` 新增 `cross_window_delta` 字段，便于排障跨窗口情绪传递效果。
 
 ## 5.6.6
 
