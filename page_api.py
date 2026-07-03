@@ -296,6 +296,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "updated_at": self._single_line(usage.get("updated_at"), 24),
             "totals": totals,
             "budget": budget,
+            "memory_plugin": self._token_memory_plugin_payload(self._memory_plugin_token_usage_raw()),
             "partial": True,
         }
 
@@ -12042,10 +12043,26 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return {"window": key, "start": 99999}
         return {"window": f"{self.plugin._minutes_to_hhmm(start)}-{self.plugin._minutes_to_hhmm(end)}", "start": start}
 
+    def _memory_plugin_token_usage_raw(self) -> dict[str, Any]:
+        getter = getattr(self.plugin, "_memory_companion_token_usage_summary", None)
+        if not callable(getter):
+            return {"available": False, "display_name": "我会牢牢记住你", "reason": "陪伴插件当前未接入记忆插件桥"}
+        try:
+            usage = getter()
+        except Exception as exc:
+            return {"available": False, "display_name": "我会牢牢记住你", "reason": self._single_line(exc, 160)}
+        if not isinstance(usage, dict):
+            return {"available": False, "display_name": "我会牢牢记住你", "reason": "记忆插件返回的 Token 统计格式无效"}
+        usage.setdefault("available", True)
+        usage.setdefault("display_name", "我会牢牢记住你")
+        usage.setdefault("counted_in_private_companion_budget", False)
+        return usage
+
     def _token_stats_payload(self, usage: Any) -> dict[str, Any]:
         if not isinstance(usage, dict):
             usage = {}
         external_usage = usage.get("external") if isinstance(usage.get("external"), dict) else {}
+        memory_plugin_usage = self._memory_plugin_token_usage_raw()
         totals = self._token_bucket(usage.get("totals"))
         by_provider = self._token_ranked_map(usage.get("by_provider"))
         by_task = self._token_ranked_map(usage.get("by_task"))
@@ -12150,6 +12167,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "budget": budget,
             "recent": recent,
             "external": self._token_external_payload(external_usage),
+            "memory_plugin": self._token_memory_plugin_payload(memory_plugin_usage),
         }
 
     def _token_external_payload(self, usage: Any) -> dict[str, Any]:
@@ -12206,6 +12224,69 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "by_provider": self._token_ranked_map(usage.get("by_provider")),
             "by_task": self._token_ranked_map(usage.get("by_task")),
             "by_session": self._token_ranked_map(usage.get("by_session")),
+            "by_day": by_day,
+            "by_day_detail": by_day_detail,
+            "by_hour": self._token_series_map(usage.get("by_hour"), limit=48),
+            "recent": recent,
+        }
+
+    def _token_memory_plugin_payload(self, usage: Any) -> dict[str, Any]:
+        if not isinstance(usage, dict):
+            usage = {"available": False}
+        available = bool(usage.get("available", True))
+        by_day = self._token_series_map(usage.get("by_day"), limit=30)
+        by_day_provider_raw = usage.get("by_day_provider") if isinstance(usage.get("by_day_provider"), dict) else {}
+        by_day_task_raw = usage.get("by_day_task") if isinstance(usage.get("by_day_task"), dict) else {}
+        by_day_detail = []
+        for item in by_day:
+            day_key = item.get("key", "")
+            by_day_detail.append(
+                {
+                    **item,
+                    "providers": self._token_ranked_map(by_day_provider_raw.get(day_key))[:5],
+                    "tasks": self._token_ranked_map(by_day_task_raw.get(day_key))[:8],
+                }
+            )
+        recent = []
+        recent_raw = usage.get("recent")
+        if isinstance(recent_raw, list):
+            for item in recent_raw[-80:][::-1]:
+                if not isinstance(item, dict):
+                    continue
+                recent.append(
+                    {
+                        "time": self._single_line(item.get("time"), 24),
+                        "ts": self._float(item.get("ts")),
+                        "provider": self._single_line(item.get("provider"), 80),
+                        "task": self._single_line(item.get("task"), 60),
+                        "success": bool(item.get("success", True)),
+                        "prompt_tokens": self._int(item.get("prompt_tokens")),
+                        "completion_tokens": self._int(item.get("completion_tokens")),
+                        "total_tokens": self._int(item.get("total_tokens")),
+                        "cached_tokens": self._int(item.get("cached_tokens")),
+                        "cache_read_tokens": self._int(item.get("cache_read_tokens")),
+                        "cache_write_tokens": self._int(item.get("cache_write_tokens")),
+                        "estimated": bool(item.get("estimated", False)),
+                        "elapsed_ms": self._int(item.get("elapsed_ms")),
+                        "prompt_chars": self._int(item.get("prompt_chars")),
+                        "completion_chars": self._int(item.get("completion_chars")),
+                        "error": self._single_line(item.get("error"), 160),
+                    }
+                )
+        return {
+            "available": available,
+            "display_name": self._single_line(usage.get("display_name") or "我会牢牢记住你", 80),
+            "plugin_name": self._single_line(usage.get("plugin_name") or "astrbot_plugin_memory_companion", 80),
+            "reason": self._single_line(usage.get("reason"), 160),
+            "note": self._single_line(
+                usage.get("note") or "仅展示记忆插件自身模型消耗，不计入陪伴插件每日 Token 限额。",
+                220,
+            ),
+            "counted_in_private_companion_budget": bool(usage.get("counted_in_private_companion_budget", False)),
+            "updated_at": self._single_line(usage.get("updated_at"), 24),
+            "totals": self._token_bucket(usage.get("totals")),
+            "by_provider": self._token_ranked_map(usage.get("by_provider")),
+            "by_task": self._token_ranked_map(usage.get("by_task")),
             "by_day": by_day,
             "by_day_detail": by_day_detail,
             "by_hour": self._token_series_map(usage.get("by_hour"), limit=48),

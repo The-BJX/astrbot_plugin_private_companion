@@ -3708,7 +3708,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "【轻量环境感知】",
             "这是当前消息的轻量背景边界，主要影响时间感、平台语境和回复节奏；如果用户刚好在问时间、平台或环境感受，可以按需要自然带出，没问到时就只当背景参考。",
             f"时间：{current.strftime('%Y-%m-%d %H:%M')}",
+            "时间锚点必须以这一行真实时间为准；不要把未来日程、睡眠段、旧记忆或上次对话里的时间说成当前时间。",
         ]
+        current_minutes = current.hour * 60 + current.minute
+        if not (22 * 60 <= current_minutes or current_minutes <= 90):
+            lines.append(
+                "当前没有进入深夜时段；即使人格、作息或旧上下文提到“可能很晚”“晚上睡觉”，也不能主动说快十一点、困不困、该睡了或晚安。"
+            )
         platform = await self._format_platform_perception(event)
         if platform:
             lines.append(f"会话：{platform}")
@@ -5968,6 +5974,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             proactive_context = await self._format_proactive_reply_context(event)
             if proactive_context:
                 prompt_surface.add("proactive.reply_context", proactive_context, priority=45, source="proactive")
+        short_reaction_context = self._format_short_reaction_context_for_prompt(current_user, inbound_text)
+        if short_reaction_context:
+            prompt_surface.add("turn.short_reaction", short_reaction_context, priority=48, source="conversation")
         private_image_enhancement_enabled_for_request = self._feature_enabled_or_temp_unlocked(
             "enable_private_image_self_recognition"
         )

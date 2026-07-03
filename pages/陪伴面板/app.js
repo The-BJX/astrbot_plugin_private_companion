@@ -2437,6 +2437,11 @@ const tokenTaskLabels = {
   qzone_publish_test: "空间发布测试",
   qzone_publish_sanitize: "空间文案清理",
   companion_manual_diagnosis: "陪伴答疑",
+  memory_summary: "记忆阶段总结",
+  memory_decay_summary: "记忆衰减整理",
+  memory_rerank: "记忆重排",
+  memory_embedding: "记忆向量索引",
+  memory_embedding_query: "记忆向量查询",
   astrbot_private_reply: "非插件私聊主回复",
   astrbot_group_reply: "非插件群聊主回复",
   astrbot_reply: "非插件主回复",
@@ -4703,7 +4708,9 @@ function renderTokens() {
   const cacheWriteTokens = Number(totals.cache_write_tokens || 0);
   const cachedRatio = Number(totals.cached_ratio || 0);
   const externalScope = externalTokenScopeData(stats, scope);
+  const memoryPluginScope = memoryPluginTokenScopeData(stats, scope);
   const externalTokens = Number(externalScope?.totals?.total_tokens || 0);
+  const memoryPluginTokens = Number(memoryPluginScope?.totals?.total_tokens || 0);
   const budget = stats.budget || {};
   const dailyLimit = Number(budget.limit || 0);
   const dailyUsed = Number(budget.used || 0);
@@ -4721,8 +4728,10 @@ function renderTokens() {
   $("#tokenSummary").innerHTML = `${tokenLoadingNote}${tokenSummaryBoard({
     scope,
     externalScope,
+    memoryPluginScope,
     totalTokens,
     externalTokens,
+    memoryPluginTokens,
     totals,
     calls,
     errors,
@@ -4756,13 +4765,19 @@ function renderTokens() {
   renderTokenRecentTable(scope.recent || []);
   renderTokenExternalSessionTable(externalScope.sessions || []);
   renderTokenExternalRecentTable(externalScope.recent || []);
+  renderTokenMemoryPluginSummary(memoryPluginScope, stats.memory_plugin || {});
+  renderTokenMemoryPluginTaskTable(memoryPluginScope.tasks || [], memoryPluginScope.available !== false);
+  renderTokenMemoryPluginProviderTable(memoryPluginScope.providers || [], memoryPluginScope.available !== false);
+  renderTokenMemoryPluginRecentTable(memoryPluginScope.recent || [], memoryPluginScope.available !== false);
 }
 
 function tokenSummaryBoard({
   scope,
   externalScope,
+  memoryPluginScope,
   totalTokens,
   externalTokens,
+  memoryPluginTokens,
   totals,
   calls,
   errors,
@@ -4820,6 +4835,7 @@ function tokenSummaryBoard({
       </article>
       <div class="token-metric-grid">
         ${tokenMetricCard(externalScope.label, formatNumber(externalTokens))}
+        ${tokenMetricCard(memoryPluginScope.label, memoryPluginScope.available === false ? "未接入" : formatNumber(memoryPluginTokens))}
         ${tokenMetricCard("主动消息", formatCompactNumber(proactiveMessages))}
         ${hasKnownCacheStats ? tokenMetricCard("缓存命中", `${formatCompactNumber(cachedTokens || cacheReadTokens)} · ${Math.round(cachedRatio * 100)}%`) : ""}
         ${cacheReadTokens > 0 || cacheWriteTokens > 0 ? tokenMetricCard("缓存读 / 写", `${formatCompactNumber(cacheReadTokens)} / ${formatCompactNumber(cacheWriteTokens)}`) : ""}
@@ -4871,6 +4887,39 @@ function externalTokenScopeData(stats, pluginScope) {
     totals: day,
     sessions: day.sessions || [],
     recent: (external.recent || []).filter((item) => recentItemDayKey(item) === selectedDay),
+  };
+}
+
+function memoryPluginTokenScopeData(stats, pluginScope) {
+  const plugin = stats.memory_plugin || {};
+  const view = state.tokenView || "today";
+  const today = stats.budget?.day || todayKeyLocal();
+  const displayName = plugin.display_name || "我会牢牢记住你";
+  const available = plugin.available !== false;
+  if (view === "total") {
+    return {
+      mode: "total",
+      label: `${displayName}累计`,
+      displayName,
+      available,
+      totals: plugin.totals || {},
+      providers: plugin.by_provider || [],
+      tasks: plugin.by_task || [],
+      recent: plugin.recent || [],
+    };
+  }
+  const selectedDay = pluginScope?.mode === "date" ? state.tokenDate : today;
+  const dayRows = plugin.by_day_detail || plugin.by_day || [];
+  const day = dayRows.find((item) => String(item.key || "") === selectedDay) || { key: selectedDay };
+  return {
+    mode: pluginScope?.mode || "today",
+    label: selectedDay === today ? `${displayName}今日` : `${displayName}同日`,
+    displayName,
+    available,
+    totals: day,
+    providers: day.providers || [],
+    tasks: day.tasks || [],
+    recent: (plugin.recent || []).filter((item) => recentItemDayKey(item) === selectedDay),
   };
 }
 
@@ -5182,6 +5231,109 @@ function renderTokenExternalRecentTable(rows) {
       item.success ? "成功" : `失败 ${item.error || ""}`.trim(),
     ],
     "暂无 AstrBot 主链最近对话"
+  );
+}
+
+function renderTokenMemoryPluginSummary(scope, plugin) {
+  const box = $("#tokenMemoryPluginSummary");
+  if (!box) return;
+  const available = scope?.available !== false;
+  if (!available) {
+    box.innerHTML = `
+      <div class="empty small">
+        未检测到可读取的“${escapeHtml(plugin?.display_name || "我会牢牢记住你")}”Token 统计。
+        ${plugin?.reason ? `原因：${escapeHtml(plugin.reason)}` : ""}
+      </div>
+    `;
+    return;
+  }
+  const totals = scope?.totals || {};
+  const displayName = scope?.displayName || plugin?.display_name || "我会牢牢记住你";
+  const totalTokens = Number(totals.total_tokens || 0);
+  const calls = Number(totals.calls || 0);
+  const errors = Number(totals.errors || 0);
+  const avgTokens = Math.round(Number(totals.avg_tokens || 0));
+  const estimatedRatio = Math.round(Number(totals.estimated_ratio || 0) * 100);
+  const updatedAt = plugin?.updated_at ? `最近更新：${plugin.updated_at}` : "还没有统计更新时间";
+  box.innerHTML = `
+    <div class="token-plugin-note">
+      <b>${escapeHtml(displayName)}</b>
+      <span>${escapeHtml(plugin?.note || "仅展示记忆插件自身模型消耗，不计入陪伴插件每日 Token 限额。")}</span>
+    </div>
+    <div class="token-plugin-stats">
+      ${tokenMetricCard("Token", formatNumber(totalTokens))}
+      ${tokenMetricCard("调用次数", formatNumber(calls))}
+      ${tokenMetricCard("平均 Token", formatNumber(avgTokens))}
+      ${tokenMetricCard("估算 / 失败", `${estimatedRatio}% · ${formatNumber(errors)}`)}
+    </div>
+    <p class="muted small">${escapeHtml(updatedAt)}</p>
+  `;
+}
+
+function renderTokenMemoryPluginTaskTable(rows, available) {
+  const box = $("#tokenMemoryPluginTaskTable");
+  if (!box) return;
+  if (!available) {
+    box.innerHTML = `<div class="empty small">记忆插件 Token 统计未接入</div>`;
+    return;
+  }
+  box.innerHTML = tokenTable(
+    ["记忆任务", "总 Token", "输入", "输出", "调用", "失败"],
+    rows,
+    (item) => [
+      tokenTaskLabel(item.key),
+      formatNumber(item.total_tokens),
+      formatNumber(item.prompt_tokens),
+      formatNumber(item.completion_tokens),
+      formatNumber(item.calls),
+      formatNumber(item.errors),
+    ],
+    "暂无记忆插件任务明细"
+  );
+}
+
+function renderTokenMemoryPluginProviderTable(rows, available) {
+  const box = $("#tokenMemoryPluginProviderTable");
+  if (!box) return;
+  if (!available) {
+    box.innerHTML = `<div class="empty small">记忆插件 Token 统计未接入</div>`;
+    return;
+  }
+  box.innerHTML = tokenTable(
+    ["Provider", "总 Token", "缓存", "调用", "估算", "平均延迟"],
+    rows,
+    (item) => [
+      item.key || "default",
+      formatNumber(item.total_tokens),
+      tokenCacheText(item),
+      formatNumber(item.calls),
+      `${Math.round(Number(item.estimated_ratio || 0) * 100)}%`,
+      `${formatNumber(Math.round(Number(item.avg_latency_ms || 0)))} ms`,
+    ],
+    "暂无记忆插件 Provider 明细"
+  );
+}
+
+function renderTokenMemoryPluginRecentTable(rows, available) {
+  const box = $("#tokenMemoryPluginRecentTable");
+  if (!box) return;
+  if (!available) {
+    box.innerHTML = `<div class="empty small">记忆插件 Token 统计未接入</div>`;
+    return;
+  }
+  box.innerHTML = tokenTable(
+    ["时间", "记忆任务", "Provider", "Token", "缓存", "延迟", "状态"],
+    rows,
+    (item) => [
+      formatRecentTime(item.ts, item.time),
+      tokenTaskLabel(item.task),
+      item.provider || "default",
+      `${formatNumber(item.total_tokens)}${item.estimated ? " 估" : ""}`,
+      tokenCacheText(item),
+      `${formatNumber(Math.round(Number(item.elapsed_ms || item.latency_ms || 0)))} ms`,
+      item.success ? "成功" : `失败 ${item.error || ""}`.trim(),
+    ],
+    "暂无记忆插件最近调用"
   );
 }
 

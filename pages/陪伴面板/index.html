@@ -749,6 +749,21 @@ QQ空间 = 公开札记
             <h2>AstrBot 主链最近对话</h2>
             <div id="tokenExternalRecentTable" class="table-wrap compact-table"></div>
           </article>
+          <article class="wide token-memory-plugin-card">
+            <h2>记忆插件消耗</h2>
+            <div id="tokenMemoryPluginSummary" class="token-plugin-panel"></div>
+          </article>
+          <article class="wide">
+            <h2>记忆插件任务 / Provider</h2>
+            <div class="token-plugin-split">
+              <div id="tokenMemoryPluginTaskTable" class="table-wrap compact-table"></div>
+              <div id="tokenMemoryPluginProviderTable" class="table-wrap compact-table"></div>
+            </div>
+          </article>
+          <article class="wide">
+            <h2>记忆插件最近调用</h2>
+            <div id="tokenMemoryPluginRecentTable" class="table-wrap compact-table"></div>
+          </article>
         </div>
       </section>
 
@@ -1228,12 +1243,14 @@ QQ空间 = 公开札记
 
       <section class="panel" id="panel-config">
         <div class="config-grid">
-          <article class="config-card wide migration-card">
-            <div class="migration-head">
+          <details class="config-card wide migration-card migration-collapsible">
+            <summary class="migration-head migration-summary">
               <div>
                 <h2>配置迁移</h2>
-                  <p>导出或导入可迁移配置与关系、群聊、候选菜单等资料；也兼容旧版快照文件。缓存、Token、最近消息和运行日志不会写入备份。</p>
+                <p>导出或导入可迁移配置与关系、群聊、候选菜单等资料；也兼容旧版快照文件。缓存、Token、最近消息和运行日志不会写入备份。</p>
               </div>
+            </summary>
+            <div class="migration-body">
               <div class="migration-actions">
                 <button id="exportConfigBtn" type="button">导出配置备份</button>
                 <label class="file-pick">
@@ -1241,52 +1258,52 @@ QQ空间 = 公开札记
                   选择备份文件
                 </label>
               </div>
-            </div>
-            <div class="migration-options" aria-label="导出内容">
-              <span>导出内容</span>
-              <label><input type="checkbox" data-export-section="basic" checked /> 基础配置</label>
-              <label><input type="checkbox" data-export-section="relations" checked /> 关系/群资料</label>
-              <label><input type="checkbox" data-export-section="food_skills" checked /> 候选菜单/技能</label>
-              <label><input type="checkbox" data-export-section="providers" /> 模型配置</label>
-              <label><input type="checkbox" data-export-section="sensitive" /> 敏感配置</label>
-            </div>
-            <div class="migration-flow">
-              <label>
-                导入方式
-                <select id="configImportMode">
-                  <option value="merge">合并导入，保留现有资料</option>
-                  <option value="replace">覆盖可迁移资料</option>
-                </select>
-              </label>
-              <label>
-                字段冲突
-                <select id="configImportConflict">
-                  <option value="use_backup">使用备份内容</option>
-                  <option value="keep_current">保留当前内容</option>
-                  <option value="fill_empty">只补当前空字段</option>
-                </select>
-              </label>
-              <label class="migration-risk-option">
-                <input id="configAllowChecksumMismatch" type="checkbox" />
-                校验失败仍继续预览/导入
-              </label>
-              <button id="previewConfigImportBtn" type="button" disabled>预览导入</button>
-              <button id="applyConfigImportBtn" type="button" disabled>确认导入</button>
-            </div>
+              <div class="migration-options" aria-label="导出内容">
+                <span>导出内容</span>
+                <label><input type="checkbox" data-export-section="basic" checked /> 基础配置</label>
+                <label><input type="checkbox" data-export-section="relations" checked /> 关系/群资料</label>
+                <label><input type="checkbox" data-export-section="food_skills" checked /> 候选菜单/技能</label>
+                <label><input type="checkbox" data-export-section="providers" /> 模型配置</label>
+                <label><input type="checkbox" data-export-section="sensitive" /> 敏感配置</label>
+              </div>
+              <div class="migration-flow">
+                <label>
+                  导入方式
+                  <select id="configImportMode">
+                    <option value="merge">合并导入，保留现有资料</option>
+                    <option value="replace">覆盖可迁移资料</option>
+                  </select>
+                </label>
+                <label>
+                  字段冲突
+                  <select id="configImportConflict">
+                    <option value="use_backup">使用备份内容</option>
+                    <option value="keep_current">保留当前内容</option>
+                    <option value="fill_empty">只补当前空字段</option>
+                  </select>
+                </label>
+                <label class="migration-risk-option">
+                  <input id="configAllowChecksumMismatch" type="checkbox" />
+                  校验失败仍继续预览/导入
+                </label>
+                <button id="previewConfigImportBtn" type="button" disabled>预览导入</button>
+                <button id="applyConfigImportBtn" type="button" disabled>确认导入</button>
+              </div>
               <div id="configMigrationPreview" class="migration-preview">
                 还没有选择备份或快照文件。
               </div>
-            <div class="migration-aftercare">
-              <div>
-                <h3>最近自动备份</h3>
-                <div id="configBackupList" class="migration-backup-list">暂无自动备份。</div>
-              </div>
-              <div>
-                <h3>导入后检查</h3>
-                <div id="configImportChecks" class="migration-check-list">导入后会在这里显示轻量检查结果。</div>
+              <div class="migration-aftercare">
+                <div>
+                  <h3>最近自动备份</h3>
+                  <div id="configBackupList" class="migration-backup-list">暂无自动备份。</div>
+                </div>
+                <div>
+                  <h3>导入后检查</h3>
+                  <div id="configImportChecks" class="migration-check-list">导入后会在这里显示轻量检查结果。</div>
+                </div>
               </div>
             </div>
-          </article>
+          </details>
           <article class="config-card">
             <h2>存储方式</h2>
             <form id="storageConfigForm" class="storage-config-form">

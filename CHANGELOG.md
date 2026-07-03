@@ -6,16 +6,18 @@
 
 - 新增主动强度预设：默认关闭，关闭时完全沿用手动频率；开启后只在运行态调整私聊主动、群聊唤醒和群聊插话的有效频率，不改写手动参数，并会在排障页提示当前档位和关键有效值。
 - 修复私聊 TTS 看起来“完全没注入”的排障盲点：TTS 请求规则新增独立兜底注入，不再依赖被动状态注入链路一定走到底；同一轮会自动去重，并把 `tts.rule / tts.force / tts.user_request` 等记录挂到当前消息 trace，方便在排障页点开最近回复查看完整注入模块。
+- 优化 README 记忆插件联动说明：明确推荐“我会牢牢记住你”、陪伴插件与记忆插件的职责分工、短上下文平替边界、排障顺序和 LivingMemory 迁移建议。
 - 新增明确指令生图入口：`陪伴 生图 <画面描述>`、`陪伴 自拍 [画面要求]`、`陪伴 改图 <修改要求>` 会直接走陪伴插件生图后端和中文失败回执，不再依赖主模型自行选择 `generate_image` 工具；自然语言生图开关关闭时也可用明确指令，仍尊重主动拍照/生图总开关、可用后端和每日额度。
 - QQ 空间页补齐删除自己的说说：列表和详情页会仅对当前登录 QQ 自己发布的说说显示删除入口，改用页面内“再次点击删除”确认，后端也会再次校验作者 QQ，避免误删好友动态；同时修复删除按钮被整张说说卡片点击事件吞掉导致无反馈的问题。
 - 清理存储后端目录的 Python 编译缓存：`storage/__pycache__` 会在存储管理器初始化和进程退出时自动移除，减少源码目录里反复出现无用缓存文件。
-- 深化 RememberYou 拟人化联动：情绪漂移、梦境碎片、未完成话题和跨窗口情绪连续性全面接入。
-- 私聊消息处理前自动拉取 RememberYou 情绪漂移：`_memory_companion_apply_emotional_drift()` 在每次私聊前调用，从记忆插件拉取待处理情绪事件（伤痕触动/温暖回忆/脆弱共鸣），按安全阀（单次 ±10 能量上限）应用到 `daily_state` 的能量和心情底色。
+- Token 页新增“我会牢牢记住你”独立消耗展示：读取记忆插件自身上报的总结、重排、向量和维护整理 Token 统计，只用于成本观察和排障，不并入陪伴插件每日 Token 限额。
+- 深化“我会牢牢记住你”拟人化联动：情绪漂移、梦境碎片、未完成话题和跨窗口情绪连续性全面接入。
+- 私聊消息处理前自动拉取“我会牢牢记住你”的情绪漂移：`_memory_companion_apply_emotional_drift()` 在每次私聊前调用，从记忆插件拉取待处理情绪事件（伤痕触动/温暖回忆/脆弱共鸣），按安全阀（单次 ±10 能量上限）应用到 `daily_state` 的能量和心情底色。
 - 跨窗口情绪连续性：情绪漂移拉取时同时通过 `bridge.get_recent_emotional_state()` 获取全局跨会话情绪摘要，以 30% 强度叠加到当前会话（如窗口 A 刚翻到伤痕记忆，窗口 B 的 Bot 也会微妙低落），不泄露具体内容。
-- 主动消息生成前拉取跨会话情绪漂移：`proactive_message.py` 在构建主动消息提示词前以 `session_id=""` 调用 `_memory_companion_apply_emotional_drift()`，让主动消息也受全局情绪影响。
+- 主动消息生成前拉取记忆插件的跨会话情绪漂移：`proactive_message.py` 在构建主动消息提示词前以 `session_id=""` 调用 `_memory_companion_apply_emotional_drift()`，让主动消息也受全局情绪影响。
 - 主动消息从记忆 open-loop 取材：`proactive_message.py` 生成前通过 `_memory_companion_search_open_loops()` 检索未完成的承诺和话题，注入到主动消息提示词中，形成承诺兑现闭环。
-- 梦境碎片写入记忆库：`daily_state.py` 日记生成后，将首条梦境碎片通过 `_memory_companion_record_dream_fragment()` 写入 RememberYou，带上 `dream_fragment` 标签和查询锚点（"梦境/梦到/做梦/梦见"），支持跨会话梦境连续性。
-- 新增 `_memory_companion_get_relationship_phase()` 方法：可从 RememberYou 拉取当前关系阶段状态（phase/momentum/touch_count），供主动陪伴决策参考。
+- 梦境碎片写入记忆库：`daily_state.py` 日记生成后，将首条梦境碎片通过 `_memory_companion_record_dream_fragment()` 写入“我会牢牢记住你”，带上 `dream_fragment` 标签和查询锚点（"梦境/梦到/做梦/梦见"），支持跨会话梦境连续性。
+- 新增 `_memory_companion_get_relationship_phase()` 方法：可从“我会牢牢记住你”拉取当前关系阶段状态（phase/momentum/touch_count），供主动陪伴决策参考。
 - 情绪漂移日志增强：`mood_drift_log` 新增 `cross_window_delta` 字段，便于排障跨窗口情绪传递效果。
 
 ## 5.6.6

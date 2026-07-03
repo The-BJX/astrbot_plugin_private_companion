@@ -71,6 +71,25 @@ class MemoryCompanionAdapterMixin:
             return {"available": True, "error": _single_line(exc, 120)}
         return status if isinstance(status, dict) else {"available": True}
 
+    def _memory_companion_token_usage_summary(self) -> dict[str, Any]:
+        bridge = self._memory_companion_bridge()
+        if bridge is None:
+            return {"available": False, "display_name": "我会牢牢记住你", "reason": "未检测到运行中的记忆插件"}
+        getter = getattr(bridge, "get_token_usage_summary", None)
+        if not callable(getter):
+            return {"available": False, "display_name": "我会牢牢记住你", "reason": "当前记忆插件版本暂未暴露 Token 统计"}
+        try:
+            usage = getter()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 记忆插件 Token 统计读取失败: %s", _single_line(exc, 120))
+            return {"available": False, "display_name": "我会牢牢记住你", "reason": _single_line(exc, 120)}
+        if not isinstance(usage, dict):
+            return {"available": False, "display_name": "我会牢牢记住你", "reason": "记忆插件返回的 Token 统计格式无效"}
+        usage.setdefault("available", True)
+        usage.setdefault("display_name", "我会牢牢记住你")
+        usage.setdefault("counted_in_private_companion_budget", False)
+        return usage
+
     def _memory_companion_mark_deferred_section(
         self,
         section: str,
