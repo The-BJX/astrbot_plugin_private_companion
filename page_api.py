@@ -155,6 +155,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 refresher = getattr(self.plugin, "_refresh_sleep_runtime_state", None)
                 if callable(refresher):
                     refresher()
+                detail_sanitizer = getattr(self.plugin, "_sanitize_detail_enhanced_segments_inplace", None)
+                if callable(detail_sanitizer):
+                    enhanced = self.plugin.data.get("detail_enhanced_segments")
+                    if isinstance(enhanced, dict) and detail_sanitizer(enhanced):
+                        self.plugin._save_data_sync()
                 data = self._overview_data_snapshot_locked(self.plugin.data)
                 token_stats = self._token_overview_payload(self.plugin.data.get("token_usage", {}))
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
@@ -525,6 +530,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "backend": self._single_line(item.get("backend"), 80),
             "error": self._single_line(item.get("error"), 220),
             "generated_at": self.plugin._format_timestamp_elapsed(item.get("generated_at", 0)) if item else "",
+            "retry_count": int(item.get("retry_count", 0) or 0),
+            "retry_max": 5,
         }
 
     def _daily_outfit_image_path(self) -> Path | None:
@@ -7028,9 +7035,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         )
 
     def _runtime_settings(self) -> dict[str, Any]:
-        keys = [
+                keys = [
             "bot_name",
             "page_font_family",
+            "page_theme",
             "provider_config_mode",
             "plugin_specific_persona_id",
             "target_user_ids",
@@ -7966,6 +7974,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 else str(value or "off").strip().lower()
             )
             return
+        if key == "page_font_family":
+            text = str(value or "original").strip().lower()
+            self.plugin.page_font_family = text if text in {"original", "cheng"} else "original"
+            return
+        if key == "page_theme":
+            text = str(value or "classic").strip().lower()
+            self.plugin.page_theme = text if text in {"classic", "dark", "warm", "forest", "sakura"} else "classic"
+            return
         if key == "storage_backend":
             backend = str(value or "json").strip().lower() or "json"
             self.plugin.storage_backend = backend if backend in {"json", "sqlite"} else "json"
@@ -8237,6 +8253,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "proactive_intensity_preset":
             self._set_schema_compat_value(config, key, value)
             return
+        if key in {"page_font_family", "page_theme"}:
+            self._set_schema_compat_value(config, key, value)
+            return
         if _set_into_config(config, key, value, allow_flat_fallback=False):
             return
         if self._set_schema_group_config_value(config, key, value):
@@ -8506,9 +8525,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return keys
 
     def _allowed_setting_keys(self) -> set[str]:
-        keys = {
+                keys = {
             "bot_name",
             "page_font_family",
+            "page_theme",
             "provider_config_mode",
             "enable_proactive_only_mode",
             "plugin_specific_persona_id",
@@ -8855,9 +8875,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._normalize_id_list(value)
         if key == "plugin_specific_persona_id":
             return str(value or "").strip()[:160]
-        if key == "page_font_family":
+                if key == "page_font_family":
             text = str(value or "original").strip().lower()
             return text if text in {"original", "cheng"} else "original"
+        if key == "page_theme":
+            text = str(value or "classic").strip().lower()
+            return text if text in {"classic", "dark", "warm", "forest", "sakura"} else "classic"
         if key == "provider_config_mode":
             normalizer = getattr(self.plugin, "_normalize_provider_config_mode", None)
             if callable(normalizer):
@@ -10840,7 +10863,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "secret_books": secret_books,
         }
 
-    def _proactive_reason_label(self, reason: Any) -> str:
+    def _proactive_template_text(self, value: Any, *, target_name: Any = "", limit: int = 220) -> str:
+        text = self._single_line(value, limit)
+        if not text:
+            return ""
+        name = self._single_line(target_name, 40) or "对方"
+        return self._single_line(text.replace("{name}", name).replace("{{name}}", name), limit)
+
+    def _proactive_reason_label(self, reason: Any, *, target_name: Any = "") -> str:
         key = self._single_line(reason, 40)
         if not key:
             return "未记录原因"
@@ -10852,7 +10882,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "timer": "聊天中形成的临时约定",
             "troubleshooting_test": "排障测试触发",
         }
-        return extra.get(key) or _REASON_TEXT.get(key) or key
+        return self._proactive_template_text(extra.get(key) or _REASON_TEXT.get(key) or key, target_name=target_name, limit=80)
 
     def _proactive_source_meta(self, source: Any) -> dict[str, str]:
         key = self._single_line(source, 40)
@@ -10899,12 +10929,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _proactive_source_note(self, source: Any) -> str:
         return self._single_line(self._proactive_source_meta(source).get("note"), 120)
 
-    def _proactive_reason_detail(self, *, reason: Any, source: Any = "", topic: Any = "", motive: Any = "", note: Any = "") -> str:
-        label = self._proactive_reason_label(reason)
+    def _proactive_reason_detail(
+        self,
+        *,
+        reason: Any,
+        source: Any = "",
+        topic: Any = "",
+        motive: Any = "",
+        note: Any = "",
+        target_name: Any = "",
+    ) -> str:
+        label = self._proactive_reason_label(reason, target_name=target_name)
         parts = [label]
-        topic_text = self._single_line(topic, 80)
-        motive_text = self._single_line(motive, 140)
-        note_text = self._single_line(note, 120)
+        topic_text = self._proactive_template_text(topic, target_name=target_name, limit=80)
+        motive_text = self._proactive_template_text(motive, target_name=target_name, limit=140)
+        note_text = self._proactive_template_text(note, target_name=target_name, limit=120)
         source_text = self._proactive_source_label(source)
         if topic_text:
             parts.append(f"话题：{topic_text}")
@@ -11057,8 +11096,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         "source_label": self._proactive_source_label(display_source),
                         "source_note": self._proactive_source_note(display_source),
                         "reason": reason,
-                        "reason_label": self._proactive_reason_label(reason),
-                        "reason_detail": self._proactive_reason_detail(reason=reason, source=display_source, topic=topic, motive=motive, note=note),
+                        "reason_label": self._proactive_reason_label(reason, target_name=user_meta["label"]),
+                        "reason_detail": self._proactive_reason_detail(
+                            reason=reason,
+                            source=display_source,
+                            topic=topic,
+                            motive=motive,
+                            note=note,
+                            target_name=user_meta["label"],
+                        ),
                         "action": action,
                         "topic": topic,
                         "motive": motive,
@@ -11359,8 +11405,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "status": status,
                     "action": action,
                     "reason": reason,
-                    "reason_label": self._proactive_reason_label(reason),
-                    "reason_detail": self._proactive_reason_detail(reason=reason, source=source, topic=topic, motive=motive, note=user.get("last_proactive_skip_reason")),
+                    "reason_label": self._proactive_reason_label(reason, target_name=user_summary.get("display_name") or str(user_id)),
+                    "reason_detail": self._proactive_reason_detail(
+                        reason=reason,
+                        source=source,
+                        topic=topic,
+                        motive=motive,
+                        note=user.get("last_proactive_skip_reason"),
+                        target_name=user_summary.get("display_name") or str(user_id),
+                    ),
                     "topic": topic,
                     "motive": motive,
                     "planned_impulse_id": self._single_line(user.get("planned_proactive_impulse_id"), 40),
@@ -11489,8 +11542,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "source_label": self._proactive_source_label(raw.get("source")),
                 "source_note": self._proactive_source_note(raw.get("source")),
                 "reason": audit_reason,
-                "reason_label": self._proactive_reason_label(audit_reason),
-                "reason_detail": self._proactive_reason_detail(reason=audit_reason, source=raw.get("source"), topic=audit_topic, motive=audit_motive, note=note),
+                "reason_label": self._proactive_reason_label(audit_reason, target_name=user_summary.get("display_name") or user_id),
+                "reason_detail": self._proactive_reason_detail(
+                    reason=audit_reason,
+                    source=raw.get("source"),
+                    topic=audit_topic,
+                    motive=audit_motive,
+                    note=note,
+                    target_name=user_summary.get("display_name") or user_id,
+                ),
                 "action": audit_action,
                 "topic": audit_topic,
                 "motive": audit_motive,
@@ -11989,7 +12049,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "window": segment.get("window", str(key)),
                     "start": segment.get("start", 99999),
                     "status": snapshot.get("status", ""),
+                    "started_at": snapshot.get("started_at", ""),
                     "summary": snapshot.get("summary", ""),
+                    "error": snapshot.get("error", ""),
+                    "retry_after": snapshot.get("retry_after", ""),
                     "state_variables": self._limited_state_variables(snapshot.get("state_variables")),
                     "presence_status": snapshot.get("presence_status") if isinstance(snapshot.get("presence_status"), dict) else {},
                     "interaction_updates": self._limited_interaction_updates(snapshot.get("interaction_updates")),
@@ -12005,8 +12068,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "detail_day": data.get("detail_enhanced_day", ""),
             "segment_count": len(segments),
             "segments": segments,
-            "story_today_events": self._limited_story_items(story.get("today_events"), 12),
-            "story_proactive_events": self._limited_story_items(story.get("proactive_events"), 12),
+            "story_today_events": self._limited_story_items(story.get("today_events"), 48),
+            "story_proactive_events": self._limited_story_items(story.get("proactive_events"), 32),
             "adjustments": self._limited_adjustments(adjustments),
             "qq_presence_state": presence,
         }
@@ -12436,7 +12499,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if not isinstance(value, list):
             return []
         items: list[dict[str, str]] = []
-        for item in value[:limit]:
+        indexed_items = [
+            (PrivateCompanionPageApi._story_item_start_minutes(item), index, item)
+            for index, item in enumerate(value)
+            if isinstance(item, dict)
+        ]
+        indexed_items.sort(key=lambda row: (row[0], row[1]))
+        for _, _, item in indexed_items[:limit]:
             if not isinstance(item, dict):
                 continue
             items.append(
@@ -12456,6 +12525,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 }
             )
         return items
+
+    @staticmethod
+    def _story_item_start_minutes(item: Any) -> int:
+        if not isinstance(item, dict):
+            return 99999
+        text = PrivateCompanionPageApi._single_line(item.get("window") or item.get("time"), 32)
+        match = re.search(r"(\d{1,2}):(\d{2})", text)
+        if not match:
+            return 99999
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if hour > 23 or minute > 59:
+            return 99999
+        return hour * 60 + minute
 
     @staticmethod
     def _limited_adjustments(value: Any) -> list[dict[str, Any]]:

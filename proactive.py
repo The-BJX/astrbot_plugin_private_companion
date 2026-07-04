@@ -2038,6 +2038,7 @@ class ProactiveMixin:
                     ("当前细化", self._ensure_detail_enhancement),
                     ("当前在线感", self._ensure_current_detail_presence_status),
                     ("日记", self._ensure_daily_diary),
+                    ("每日穿搭", self._ensure_daily_outfit_photo),
                     ("创作推进", self._maybe_advance_creative_projects),
                     ("被动注入缓存", self._refresh_passive_injection_cache),
                 ):
@@ -2063,6 +2064,7 @@ class ProactiveMixin:
                 ("当前细化", self._ensure_detail_enhancement),
                 ("当前在线感", self._ensure_current_detail_presence_status),
                 ("日记", self._ensure_daily_diary),
+                ("每日穿搭", self._ensure_daily_outfit_photo),
                 ("创作推进", self._maybe_advance_creative_projects),
                 ("被动注入缓存", self._refresh_passive_injection_cache),
             ):

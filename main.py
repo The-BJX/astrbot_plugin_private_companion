@@ -427,7 +427,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.6.7",
+    "5.6.8",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -639,6 +639,10 @@ class PrivateCompanionPlugin(
             self._cfg_raw(c, "provider_config_mode", None),
             c,
         )
+        _page_font = str(self._cfg_raw(c, "page_font_family", "original") or "original").strip().lower()
+        self.page_font_family = _page_font if _page_font in {"original", "cheng"} else "original"
+        _page_theme = str(self._cfg_raw(c, "page_theme", "classic") or "classic").strip().lower()
+        self.page_theme = _page_theme if _page_theme in {"classic", "dark", "warm", "forest", "sakura"} else "classic"
         self.fast_response_provider_id = self._cfg_str(c, "FAST_RESPONSE_PROVIDER_ID", "")
         self.complex_reasoning_provider_id = self._cfg_str(c, "COMPLEX_REASONING_PROVIDER_ID", "")
         self.creative_model_provider_id = self._cfg_str(c, "CREATIVE_MODEL_PROVIDER_ID", "")

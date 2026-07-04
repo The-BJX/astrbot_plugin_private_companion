@@ -79,13 +79,6 @@
       </div>
 
       <div class="folio-tools">
-        <label class="page-font-picker" for="pageFontSelect">
-          <span>字体</span>
-          <select id="pageFontSelect">
-            <option value="original">原始字体</option>
-            <option value="cheng">13.woff2</option>
-          </select>
-        </label>
         <button id="refreshBtn" class="seal" title="刷新" aria-label="刷新">
           <span class="seal-mark">↻</span>
           <small>REFRESH</small>
@@ -338,17 +331,21 @@ QQ空间 = 公开札记
                   <label>世界观关系网 <textarea data-roleplay-world-part="network" rows="2"></textarea></label>
                   <label class="wide-field">其他补充信息 <textarea data-roleplay-world-part="extra" rows="2"></textarea></label>
                 </div>
-                <div class="roleplay-optional-note roleplay-standard">
-                  <b>平台称呼转写是可选项</b>
-                  <span>只有角色世界观需要把“群聊、识屏、B站、QQ空间、书柜”换成设定内说法时再填；普通现代日常可以全部留空。</span>
-                </div>
-                <div class="roleplay-standard translation-standard-grid">
-                  <label>群聊（可选） <input data-roleplay-translation-part="群聊" placeholder="可留空，例如 公会闲谈" /></label>
-                  <label>识屏（可选） <input data-roleplay-translation-part="识屏" placeholder="可留空，例如 水晶映像" /></label>
-                  <label>B站（可选） <input data-roleplay-translation-part="B站" placeholder="可留空，例如 影像记录" /></label>
-                  <label>QQ空间（可选） <input data-roleplay-translation-part="QQ空间" placeholder="可留空，例如 公开札记" /></label>
-                  <label>书柜（可选） <input data-roleplay-translation-part="书柜" placeholder="可留空，例如 行囊书匣" /></label>
-                </div>
+                <details class="roleplay-standard translation-collapsible">
+                  <summary class="translation-summary">
+                    <div class="translation-summary-text">
+                      <b>平台称呼转写（可选）</b>
+                      <span>只有角色世界观需要把"群聊、识屏、B站、QQ空间、书柜"换成设定内说法时再填；普通现代日常可以全部留空。</span>
+                    </div>
+                  </summary>
+                  <div class="roleplay-standard translation-standard-grid">
+                    <label>群聊（可选） <input data-roleplay-translation-part="群聊" placeholder="可留空，例如 公会闲谈" /></label>
+                    <label>识屏（可选） <input data-roleplay-translation-part="识屏" placeholder="可留空，例如 水晶映像" /></label>
+                    <label>B站（可选） <input data-roleplay-translation-part="B站" placeholder="可留空，例如 影像记录" /></label>
+                    <label>QQ空间（可选） <input data-roleplay-translation-part="QQ空间" placeholder="可留空，例如 公开札记" /></label>
+                    <label>书柜（可选） <input data-roleplay-translation-part="书柜" placeholder="可留空，例如 行囊书匣" /></label>
+                  </div>
+                </details>
               </div>
               <div class="roleplay-knowledge-panel">
                 <div class="roleplay-knowledge-head">
@@ -1304,36 +1301,82 @@ QQ空间 = 公开札记
               </div>
             </div>
           </details>
-          <article class="config-card">
-            <h2>存储方式</h2>
-            <form id="storageConfigForm" class="storage-config-form">
-              <div class="form-grid">
-                <label>
-                  主数据保存方式
-                  <select id="storageBackendSelect" name="storage_backend">
-                    <option value="json">json</option>
-                    <option value="sqlite">sqlite</option>
+          <details class="config-card storage-collapsible">
+            <summary class="storage-summary">
+              <div>
+                <h2>存储方式</h2>
+                <p>控制陪伴插件主数据的保存后端（json / sqlite）。默认收起，展开后可切换后端与路径。</p>
+              </div>
+            </summary>
+            <div class="storage-body">
+              <form id="storageConfigForm" class="storage-config-form">
+                <div class="form-grid">
+                  <label>
+                    主数据保存方式
+                    <select id="storageBackendSelect" name="storage_backend">
+                      <option value="json">json</option>
+                      <option value="sqlite">sqlite</option>
+                    </select>
+                  </label>
+                  <label id="storageSqlitePathWrap">
+                    SQLite 数据文件路径
+                    <input id="storageSqlitePathInput" name="storage_sqlite_path" type="text" placeholder="留空时自动使用插件数据目录下 companions.db" />
+                  </label>
+                </div>
+                <div id="storageConfigSummary" class="storage-config-summary"></div>
+                <p class="storage-config-note">这里控制陪伴插件主数据的保存后端。配置备份导入/导出不会携带这一项，避免换机器时误改本机存储路径。</p>
+                <div class="actions">
+                  <button id="saveStorageConfigBtn" type="submit">保存存储方式</button>
+                </div>
+              </form>
+            </div>
+          </details>
+          <details class="config-card wide appearance-collapsible">
+            <summary class="appearance-summary">
+              <div>
+                <h2>拓展页设置</h2>
+                <p>切换拓展页面的字体与配色主题，即时预览。默认收起，展开后可调整外观偏好。</p>
+              </div>
+            </summary>
+            <div class="appearance-body">
+              <div class="appearance-form">
+                <label class="appearance-field">
+                  <span>页面字体</span>
+                  <select id="appearanceFontSelect">
+                    <option value="original">原始字体</option>
+                    <option value="cheng">13.woff2</option>
                   </select>
                 </label>
-                <label id="storageSqlitePathWrap">
-                  SQLite 数据文件路径
-                  <input id="storageSqlitePathInput" name="storage_sqlite_path" type="text" placeholder="留空时自动使用插件数据目录下 companions.db" />
-                </label>
+                <div class="appearance-field appearance-theme-field">
+                  <span>配色主题</span>
+                  <div class="appearance-theme-grid" id="appearanceThemeGrid" role="radiogroup" aria-label="配色主题"></div>
+                </div>
+                <div class="appearance-preview" id="appearancePreview" aria-hidden="true">
+                  <div class="appearance-preview-card">
+                    <h3>预览</h3>
+                    <p class="appearance-preview-text">这里是一段示例文字，用来展示当前主题的配色与字体效果。</p>
+                    <div class="appearance-preview-actions">
+                      <button type="button" disabled>示例按钮</button>
+                      <span class="appearance-preview-tag">标签</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div id="storageConfigSummary" class="storage-config-summary"></div>
-              <p class="storage-config-note">这里控制陪伴插件主数据的保存后端。配置备份导入/导出不会携带这一项，避免换机器时误改本机存储路径。</p>
-              <div class="actions">
-                <button id="saveStorageConfigBtn" type="submit">保存存储方式</button>
-              </div>
-            </form>
-          </article>
+            </div>
+          </details>
           <article class="config-card wide">
             <h2>群聊名单覆盖</h2>
             <div id="listCoverage" class="coverage-grid"></div>
           </article>
-          <article class="config-card wide">
-            <h2>群聊名单</h2>
-            <form id="accessForm" class="access-manager">
+          <details class="config-card wide access-collapsible">
+            <summary class="access-card-summary">
+              <div>
+                <h2>群聊名单</h2>
+                <p>管理白名单 / 黑名单模式与目标群号。默认收起，展开后可切换模式、快捷勾选或批量编辑群号。</p>
+              </div>
+            </summary>
+            <div class="access-body">
+              <form id="accessForm" class="access-manager">
               <div class="access-mode-row">
                 <select id="groupAccessMode" aria-label="群聊名单模式">
                   <option value="whitelist">白名单模式</option>
@@ -1363,7 +1406,8 @@ QQ空间 = 公开札记
                 <button type="submit">保存名单</button>
               </div>
             </form>
-          </article>
+            </div>
+          </details>
           <article class="wide">
             <h2>功能开关</h2>
             <div id="proactiveOnlyModeCard"></div>

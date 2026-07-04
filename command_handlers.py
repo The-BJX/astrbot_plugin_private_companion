@@ -2674,6 +2674,12 @@ class CommandHandlersMixin:
         path_text = _single_line(item.get("path"), 500).strip().strip('"').strip("'")
         if not path_text:
             reason = error or note or "没有可用图片路径"
+            retry_count = int(item.get("retry_count", 0) or 0)
+            retry_max = 5
+            if retry_count > 0 and retry_count < retry_max:
+                return f"今天的每日穿搭图还没生成成功：{reason}\n正在自动重试（第{retry_count}/{retry_max}次），稍后再来看看，或管理员手动用：陪伴 生成穿搭。", ""
+            elif retry_count >= retry_max:
+                return f"今天的每日穿搭图还没生成成功：{reason}\n已重试{retry_max}次仍未成功，管理员可以手动用：陪伴 生成穿搭。", ""
             return f"今天的每日穿搭图还没生成成功：{reason}\n管理员可以手动用：陪伴 生成穿搭。", ""
         try:
             path = Path(path_text).expanduser()

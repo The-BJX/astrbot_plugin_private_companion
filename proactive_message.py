@@ -240,6 +240,8 @@ _PLATFORM_DISPLAY_NAMES = {
     "wechat": "微信",
     "discord": "Discord",
 }
+_DAILY_OUTFIT_RETRY_MAX = 5
+_DAILY_OUTFIT_RETRY_INTERVAL = 180  # 秒，约3分钟
 
 
 class SyntheticPrivateWakeEvent(AstrMessageEvent):
@@ -4705,10 +4707,19 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if not force and not getattr(self, "enable_daily_outfit_photo", False):
             return None
         today = _today_key()
+        now = _now_ts()
         async with self._data_lock:
             existing = self.data.get("daily_outfit_photo") if isinstance(self.data.get("daily_outfit_photo"), dict) else {}
             if existing.get("date") == today:
-                return dict(existing)
+                if existing.get("path"):
+                    return dict(existing)
+                if not force:
+                    retry_count = int(existing.get("retry_count", 0) or 0)
+                    if retry_count >= _DAILY_OUTFIT_RETRY_MAX:
+                        return dict(existing)
+                    next_retry_at = float(existing.get("next_retry_at", 0) or 0)
+                    if now < next_retry_at:
+                        return dict(existing)
         if not self.enable_photo_text_action:
             return await self._record_daily_outfit_photo_result(today, "", "主动拍照/生图未开启")
         if not self._photo_text_available():
@@ -4767,16 +4778,23 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         prompt: str = "",
         note: str = "",
     ) -> dict[str, Any]:
-        item = {
-            "date": _single_line(date_key, 20),
-            "path": _single_line(image_path, 300),
-            "error": _single_line(error, 240),
-            "backend": _single_line(backend, 80),
-            "prompt": _single_line(prompt, 500),
-            "note": _single_line(note, 220),
-            "generated_at": _now_ts(),
-        }
+        now = _now_ts()
         async with self._data_lock:
+            existing = self.data.get("daily_outfit_photo") if isinstance(self.data.get("daily_outfit_photo"), dict) else {}
+            prev_retry_count = int(existing.get("retry_count", 0) or 0) if existing.get("date") == date_key else 0
+            retry_count = 0 if image_path else prev_retry_count + 1
+            next_retry_at = 0.0 if image_path else now + _DAILY_OUTFIT_RETRY_INTERVAL
+            item = {
+                "date": _single_line(date_key, 20),
+                "path": _single_line(image_path, 300),
+                "error": _single_line(error, 240),
+                "backend": _single_line(backend, 80),
+                "prompt": _single_line(prompt, 500),
+                "note": _single_line(note, 220),
+                "generated_at": now,
+                "retry_count": retry_count,
+                "next_retry_at": next_retry_at,
+            }
             self.data["daily_outfit_photo"] = item
             self._save_data_sync()
         if image_path:
@@ -4787,7 +4805,21 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 _single_line(image_path, 160),
             )
         else:
-            logger.info("[PrivateCompanion] 每日穿搭照片未生成: %s", _single_line(error or note, 180))
+            if retry_count >= _DAILY_OUTFIT_RETRY_MAX:
+                logger.info(
+                    "[PrivateCompanion] 每日穿搭照片未生成(第%d次,已达上限%d次,今日不再重试): %s",
+                    retry_count,
+                    _DAILY_OUTFIT_RETRY_MAX,
+                    _single_line(error or note, 180),
+                )
+            else:
+                logger.info(
+                    "[PrivateCompanion] 每日穿搭照片未生成(第%d次,上限%d次,%.0f秒后重试): %s",
+                    retry_count,
+                    _DAILY_OUTFIT_RETRY_MAX,
+                    _DAILY_OUTFIT_RETRY_INTERVAL,
+                    _single_line(error or note, 180),
+                )
         return item
 
     def _daily_outfit_schedule_text(self) -> str:
@@ -6029,6 +6061,25 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             target = "在线图片 API"
         return f"{target}超时（{timeout_seconds}秒内没有返回），可调高在线生图超时秒数或切换/回退本地生图后端"
 
+    def _external_image_custom_headers(self) -> dict[str, str]:
+        """Parse custom headers from config string (one per line, 'Key: Value' format)."""
+        raw = str(getattr(self, "external_image_api_custom_headers", "") or "").strip()
+        if not raw:
+            return {}
+        result: dict[str, str] = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            sep = line.find(":")
+            if sep <= 0:
+                continue
+            key = line[:sep].strip()
+            val = line[sep + 1:].strip()
+            if key:
+                result[key] = val
+        return result
+
     async def _save_external_generated_image(
         self,
         image_bytes: bytes,
@@ -6127,6 +6178,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 "Authorization": f"Bearer {self.external_image_api_key}",
                 "Content-Type": "application/json",
             }
+            headers.update(self._external_image_custom_headers())
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
             logger.info(
                 "[PrivateCompanion] 百炼多模态生图提交: endpoint=%s model=%s size=%s reference=%s prompt_preview=%s",
@@ -6209,6 +6261,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 "Content-Type": "application/json",
                 "X-DashScope-Async": "enable",
             }
+            headers.update(self._external_image_custom_headers())
             payload = {
                 "model": self.external_image_api_model,
                 "input": {"prompt": prompt_text},
@@ -6262,7 +6315,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 while True:
                     if time.monotonic() >= deadline:
                         return "", self._external_image_timeout_note(label="百炼异步生图任务轮询")
-                    async with session.get(task_endpoint, headers={"Authorization": f"Bearer {self.external_image_api_key}"}) as response:
+                    _poll_headers = {"Authorization": f"Bearer {self.external_image_api_key}"}
+                    _poll_headers.update(self._external_image_custom_headers())
+                    async with session.get(task_endpoint, headers=_poll_headers) as response:
                         text = await response.text()
                         logger.info(
                             "[PrivateCompanion] 百炼任务查询响应: status=%s task=%s chars=%s preview=%s",
@@ -6410,6 +6465,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "external_image_api_model",
             "external_image_api_size",
             "external_image_api_timeout_seconds",
+            "external_image_api_custom_headers",
         )
         old_values = {key: getattr(self, key, None) for key in keys}
         backup_values = {
@@ -6419,6 +6475,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "external_image_api_model": getattr(self, "backup_external_image_api_model", ""),
             "external_image_api_size": getattr(self, "backup_external_image_api_size", "1024x1024"),
             "external_image_api_timeout_seconds": getattr(self, "backup_external_image_api_timeout_seconds", 180),
+            "external_image_api_custom_headers": getattr(self, "backup_external_image_api_custom_headers", ""),
         }
         try:
             for key, value in backup_values.items():
@@ -6528,6 +6585,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 "Authorization": f"Bearer {self.external_image_api_key}",
                 "Content-Type": "application/json",
             }
+            headers.update(self._external_image_custom_headers())
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(endpoint, headers=headers, json=payload) as response:
@@ -6621,6 +6679,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 content_type=content_type,
             )
             headers = {"Authorization": f"Bearer {self.external_image_api_key}"}
+            headers.update(self._external_image_custom_headers())
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
             logger.info(
                 "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference=%s bytes=%s prompt_preview=%s",

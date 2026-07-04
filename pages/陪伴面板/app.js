@@ -56,6 +56,7 @@ const state = {
     configBackups: false,
   },
   pageFontFamily: "original",
+  pageTheme: "classic",
 };
 
 const hiddenCompatibilityConfigKeys = new Set([
@@ -2970,13 +2971,48 @@ function applyOverviewData(overview) {
   state.featureDraft = featureDraftFromOverview(overview);
   state.providerConfigMode = inferProviderConfigMode(overview);
   state.pageFontFamily = String(overview?.settings?.page_font_family || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
+  state.pageTheme = normalizePageTheme(overview?.settings?.page_theme);
   applyPageFontFamily();
+  applyPageTheme();
 }
 
 function applyPageFontFamily() {
   document.body.dataset.pageFont = state.pageFontFamily === "cheng" ? "cheng" : "original";
-  const select = document.getElementById("pageFontSelect");
-  if (select) select.value = document.body.dataset.pageFont;
+  const appearanceSelect = document.getElementById("appearanceFontSelect");
+  if (appearanceSelect) appearanceSelect.value = document.body.dataset.pageFont;
+}
+
+const PAGE_THEMES = [
+  { value: "classic", label: "经典蓝", swatch: ["#eef3fb", "#1a4b8c", "#2c6cb0"] },
+  { value: "dark", label: "暗夜深空", swatch: ["#0d1117", "#58a6ff", "#1c2330"] },
+  { value: "warm", label: "暖阳书房", swatch: ["#faf5ef", "#b86b2e", "#c0793c"] },
+  { value: "forest", label: "森林绿径", swatch: ["#eef4ee", "#2d6a4f", "#40916c"] },
+  { value: "sakura", label: "樱粉日记", swatch: ["#fdf0f3", "#d4517a", "#fce8ed"] },
+];
+
+function normalizePageTheme(raw) {
+  const allowed = PAGE_THEMES.map((t) => t.value);
+  const text = String(raw || "classic").trim().toLowerCase();
+  return allowed.includes(text) ? text : "classic";
+}
+
+function applyPageTheme() {
+  const theme = normalizePageTheme(state.pageTheme);
+  document.body.dataset.theme = theme;
+}
+
+function renderAppearanceSettings() {
+  const current = normalizePageTheme(state.pageTheme);
+  const grid = document.getElementById("appearanceThemeGrid");
+  if (grid) {
+    grid.innerHTML = PAGE_THEMES.map((t) => {
+      const swatches = t.swatch.map((c) => `<span style="background:${c}"></span>`).join("");
+      return `<div class="appearance-theme-option${t.value === current ? " is-active" : ""}" data-theme-value="${t.value}" role="radio" aria-checked="${t.value === current}" tabindex="0">
+        <div class="appearance-theme-swatch">${swatches}</div>
+        <div class="appearance-theme-label"><span>${escapeHtml(t.label)}</span></div>
+      </div>`;
+    }).join("");
+  }
 }
 
 function applyUserGroupLists(users, groups) {
@@ -8957,7 +8993,7 @@ function proactiveTaskStatusLabel(status) {
     due: "已到点",
     overdue: "超时未发",
     handed_off: "已交官方",
-    failed: "登记失败",
+    failed: "执行失败",
     cancelled: "已取消",
     cancel_failed: "取消失败",
     cancel_skipped: "无可取消",
@@ -9201,14 +9237,19 @@ function renderDailyTimeline() {
     const vars = (segment.state_variables || []).slice(0, 4);
     const events = (segment.today_events || []).slice(0, 3);
     const presence = segment.presence_status || {};
+    const statusText = detailSegmentStatusLabel(segment);
+    const presenceText = presenceLabel(presence);
+    const metaText = [statusText, presenceText].filter(Boolean).join(" · ");
+    const errorText = String(segment.error || "").trim();
     return `
       <section class="timeline-item">
         <div class="timeline-time">${escapeHtml(segment.window || segment.key)}</div>
         <div class="timeline-body">
           <div class="timeline-head">
             <b>${escapeHtml(segment.summary || "这一段还没有摘要")}</b>
-            <span>${escapeHtml(presenceLabel(presence))}</span>
+            <span>${escapeHtml(metaText)}</span>
           </div>
+          ${errorText ? `<p class="timeline-error">失败原因：${escapeHtml(errorText)}${segment.retry_after ? `，${escapeHtml(segment.retry_after)} 后重试` : ""}</p>` : ""}
           <div class="state-pills">
             ${vars.length ? vars.map((item) => `
               <span title="${escapeHtml(item.note || "")}">
@@ -9223,6 +9264,19 @@ function renderDailyTimeline() {
       </section>
     `;
   }).join("");
+}
+
+function detailSegmentStatusLabel(segment) {
+  const raw = segment && typeof segment === "object" ? segment : {};
+  const value = String(raw.status || "").trim();
+  const startedAt = String(raw.started_at || "").trim();
+  const label = {
+    done: "已细化",
+    generating: "生成中",
+    failed: "生成失败",
+  }[value] || (value ? value : "未生成");
+  if (value === "generating" && startedAt) return `${label}（${startedAt} 开始）`;
+  return label;
 }
 
 function renderInteractionImpact() {
@@ -9329,6 +9383,7 @@ function renderConfig() {
   $("#groupWhitelist").value = (group.whitelist || []).join("\n");
   $("#groupBlacklist").value = (group.blacklist || []).join("\n");
   renderStorageConfig();
+  renderAppearanceSettings();
   renderAccessManager(group);
   renderFeatureSwitches();
   renderConfigBackups();
@@ -13848,7 +13903,7 @@ document.addEventListener("change", (event) => {
 
 $("#refreshBtn").addEventListener("click", loadAll);
 
-document.getElementById("pageFontSelect")?.addEventListener("change", async (event) => {
+document.getElementById("appearanceFontSelect")?.addEventListener("change", async (event) => {
   const select = event.currentTarget;
   const value = String(select?.value || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
   const previous = state.pageFontFamily;
@@ -13863,6 +13918,38 @@ document.getElementById("pageFontSelect")?.addEventListener("change", async (eve
     showToast(`字体保存失败：${error.message}`, "error");
   }
 });
+
+async function savePageTheme(theme) {
+  const previous = state.pageTheme;
+  state.pageTheme = theme;
+  applyPageTheme();
+  renderAppearanceSettings();
+  try {
+    await postJson("/settings/update", { settings: { page_theme: theme } });
+    showToast("主题已保存");
+  } catch (error) {
+    state.pageTheme = previous;
+    applyPageTheme();
+    renderAppearanceSettings();
+    showToast(`主题保存失败：${error.message}`, "error");
+  }
+}
+
+document.getElementById("appearanceThemeGrid")?.addEventListener("click", (event) => {
+  const option = event.target.closest("[data-theme-value]");
+  if (!option) return;
+  savePageTheme(option.dataset.themeValue);
+});
+
+document.getElementById("appearanceThemeGrid")?.addEventListener("keydown", (event) => {
+  const option = event.target.closest("[data-theme-value]");
+  if (!option) return;
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    savePageTheme(option.dataset.themeValue);
+  }
+});
+
 $("#refreshImageCacheBtn")?.addEventListener("click", () => {
   loadImageCache().catch((error) => showToast(`刷新失败：${error.message}`, "error"));
 });

@@ -423,12 +423,52 @@ class DailyStateMixin:
                     self._save_data_sync()
                 return None
             for segment in segments:
-                enhanced[segment["key"]] = {"status": "generating", "started_at": self._environment_now().strftime("%H:%M")}
+                enhanced[segment["key"]] = {
+                    "status": "generating",
+                    "started_at": self._environment_now().strftime("%H:%M"),
+                    "started_ts": _now_ts(),
+                }
             self._save_data_sync()
 
         last_detail = None
         for segment in segments:
-            detail = await self._generate_detail_enhancement(segment, plan, state)
+            try:
+                detail = await self._generate_detail_enhancement(segment, plan, state)
+                if not isinstance(detail.get("today_events"), list) or not detail.get("today_events"):
+                    raise RuntimeError("日程细化结果为空或无法解析")
+            except Exception as exc:
+                now_ts = _now_ts()
+                retry_after_ts = now_ts + 30 * 60
+                async with self._data_lock:
+                    enhanced = self.data.setdefault("detail_enhanced_segments", {})
+                    if not isinstance(enhanced, dict):
+                        enhanced = {}
+                        self.data["detail_enhanced_segments"] = enhanced
+                    retry_after = self._environment_fromtimestamp(retry_after_ts).strftime("%H:%M")
+                    enhanced[segment["key"]] = {
+                        "status": "failed",
+                        "updated_at": self._environment_now().strftime("%H:%M"),
+                        "error": _single_line(exc, 180),
+                        "retry_after": retry_after,
+                        "retry_after_ts": retry_after_ts,
+                        "summary": "这一段细化生成失败，稍后会自动重试。",
+                        "today_events": [],
+                        "proactive_events": [],
+                        "state_variables": [],
+                        "presence_status": {},
+                        "interaction_updates": [],
+                        "coverage_repair_done": bool(segment.get("_coverage_repair")),
+                    }
+                    self._save_data_sync()
+                logger.warning(
+                    "[PrivateCompanion] 日程细化生成失败,已标记为可重试: segment=%s retry_after=%s error=%s",
+                    _single_line(segment.get("key"), 80),
+                    retry_after,
+                    _single_line(exc, 180),
+                )
+                if force:
+                    raise
+                continue
             last_detail = detail
             async with self._data_lock:
                 story_plan = self.data.setdefault("daily_story_plan", {})
@@ -690,7 +730,7 @@ class DailyStateMixin:
         segments: list[dict[str, Any]] = []
         for pos, (index, start, item) in enumerate(parsed):
             key = f"{plan.get('date')}:{index}:{item.get('time')}"
-            if key in enhanced:
+            if self._detail_enhancement_snapshot_blocks_generation(enhanced.get(key) if isinstance(enhanced, dict) else None):
                 continue
             next_start = (
                 parsed[pos + 1][1]
@@ -709,6 +749,31 @@ class DailyStateMixin:
                 }
             )
         return segments
+
+    def _detail_enhancement_snapshot_blocks_generation(self, snapshot: Any) -> bool:
+        if not isinstance(snapshot, dict):
+            return False
+        status = _single_line(snapshot.get("status"), 24)
+        if status == "done":
+            return True
+        if status == "failed":
+            retry_after_ts = _safe_float(snapshot.get("retry_after_ts"), 0)
+            return retry_after_ts > _now_ts()
+        if status == "generating":
+            started_ts = _safe_float(snapshot.get("started_ts"), 0)
+            if started_ts > 0:
+                return _now_ts() - started_ts < 30 * 60
+            started_at = _single_line(snapshot.get("started_at"), 8)
+            started_minutes = self._parse_hhmm_to_minutes(started_at)
+            if started_minutes is None:
+                return False
+            elapsed_minutes = self._environment_now_minutes() - started_minutes
+            if elapsed_minutes < 0:
+                elapsed_minutes += 24 * 60
+            return elapsed_minutes < 30
+        if status:
+            return False
+        return bool(snapshot.get("summary") or snapshot.get("today_events") or snapshot.get("proactive_events"))
 
     def _collect_due_detail_segments(
         self,
@@ -1633,21 +1698,31 @@ class DailyStateMixin:
         existing = user.get("pending_proactive_send_retry")
         previous_count = _safe_int(existing.get("retry_count"), 0, 0, 10) if isinstance(existing, dict) else 0
         retry_count = previous_count + 1
+        clean_error = _single_line(error_text, 180)
+        error_hint = ""
+        if clean_error:
+            compact_error = clean_error.lower()
+            if "timeout" in compact_error or "sendmsg" in compact_error or "retcode=1200" in compact_error:
+                error_hint = "平台发送超时"
+            elif "actionfailed" in compact_error or "failed" in compact_error:
+                error_hint = "平台发送失败"
+            else:
+                error_hint = clean_error
         if retry_count > 2:
             self._clear_pending_proactive_send_retry(user)
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=current, delay_hours=(12, 24))
-            return "待重发内容连续发送失败，已放弃复用并重新排程"
+            return "发送失败，待重发内容连续失败，已放弃复用并重新排程" + (f"；原因：{error_hint}" if error_hint else "")
         if extra_components:
             self._clear_pending_proactive_send_retry(user)
             self._schedule_next_proactive(user, now=current, delay_hours=(6, 12))
-            return "包含复杂组件，未缓存待重发内容，已延后重新排程"
+            return "发送失败，包含复杂组件，未缓存待重发内容，已延后重新排程" + (f"；原因：{error_hint}" if error_hint else "")
         clean_text = _single_line(text, 1200)
         clean_image = _single_line(image_path, 260)
         if not clean_text and not clean_image:
             self._clear_pending_proactive_send_retry(user)
             self._schedule_next_proactive(user, now=current, delay_hours=(6, 12))
-            return "无可复用内容，已延后重新排程"
+            return "发送失败，无可复用内容，已延后重新排程" + (f"；原因：{error_hint}" if error_hint else "")
         delay_hours = 6.0 if retry_count <= 1 else 24.0
         user["pending_proactive_send_retry"] = {
             "active": True,
@@ -1660,10 +1735,10 @@ class DailyStateMixin:
             "reason": _single_line(reason, 40) or "check_in",
             "action": _single_line(action, 40) or "message",
             "action_summary": _single_line(action_summary, 500),
-            "last_error": _single_line(error_text, 180),
+            "last_error": clean_error,
         }
         user["next_proactive_at"] = current + delay_hours * 3600
-        return f"已保留待重发内容，{int(delay_hours)} 小时后第 {retry_count} 次重试"
+        return f"发送失败，已保留待重发内容，{int(delay_hours)} 小时后第 {retry_count} 次重试" + (f"；原因：{error_hint}" if error_hint else "")
 
     def _activity_share_global_signature(self, user: dict[str, Any], *, text: str = "", action_summary: str = "") -> str:
         state = self.data.get("daily_state", {})
@@ -4512,7 +4587,15 @@ class DailyStateMixin:
         remembered_dream = self._remembered_daily_dream_label()
         if values.get("dream") == "没有记住梦" and remembered_dream:
             values["dream"] = remembered_dream
-        inferred_location = self._current_location_state_text({"location": values.get("location", "")})
+        existing_state = self.data.get("daily_state")
+        existing_override_ts = 0.0
+        if isinstance(existing_state, dict) and existing_state.get("date") == _today_key():
+            existing_override_ts = _safe_float(existing_state.get("location_override_ts"), 0)
+        override_active = existing_override_ts > 0 and _now_ts() - existing_override_ts < 4 * 3600
+        if override_active:
+            inferred_location = self._current_location_state_text(existing_state)
+        else:
+            inferred_location = self._current_location_state_text({"location": values.get("location", "")})
         if inferred_location:
             values["location"] = inferred_location
         energy = max(10, min(100, energy))
@@ -4531,7 +4614,7 @@ class DailyStateMixin:
             energy,
             health_cause,
         )
-        return {
+        result = {
             "date": _today_key(),
             **values,
             "weather": weather_text,
@@ -4540,6 +4623,10 @@ class DailyStateMixin:
             "note": note,
             "conditions": active,
         }
+        if override_active:
+            result["location_override_ts"] = existing_override_ts
+            result["location_source"] = "dialogue_override"
+        return result
 
     def _build_state_note(
         self,
@@ -5563,6 +5650,28 @@ class DailyStateMixin:
                 scope="当前段和今日后续",
                 carry_rule="下一段不能完全无视这句照顾提醒；至少要在节奏、体力或收尾方式上留下影响。",
             )
+        if re.search(r"走吧|出发|出门|出去了|下车|上车|走了|走了走了|走起|走走走|出去|去吃|去逛|去买|去玩|一起去|带你|陪我.*去|跟我.*走|出发了|出门了|换鞋|拿钥匙|等车|打车|坐车|地铁|公交|到了|排队|找位子|点单|点餐|下单|老板.*来|服务员", normalized):
+            self._apply_dialogue_location_override("外面")
+            return payload(
+                source="用户带出/同行",
+                note="用户刚刚带角色出门或一起外出；当前位置应从家里切换到外面,后续细化要承接外出场景,不要把角色写回家里。",
+                immediate_reaction="她会赶紧收拾一下东西,跟着用户往外走,可能边走边看手机或整理衣服。",
+                state_updates=["位置：家里->外面", "活动：跟随用户外出", "情绪：略兴奋或期待"],
+                intensity="强",
+                scope="当前段和今日后续直到回家线索出现",
+                carry_rule="后续细化和状态注入必须把角色位置保持在'外面',直到用户明确说回家、到家或日程自然过渡到居家时段；不要把角色写回沙发、卧室或家里。",
+            )
+        if re.search(r"回来了|到家了|回家了|进家门|开门|进门|回到.*家|到家|回来了回来了|安全到家", normalized):
+            self._apply_dialogue_location_override("家里")
+            return payload(
+                source="用户带回/回家",
+                note="用户和角色刚刚回到家；当前位置应从外面切换回家里,后续细化要承接回家后场景。",
+                immediate_reaction="她会松一口气,可能踢掉鞋子或把东西放下,瘫到沙发上。",
+                state_updates=["位置：外面->家里", "活动：回到居家", "情绪：放松"],
+                intensity="中",
+                scope="当前段和下一段",
+                carry_rule="后续细化可以把角色写回家里场景,但不要立刻恢复出门前的精确活动,要体现外出后的余味。",
+            )
         if re.search(r"一起|陪你|陪我|等我|等你|我来|我陪|待会|一会|晚上|明天|等下|约|见面|打电话|语音|开黑|一起看", normalized):
             return payload(
                 source="用户约定",
@@ -5872,11 +5981,14 @@ class DailyStateMixin:
         plan: dict[str, Any] | None = None,
         detail: dict[str, Any] | None = None,
     ) -> bool:
-        location = self._infer_location_from_plan_context(plan=plan, detail=detail)
-        if not location:
-            return False
         state = self.data.get("daily_state")
         if not isinstance(state, dict) or state.get("date") != _today_key():
+            return False
+        override_ts = _safe_float(state.get("location_override_ts"), 0)
+        if override_ts > 0 and _now_ts() - override_ts < 4 * 3600:
+            return False
+        location = self._infer_location_from_plan_context(plan=plan, detail=detail)
+        if not location:
             return False
         current = _single_line(state.get("location"), 40)
         if current == location:
@@ -5884,9 +5996,33 @@ class DailyStateMixin:
         state["location"] = location
         state["location_source"] = "detail" if isinstance(detail, dict) else "daily_plan"
         state["location_updated_at"] = self._environment_now().strftime("%H:%M")
+        if override_ts > 0:
+            state["location_override_ts"] = 0.0
         return True
 
+    def _apply_dialogue_location_override(self, location: str) -> None:
+        """对话驱动的位置覆盖：用户带角色外出/回家时，立即更新 daily_state.location。
+
+        这会覆盖日程推断的位置，直到下一次细化刷新自然恢复，或用户再次触发回家。
+        """
+        state = self.data.get("daily_state")
+        if not isinstance(state, dict) or state.get("date") != _today_key():
+            return
+        state["location"] = _single_line(location, 40)
+        state["location_source"] = "dialogue_override"
+        state["location_updated_at"] = self._environment_now().strftime("%H:%M")
+        state["location_override_ts"] = _now_ts()
+        self._save_data_sync()
+
     def _current_location_state_text(self, state: dict[str, Any] | None = None) -> str:
+        if isinstance(state, dict):
+            override_ts = _safe_float(state.get("location_override_ts"), 0)
+            if override_ts > 0:
+                override_location = _single_line(state.get("location"), 40)
+                if override_location and override_location not in {"", "地点感平稳", "地点无明显变化"}:
+                    now = _now_ts()
+                    if now - override_ts < 4 * 3600:
+                        return override_location
         snapshot = self._current_story_plan_snapshot()
         for candidate in (
             snapshot.get("scene"),
@@ -8172,6 +8308,18 @@ class DailyStateMixin:
             if not isinstance(snapshot, dict):
                 continue
             snapshot_changed = False
+            if (
+                _single_line(snapshot.get("status"), 24) == "generating"
+                and not self._detail_enhancement_snapshot_blocks_generation(snapshot)
+            ):
+                snapshot["status"] = "failed"
+                snapshot["updated_at"] = self._environment_now().strftime("%H:%M")
+                snapshot["error"] = _single_line(snapshot.get("error"), 180) or "上次细化生成中断或超时"
+                snapshot["retry_after"] = ""
+                snapshot["retry_after_ts"] = 0
+                snapshot["summary"] = _single_line(snapshot.get("summary"), 120) or "这一段细化生成中断，稍后会自动重试。"
+                changed = True
+                snapshot_changed = True
             summary = _single_line(snapshot.get("summary"), 180)
             if summary:
                 cleaned = self._sanitize_daily_plan_social_fact_text(summary, field=f"detail_enhanced_segments.{key}.summary")
@@ -10366,4 +10514,3 @@ class DailyStateMixin:
             runtime = self.data.setdefault("proactive_runtime", {})
             if isinstance(runtime, dict):
                 runtime["last_tick_finished_at"] = _now_ts()
-

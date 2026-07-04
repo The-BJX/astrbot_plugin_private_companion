@@ -1402,6 +1402,12 @@ h2 {
   white-space: nowrap;
 }
 
+.timeline-error {
+  margin: 0;
+  color: var(--danger, #a33b2f);
+  font-size: 12px;
+}
+
 .timeline-item ul {
   margin: 0;
   padding-left: 18px;
@@ -3253,6 +3259,65 @@ body.daily-outfit-preview-open {
   line-height: 1.5;
 }
 
+.access-collapsible {
+  padding: 0;
+}
+
+.access-card-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+  padding: 18px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.access-card-summary::-webkit-details-marker {
+  display: none;
+}
+
+.access-card-summary::after {
+  content: "展开";
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(71, 103, 148, 0.22);
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--blue, #2c6cb0);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.access-collapsible[open] .access-card-summary::after {
+  content: "收起";
+}
+
+.access-card-summary h2 {
+  margin-bottom: 4px;
+}
+
+.access-card-summary p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.access-body {
+  padding: 0 18px 18px;
+}
+
+@media (max-width: 760px) {
+  .access-card-summary {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
 .access-manager {
   display: grid;
   gap: 14px;
@@ -4372,7 +4437,8 @@ body.daily-outfit-preview-open {
 
 .persona-card-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
   align-items: start;
 }
 
@@ -4447,16 +4513,72 @@ body.daily-outfit-preview-open {
 .blueprint-standard-grid,
 .user-standard-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
 .translation-standard-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   grid-column: 1 / -1;
   padding-top: 2px;
+}
+
+.translation-collapsible {
+  grid-column: 1 / -1;
+  border: 1px dashed rgba(66, 111, 156, 0.22);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.58);
+  overflow: hidden;
+}
+
+.translation-collapsible > .translation-summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  user-select: none;
+}
+
+.translation-collapsible > .translation-summary::-webkit-details-marker {
+  display: none;
+}
+
+.translation-collapsible > .translation-summary::before {
+  content: "▶";
+  flex: 0 0 auto;
+  margin-top: 3px;
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 0.18s ease;
+}
+
+.translation-collapsible[open] > .translation-summary::before {
+  transform: rotate(90deg);
+}
+
+.translation-collapsible > .translation-summary .translation-summary-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.translation-collapsible > .translation-summary b {
+  color: var(--blue);
+  font-size: 13px;
+}
+
+.translation-collapsible > .translation-summary span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.translation-collapsible .translation-standard-grid {
+  padding: 0 12px 12px;
 }
 
 .roleplay-optional-note {
@@ -4491,7 +4613,7 @@ body.daily-outfit-preview-open {
 
 .roleplay-appearance-group {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   grid-column: 1 / -1;
   border: 1px solid rgba(26, 75, 140, 0.14);
@@ -4513,7 +4635,7 @@ body.daily-outfit-preview-open {
 }
 
 .roleplay-standard textarea {
-  min-height: 108px;
+  min-height: 64px;
   resize: vertical;
 }
 
@@ -4530,10 +4652,27 @@ body.daily-outfit-preview-open {
 
 .blueprint-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: start;
   margin-bottom: 12px;
+}
+
+.blueprint-head > .roleplay-example-btn {
+  align-self: start;
+}
+
+.blueprint-head > label {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  display: flex;
+}
+
+.blueprint-head > label > select {
+  flex: 1 1 220px;
+  max-width: 320px;
 }
 
 .blueprint-head span {
@@ -12036,6 +12175,65 @@ tbody tr.is-selected {
   line-height: 1.6;
 }
 
+.storage-collapsible {
+  padding: 0;
+}
+
+.storage-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+  padding: 18px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.storage-summary::-webkit-details-marker {
+  display: none;
+}
+
+.storage-summary::after {
+  content: "展开";
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(71, 103, 148, 0.22);
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--blue, #2f6fb0);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.storage-collapsible[open] .storage-summary::after {
+  content: "收起";
+}
+
+.storage-summary h2 {
+  margin-bottom: 4px;
+}
+
+.storage-summary p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.storage-body {
+  padding: 0 18px 18px;
+}
+
+@media (max-width: 760px) {
+  .storage-summary {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
 .migration-card {
   position: relative;
   overflow: hidden;
@@ -13587,6 +13785,483 @@ pre {
   }
 
   .proactive-mode-toggle {
+    justify-self: start;
+  }
+}
+
+/* ============================================================
+   拓展页设置 · 可折叠卡片
+   ============================================================ */
+
+.appearance-collapsible {
+  padding: 0;
+}
+
+.appearance-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+  padding: 18px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.appearance-summary::-webkit-details-marker {
+  display: none;
+}
+
+.appearance-summary::after {
+  content: "展开";
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(71, 103, 148, 0.22);
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--blue, #2c6cb0);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.appearance-collapsible[open] .appearance-summary::after {
+  content: "收起";
+}
+
+.appearance-summary h2 {
+  margin-bottom: 4px;
+}
+
+.appearance-summary p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.appearance-body {
+  padding: 0 18px 18px;
+}
+
+.appearance-form {
+  display: grid;
+  gap: 18px;
+}
+
+.appearance-field {
+  display: grid;
+  gap: 8px;
+}
+
+.appearance-field > span {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.appearance-field select {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 14px;
+  max-width: 280px;
+}
+
+.appearance-theme-field {
+  gap: 10px;
+}
+
+.appearance-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.appearance-theme-option {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 2px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+  user-select: none;
+}
+
+.appearance-theme-option:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 14px rgba(15, 42, 74, 0.10);
+}
+
+.appearance-theme-option.is-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.appearance-theme-swatch {
+  display: flex;
+  gap: 4px;
+  height: 28px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.appearance-theme-swatch span {
+  flex: 1;
+}
+
+.appearance-theme-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.appearance-theme-option.is-active .appearance-theme-label::after {
+  content: "✓";
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.appearance-preview {
+  margin-top: 4px;
+}
+
+.appearance-preview-card {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(251,250,247,0.92));
+  box-shadow: var(--shadow-soft);
+}
+
+.appearance-preview-card h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.appearance-preview-text {
+  margin: 0 0 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.appearance-preview-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.appearance-preview-actions button {
+  padding: 6px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+
+.appearance-preview-tag {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ============================================================
+   主题系统 · 5 套配色
+   classic  — 经典蓝（默认）
+   dark     — 暗夜深空
+   warm     — 暖阳书房
+   forest   — 森林绿径
+   sakura   — 樱粉日记
+   ============================================================ */
+
+body[data-theme="classic"] {
+  --bg: #eef3fb;
+  --panel: #ffffff;
+  --surface: #f5f8fd;
+  --surface-strong: #e4edf8;
+  --ink: #0f2a4a;
+  --muted: #566580;
+  --line: #b9c8e2;
+  --line-soft: #d6e1f2;
+  --accent: #1a4b8c;
+  --accent-strong: #0f2e5c;
+  --accent-soft: #d8e6f6;
+  --blue: #2c6cb0;
+  --blue-soft: #d8e6f6;
+  --shadow: 0 24px 70px rgba(15, 42, 74, 0.16);
+  --shadow-soft: 0 10px 30px rgba(15, 42, 74, 0.10);
+  --cv-line: rgba(26, 75, 140, 0.22);
+  --cv-line-soft: rgba(26, 75, 140, 0.10);
+}
+
+body[data-theme="classic"] {
+  background:
+    radial-gradient(circle at 18% -6%, rgba(26, 75, 140, 0.18), transparent 36%),
+    radial-gradient(circle at 86% 4%, rgba(44, 108, 176, 0.14), transparent 30%),
+    linear-gradient(180deg, rgba(255,255,255,0.72), rgba(238,243,251,0.28) 22%, transparent 56%),
+    var(--bg);
+}
+
+body[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --surface: #1c2330;
+  --surface-strong: #252d3d;
+  --ink: #e3edf7;
+  --muted: #8b98a8;
+  --line: #30363d;
+  --line-soft: #21262d;
+  --accent: #58a6ff;
+  --accent-strong: #79b8ff;
+  --accent-soft: rgba(88, 166, 255, 0.18);
+  --blue: #58a6ff;
+  --blue-soft: rgba(88, 166, 255, 0.18);
+  --shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  --shadow-soft: 0 10px 30px rgba(0, 0, 0, 0.40);
+  --cv-line: rgba(88, 166, 255, 0.25);
+  --cv-line-soft: rgba(88, 166, 255, 0.12);
+}
+
+body[data-theme="dark"] {
+  background:
+    radial-gradient(circle at 18% -6%, rgba(88, 166, 255, 0.12), transparent 36%),
+    radial-gradient(circle at 86% 4%, rgba(136, 98, 255, 0.10), transparent 30%),
+    linear-gradient(180deg, rgba(22, 27, 34, 0.60), rgba(13, 17, 23, 0.30) 22%, transparent 56%),
+    var(--bg);
+}
+
+body[data-theme="dark"] .appearance-preview-card {
+  background: linear-gradient(180deg, rgba(28, 35, 48, 0.96), rgba(22, 27, 34, 0.92));
+}
+
+body[data-theme="warm"] {
+  --bg: #faf5ef;
+  --panel: #fffdf8;
+  --surface: #f7f0e6;
+  --surface-strong: #efe3d2;
+  --ink: #3d2b1a;
+  --muted: #8a7560;
+  --line: #d9c9b4;
+  --line-soft: #e8dcc8;
+  --accent: #b86b2e;
+  --accent-strong: #94501e;
+  --accent-soft: #f4e0ce;
+  --blue: #c0793c;
+  --blue-soft: #f4e0ce;
+  --shadow: 0 24px 70px rgba(61, 43, 26, 0.14);
+  --shadow-soft: 0 10px 30px rgba(61, 43, 26, 0.08);
+  --cv-line: rgba(184, 107, 46, 0.22);
+  --cv-line-soft: rgba(184, 107, 46, 0.10);
+}
+
+body[data-theme="warm"] {
+  background:
+    radial-gradient(circle at 18% -6%, rgba(184, 107, 46, 0.16), transparent 36%),
+    radial-gradient(circle at 86% 4%, rgba(212, 146, 74, 0.12), transparent 30%),
+    linear-gradient(180deg, rgba(255, 253, 248, 0.72), rgba(250, 245, 239, 0.28) 22%, transparent 56%),
+    var(--bg);
+}
+
+body[data-theme="warm"] .appearance-preview-card {
+  background: linear-gradient(180deg, rgba(255, 253, 248, 0.96), rgba(247, 240, 230, 0.92));
+}
+
+body[data-theme="forest"] {
+  --bg: #eef4ee;
+  --panel: #ffffff;
+  --surface: #f2f8f2;
+  --surface-strong: #e0ece0;
+  --ink: #1a3328;
+  --muted: #5a7560;
+  --line: #bcd0bc;
+  --line-soft: #d4e2d4;
+  --accent: #2d6a4f;
+  --accent-strong: #1b4332;
+  --accent-soft: #d0ead9;
+  --blue: #40916c;
+  --blue-soft: #d0ead9;
+  --shadow: 0 24px 70px rgba(26, 51, 40, 0.14);
+  --shadow-soft: 0 10px 30px rgba(26, 51, 40, 0.08);
+  --cv-line: rgba(45, 106, 79, 0.22);
+  --cv-line-soft: rgba(45, 106, 79, 0.10);
+}
+
+body[data-theme="forest"] {
+  background:
+    radial-gradient(circle at 18% -6%, rgba(45, 106, 79, 0.16), transparent 36%),
+    radial-gradient(circle at 86% 4%, rgba(64, 145, 108, 0.12), transparent 30%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(238, 244, 238, 0.28) 22%, transparent 56%),
+    var(--bg);
+}
+
+body[data-theme="forest"] .appearance-preview-card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(242, 248, 242, 0.92));
+}
+
+body[data-theme="sakura"] {
+  --bg: #fdf0f3;
+  --panel: #fffafc;
+  --surface: #fce8ed;
+  --surface-strong: #f5d5dd;
+  --ink: #4a2030;
+  --muted: #9a6a78;
+  --line: #e0bcc8;
+  --line-soft: #efd8e0;
+  --accent: #d4517a;
+  --accent-strong: #b03a5e;
+  --accent-soft: #f9dde6;
+  --blue: #d4517a;
+  --blue-soft: #f9dde6;
+  --shadow: 0 24px 70px rgba(74, 32, 48, 0.12);
+  --shadow-soft: 0 10px 30px rgba(74, 32, 48, 0.07);
+  --cv-line: rgba(212, 81, 122, 0.22);
+  --cv-line-soft: rgba(212, 81, 122, 0.10);
+}
+
+body[data-theme="sakura"] {
+  background:
+    radial-gradient(circle at 18% -6%, rgba(212, 81, 122, 0.16), transparent 36%),
+    radial-gradient(circle at 86% 4%, rgba(230, 120, 150, 0.12), transparent 30%),
+    linear-gradient(180deg, rgba(255, 250, 252, 0.72), rgba(253, 240, 243, 0.28) 22%, transparent 56%),
+    var(--bg);
+}
+
+body[data-theme="sakura"] .appearance-preview-card {
+  background: linear-gradient(180deg, rgba(255, 250, 252, 0.96), rgba(252, 232, 237, 0.92));
+}
+
+@media (max-width: 760px) {
+  .appearance-summary {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .appearance-theme-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================
+   世界知识面板 · 排版优化
+   ============================================================ */
+
+.world-knowledge-brief {
+  margin: 14px 0 18px;
+}
+
+.world-knowledge-brief section {
+  position: relative;
+  overflow: hidden;
+}
+
+.world-knowledge-brief section::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 100%;
+  background: linear-gradient(180deg, var(--accent), var(--blue));
+  opacity: 0.7;
+}
+
+.persona-card-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.persona-card-head > div:nth-child(2) {
+  min-width: 0;
+}
+
+.persona-card-head .roleplay-example-btn {
+  align-self: start;
+}
+
+.roleplay-user-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.roleplay-user-card > div:first-child {
+  min-width: 0;
+}
+
+.roleplay-user-card > .roleplay-example-btn {
+  align-self: start;
+}
+
+@media (max-width: 760px) {
+  .world-knowledge-brief {
+    grid-template-columns: 1fr;
+  }
+
+  .persona-standard-grid,
+  .blueprint-standard-grid,
+  .user-standard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .translation-standard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .roleplay-appearance-group {
+    grid-template-columns: 1fr;
+  }
+
+  .persona-card-head {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .persona-card-head .roleplay-example-btn {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .blueprint-head {
+    grid-template-columns: 1fr;
+  }
+
+  .blueprint-head > .roleplay-example-btn {
+    justify-self: start;
+  }
+
+  .blueprint-head > label {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .blueprint-head > label > select {
+    max-width: none;
+  }
+
+  .roleplay-user-card {
+    grid-template-columns: 1fr;
+  }
+
+  .roleplay-user-card > .roleplay-example-btn {
     justify-self: start;
   }
 }

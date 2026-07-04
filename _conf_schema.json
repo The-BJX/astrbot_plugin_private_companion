@@ -2538,6 +2538,12 @@
     "default": 180,
     "invisible": true
   },
+  "external_image_api_custom_headers": {
+    "description": "Legacy flat config: 在线生图自定义请求头",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "enable_backup_external_image_api": {
     "description": "Legacy flat config: 启用备选在线图片 API",
     "type": "bool",
@@ -2578,6 +2584,12 @@
     "description": "Legacy flat config: 备选在线生图超时时间（秒）",
     "type": "int",
     "default": 180,
+    "invisible": true
+  },
+  "backup_external_image_api_custom_headers": {
+    "description": "Legacy flat config: 备选在线生图自定义请求头",
+    "type": "string",
+    "default": "",
     "invisible": true
   },
   "photo_generation_style": {
@@ -3189,6 +3201,19 @@
     "options": [
       "original",
       "cheng"
+    ],
+    "invisible": true
+  },
+  "page_theme": {
+    "description": "Legacy flat config: 拓展页面主题",
+    "type": "string",
+    "default": "classic",
+    "options": [
+      "classic",
+      "dark",
+      "warm",
+      "forest",
+      "sakura"
     ],
     "invisible": true
   },
@@ -7141,7 +7166,7 @@
       "enable_daily_outfit_photo": {
         "description": "每日穿搭照片",
         "type": "bool",
-        "hint": "默认关闭。开启后，每天日程生成并保存后会额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，用作拓展页左上角 Logo。失败会记录当天结果，不会因刷新页面反复请求。",
+        "hint": "默认关闭。开启后，每天日程生成并保存后会额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，用作拓展页左上角 Logo。生成失败会自动间隔约3分钟重试，最多重试5次；当天成功或重试上限后不再重复请求。",
         "default": false,
         "condition": {
           "enable_photo_text_action": true
@@ -7318,6 +7343,15 @@
           "enable_photo_text_action": true
         }
       },
+      "external_image_api_custom_headers": {
+        "description": "在线生图自定义请求头",
+        "type": "string",
+        "hint": "可选。每行一个请求头，格式：Key: Value。例如 X-Custom-Header: 123\nX-Region: cn。会追加到生图 API 的 HTTP 请求头中，可用于鉴权、地区路由或自定义参数。留空则不追加。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
       "enable_backup_external_image_api": {
         "description": "启用备选在线图片 API",
         "type": "bool",
@@ -7387,6 +7421,16 @@
           "step": 10
         },
         "default": 180,
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_backup_external_image_api": true
+        }
+      },
+      "backup_external_image_api_custom_headers": {
+        "description": "备选在线生图自定义请求头",
+        "type": "string",
+        "hint": "可选。每行一个请求头，格式：Key: Value。仅在备选在线图片 API 生效时使用。留空则不追加。",
+        "default": "",
         "condition": {
           "enable_photo_text_action": true,
           "enable_backup_external_image_api": true

@@ -2723,7 +2723,10 @@ class ProactiveEngineMixin:
                 else:
                     impulse["state"] = "queued"
                 break
-            if user_id and status in {"blocked", "cancelled", "dropped", "failed", "deferred"}:
+            is_send_retry_deferred = status == "deferred" and (
+                "已保留待重发内容" in str(note or "") or "平台发送" in str(note or "")
+            )
+            if user_id and status in {"blocked", "cancelled", "dropped", "failed", "deferred"} and not is_send_retry_deferred:
                 self._shrink_user_proactive_candidates(user_id, note=note)
         finally:
             for key, value in restored_values.items():
