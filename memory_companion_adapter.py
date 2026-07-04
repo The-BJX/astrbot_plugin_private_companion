@@ -10,7 +10,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _missing_optional_model_dependency, _single_line
+from .helpers import _missing_optional_model_dependency, _safe_int, _single_line
 
 
 class MemoryCompanionAdapterMixin:
@@ -1083,6 +1083,61 @@ class MemoryCompanionAdapterMixin:
                 return datetime.now().isoformat(timespec="seconds")
             except Exception:
                 return ""
+
+    async def _memory_companion_record_qzone_publish(
+        self,
+        *,
+        text: str,
+        reason: str = "",
+        tid: str = "",
+        image_count: int = 0,
+        verified: bool | None = None,
+        event: Any | None = None,
+    ) -> None:
+        content = _single_line(text, 800)
+        if not content:
+            return
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_persona_life", None) if bridge is not None else None
+        if not callable(recorder):
+            return
+        reason_text = _single_line(reason, 40) or "qzone_publish"
+        session_id = "private_companion:qzone"
+        platform = ""
+        if event is not None:
+            session_id = _single_line(getattr(event, "unified_msg_origin", ""), 180) or session_id
+            platform = session_id.split(":", 1)[0] if ":" in session_id else ""
+        safe_image_count = _safe_int(image_count, 0, 0, 99)
+        image_part = f"；配图 {safe_image_count} 张" if safe_image_count > 0 else ""
+        verify_part = "；已反查确认" if verified else ""
+        memory_content = f"Bot 刚刚发布了一条 QQ 空间说说：{content}{image_part}{verify_part}。"
+        memory_key = _single_line(tid, 40) or uuid.uuid4().hex[:12]
+        try:
+            await recorder(
+                content=memory_content,
+                scope="unknown",
+                session_id=session_id,
+                platform=platform,
+                message_id=f"private_companion_qzone_{memory_key}",
+                memory_id=f"private_companion_qzone_{memory_key}",
+                metadata={
+                    "reason": reason_text,
+                    "tid": _single_line(tid, 80),
+                    "text": content,
+                    "image_count": safe_image_count,
+                    "verified": bool(verified) if verified is not None else None,
+                    "query_anchors": ["QQ空间", "说说", "刚才发了什么", "刚刚发了什么", "发了什么说说", "空间动态"],
+                },
+                source_plugin="private_companion",
+                confidence=0.84,
+                importance=0.58,
+                tags=["qzone", "qzone_publish", "persona_life", "说说", "QQ空间", reason_text],
+                occurred_at=self._memory_companion_now_iso(),
+            )
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_qzone_publish"):
+                return
+            logger.debug("[PrivateCompanion] MemoryCompanion QQ 空间发布写入失败: %s", _single_line(exc, 120))
 
     def _memory_companion_apply_emotional_drift(self, *, session_id: str = "") -> None:
         """Pull pending emotional drift events from the memory plugin and apply to daily_state.

@@ -907,6 +907,7 @@ class QzoneMediaMixin:
         event: AstrMessageEvent | None = None,
         images: list[str] | None = None,
         auto_generate_image: bool = False,
+        publish_reason: str = "manual_publish",
     ) -> dict[str, Any]:
         if not self.enable_qzone_integration:
             return {"success": False, "message": "QQ 空间动态层未启用"}
@@ -942,7 +943,7 @@ class QzoneMediaMixin:
                 expected_images=len(post_images),
             )
             verified_images = _safe_int(verification.get("images"), len(post_images), 0, 99)
-            return {
+            result = {
                 "success": True,
                 "text": _single_line(getattr(post, "text", content), 300) or content,
                 "tid": str(getattr(post, "tid", "") or ""),
@@ -952,6 +953,20 @@ class QzoneMediaMixin:
                 "verified": bool(verification.get("verified")),
                 "verify_message": verification.get("message") or "",
             }
+            recorder = getattr(self, "_qzone_record_published_post", None)
+            if callable(recorder):
+                try:
+                    await recorder(
+                        result.get("text") or content,
+                        reason=publish_reason,
+                        tid=result.get("tid", ""),
+                        image_count=_safe_int(result.get("image_count"), 0, 0, 99),
+                        verified=bool(result.get("verified")),
+                        event=event,
+                    )
+                except Exception as record_exc:
+                    logger.debug("[PrivateCompanion] QQ 空间发布后自我记录失败: %s", _single_line(record_exc, 120))
+            return result
 
         try:
             return await publish_once(image_list)

@@ -1,7 +1,9 @@
 const HTTP_API = "/astrbot_plugin_private_companion/page";
 const PAGE_ENDPOINT_PREFIX = "page";
+const PAGE_PLUGIN_NAME = "astrbot_plugin_private_companion";
 const TRANSPARENT_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 let cachedPageBridge = null;
+let cachedPageEndpointStyle = "";
 let pageBridgeProbePromise = null;
 let loadAllRequestSeq = 0;
 
@@ -2660,11 +2662,30 @@ async function waitForBridge(timeoutMs = 2500) {
 
 async function bridgeRequest(bridge, path, method, body) {
   const url = new URL(path, "https://astrbot-plugin-page.local/");
-  const endpoint = `${PAGE_ENDPOINT_PREFIX}/${url.pathname.replace(/^\/+/, "")}`.replace(/\/+/g, "/");
+  const routePath = url.pathname.replace(/^\/+/, "");
+  const endpointCandidates = bridgeEndpointCandidates(routePath);
+  const errors = [];
 
   if (method === "GET") {
     const params = Object.fromEntries(url.searchParams.entries());
-    return bridge.apiGet(endpoint, Object.keys(params).length ? params : undefined);
+    for (const candidate of endpointCandidates) {
+      try {
+        const payload = await bridge.apiGet(candidate.endpoint, Object.keys(params).length ? params : undefined);
+        if (isRouteMissingPayload(payload)) {
+          errors.push(payload.message || payload.error || "未找到该路由");
+          continue;
+        }
+        cachedPageEndpointStyle = candidate.style;
+        return payload;
+      } catch (error) {
+        if (isRouteMissingError(error)) {
+          errors.push(error.message || String(error));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error(errors[0] || "未找到可用的页面 API 路由");
   }
 
   let payload = body || {};
@@ -2675,7 +2696,24 @@ async function bridgeRequest(bridge, path, method, body) {
       payload = {};
     }
   }
-  return bridge.apiPost(endpoint, payload);
+  for (const candidate of endpointCandidates) {
+    try {
+      const result = await bridge.apiPost(candidate.endpoint, payload);
+      if (isRouteMissingPayload(result)) {
+        errors.push(result.message || result.error || "未找到该路由");
+        continue;
+      }
+      cachedPageEndpointStyle = candidate.style;
+      return result;
+    } catch (error) {
+      if (isRouteMissingError(error)) {
+        errors.push(error.message || String(error));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(errors[0] || "未找到可用的页面 API 路由");
 }
 
 function normalizeResponse(payload) {
@@ -2693,6 +2731,59 @@ function normalizeResponse(payload) {
     }
   }
   return { success: true, data: payload };
+}
+
+function bridgeEndpointCandidates(routePath) {
+  const cleanRoute = String(routePath || "").replace(/^\/+/, "");
+  const byStyle = {
+    cached: cachedPageEndpointStyle ? endpointForStyle(cachedPageEndpointStyle, cleanRoute) : "",
+    page: `${PAGE_ENDPOINT_PREFIX}/${cleanRoute}`,
+    bare: cleanRoute,
+    slash: `/${cleanRoute}`,
+    full: `${PAGE_PLUGIN_NAME}/${PAGE_ENDPOINT_PREFIX}/${cleanRoute}`,
+    fullSlash: `/${PAGE_PLUGIN_NAME}/${PAGE_ENDPOINT_PREFIX}/${cleanRoute}`,
+  };
+  const ordered = [
+    ["cached", byStyle.cached],
+    ["page", byStyle.page],
+    ["bare", byStyle.bare],
+    ["slash", byStyle.slash],
+    ["full", byStyle.full],
+    ["fullSlash", byStyle.fullSlash],
+  ];
+  const seen = new Set();
+  return ordered
+    .map(([style, endpoint]) => ({ style: style === "cached" ? cachedPageEndpointStyle : style, endpoint: String(endpoint || "").replace(/\/+/g, "/") }))
+    .filter((item) => item.style && item.endpoint && !seen.has(item.endpoint) && seen.add(item.endpoint));
+}
+
+function endpointForStyle(style, routePath) {
+  const cleanRoute = String(routePath || "").replace(/^\/+/, "");
+  switch (style) {
+    case "page":
+      return `${PAGE_ENDPOINT_PREFIX}/${cleanRoute}`;
+    case "bare":
+      return cleanRoute;
+    case "slash":
+      return `/${cleanRoute}`;
+    case "full":
+      return `${PAGE_PLUGIN_NAME}/${PAGE_ENDPOINT_PREFIX}/${cleanRoute}`;
+    case "fullSlash":
+      return `/${PAGE_PLUGIN_NAME}/${PAGE_ENDPOINT_PREFIX}/${cleanRoute}`;
+    default:
+      return "";
+  }
+}
+
+function isRouteMissingPayload(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const text = `${payload.error || ""} ${payload.message || ""} ${payload.detail || ""}`.toLowerCase();
+  return /未找到.*路由|route.*not.*found|not.*found.*route|404/.test(text);
+}
+
+function isRouteMissingError(error) {
+  const text = String(error?.message || error || "").toLowerCase();
+  return /未找到.*路由|route.*not.*found|not.*found.*route|http\s*404|\b404\b/.test(text);
 }
 
 function postJson(path, body) {

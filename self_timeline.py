@@ -68,6 +68,13 @@ class SelfTimelineMixin:
         )
         has_self = any(token in normalized for token in ("你", "bot", "Bot", "星缘", "孩子"))
         has_time = any(token in normalized for token in time_words) or self._self_timeline_query_minutes(normalized) is not None
+        asks_qzone_publish = (
+            has_time
+            and any(token in normalized for token in ("说说", "QQ空间", "qq空间", "空间动态", "动态"))
+            and any(token in normalized for token in ("发", "发布", "写", "说了什么", "发了什么", "发了啥"))
+        )
+        if asks_qzone_publish:
+            return True
         return has_self and has_time and any(token in normalized for token in action_words)
 
     def _format_self_timeline_context_for_reply(
@@ -89,7 +96,7 @@ class SelfTimelineMixin:
             )
         lines = [
             "【自我时间线检索】",
-            "用户在问 Bot 自己某个时间做过什么。下面是从日程、细化、日记、主动行为、创作、私密阅读和生图记录里检索到的线索；只根据这些线索回答，不确定就说记不准。",
+            "用户在问 Bot 自己某个时间做过什么。下面是从日程、细化、日记、主动行为、创作、私密阅读、生图和 QQ 空间发布记录里检索到的线索；只根据这些线索回答，不确定就说记不准。",
         ]
         for entry in entries[: max(1, limit)]:
             when = _single_line(entry.get("when"), 40) or "时间不详"
@@ -116,6 +123,7 @@ class SelfTimelineMixin:
         entries.extend(self._self_timeline_from_creative(data))
         entries.extend(self._self_timeline_from_private_reading(data))
         entries.extend(self._self_timeline_from_photo_generation(data))
+        entries.extend(self._self_timeline_from_qzone_publish(data))
 
         now = _now_ts()
         scored: list[tuple[float, float, dict[str, Any]]] = []
@@ -332,6 +340,51 @@ class SelfTimelineMixin:
                     "summary": f"{'生成了' if ok else '尝试生成'}{kind or '图片'}",
                     "detail": note or prompt,
                     "keywords": "图片 生图 拍照 自拍 画了什么 生成了什么 " + " ".join([kind, prompt, note]),
+                }
+            )
+        return entries
+
+    def _self_timeline_from_qzone_publish(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        state = data.get("qzone_integration") if isinstance(data.get("qzone_integration"), dict) else {}
+        raw = state.get("recent_life_publish_texts") if isinstance(state, dict) else []
+        if not isinstance(raw, list):
+            return []
+        reason_labels = {
+            "life_publish": "生活说说",
+            "emotional_vent": "心情说说",
+            "manual_publish": "手动说说",
+        }
+        entries = []
+        for item in raw[-12:]:
+            if not isinstance(item, dict):
+                text = _single_line(item, 180)
+                ts = 0.0
+                reason = ""
+                image_count = 0
+                tid = ""
+            else:
+                text = _single_line(item.get("text"), 180)
+                ts = _safe_float(item.get("at"), 0)
+                reason = _single_line(item.get("reason"), 40)
+                image_count = _safe_int(item.get("image_count"), 0, 0, 99)
+                tid = _single_line(item.get("tid"), 80)
+            if not text:
+                continue
+            label = reason_labels.get(reason, "QQ 空间说说")
+            detail_parts = [f"正文:{text}"]
+            if image_count > 0:
+                detail_parts.append(f"配图:{image_count}张")
+            if tid:
+                detail_parts.append(f"tid:{tid}")
+            entries.append(
+                {
+                    "source": "QQ空间",
+                    "ts": ts,
+                    "date": self._self_timeline_date_from_ts(ts),
+                    "when": self._self_timeline_when_from_ts(ts),
+                    "summary": f"发布了{label}",
+                    "detail": "；".join(detail_parts),
+                    "keywords": "QQ空间 空间 说说 动态 发了什么 说了什么 刚才发了什么说说 " + " ".join([text, reason, label]),
                 }
             )
         return entries

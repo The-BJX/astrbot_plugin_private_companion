@@ -1725,7 +1725,18 @@ class QzoneMixin(QzoneMediaMixin):
             return ""
         return "最近已发说说：\n" + "\n".join(lines) + "\n本次请换一个场景、情绪或观察角度，不要重复同一类表达。"
 
-    def _qzone_note_recent_publish(self, state: dict[str, Any], text: Any, *, reason: str, now: float | None = None) -> None:
+    def _qzone_note_recent_publish(
+        self,
+        state: dict[str, Any],
+        text: Any,
+        *,
+        reason: str,
+        now: float | None = None,
+        tid: str = "",
+        image_count: int = 0,
+        verified: bool | None = None,
+        source: str = "",
+    ) -> None:
         if not isinstance(state, dict):
             return
         clean = _single_line(text, 180)
@@ -1748,8 +1759,63 @@ class QzoneMixin(QzoneMediaMixin):
                 deduped.append(dict(item))
             else:
                 deduped.append({"text": item_text, "at": 0, "reason": ""})
-        deduped.append({"text": clean, "at": current, "reason": _single_line(reason, 40)})
+        entry = {
+            "text": clean,
+            "at": current,
+            "reason": _single_line(reason, 40),
+            "tid": _single_line(tid, 80),
+            "image_count": _safe_int(image_count, 0, 0, 99),
+            "source": _single_line(source, 40),
+        }
+        if verified is not None:
+            entry["verified"] = bool(verified)
+        deduped.append(entry)
         state["recent_life_publish_texts"] = deduped[-8:]
+
+    async def _qzone_record_published_post(
+        self,
+        text: Any,
+        *,
+        reason: str = "manual_publish",
+        tid: str = "",
+        image_count: int = 0,
+        verified: bool | None = None,
+        event: AstrMessageEvent | None = None,
+    ) -> None:
+        state = self._qzone_state_dict()
+        now = _now_ts()
+        clean = _single_line(text, 300)
+        if not clean:
+            return
+        self._qzone_note_recent_publish(
+            state,
+            clean,
+            reason=reason,
+            now=now,
+            tid=tid,
+            image_count=image_count,
+            verified=verified,
+            source="publish_success",
+        )
+        state["last_publish_recorded_at"] = now
+        state["last_publish_recorded_text"] = _single_line(clean, 180)
+        state["last_publish_recorded_reason"] = _single_line(reason, 40)
+        state["last_publish_recorded_tid"] = _single_line(tid, 80)
+        state["last_publish_recorded_images"] = _safe_int(image_count, 0, 0, 99)
+        recorder = getattr(self, "_memory_companion_record_qzone_publish", None)
+        if callable(recorder):
+            await recorder(
+                text=clean,
+                reason=reason,
+                tid=tid,
+                image_count=image_count,
+                verified=verified,
+                event=event,
+            )
+        try:
+            self._save_data_sync()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] QQ 空间发布记录保存失败: %s", _single_line(exc, 120))
 
     def _qzone_text_leaks_internal_state(self, text: str) -> bool:
         compact = str(text or "")
@@ -2579,12 +2645,11 @@ class QzoneMixin(QzoneMediaMixin):
                 diary_context=diary_context,
                 state=state,
             )
-        result = await self._publish_qzone_text(text, images=image_sources)
+        result = await self._publish_qzone_text(text, images=image_sources, publish_reason="life_publish")
         if result.get("success"):
             state["last_life_publish_at"] = now
             state.pop("last_life_publish_failed_at", None)
             state["last_life_publish_status"] = "published"
-            self._qzone_note_recent_publish(state, result.get("text") or text, reason="life_publish", now=now)
             if result.get("image_fallback"):
                 self._qzone_note_publish_image_status(
                     state,
@@ -2730,7 +2795,7 @@ class QzoneMixin(QzoneMediaMixin):
                     diary_context="",
                     state=state,
                 )
-            result = await self._publish_qzone_text(text, images=image_sources)
+            result = await self._publish_qzone_text(text, images=image_sources, publish_reason="emotional_vent")
             if result.get("success"):
                 state["last_emotional_vent_at"] = now
                 state.pop("last_emotional_vent_failed_at", None)
