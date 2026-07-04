@@ -48,7 +48,6 @@ class QzoneMediaMixin:
             "skey",
             "g_tk",
             "gtk",
-            "qzonetoken",
         )
         return any(marker in text for marker in markers)
 
@@ -84,7 +83,7 @@ class QzoneMediaMixin:
         ):
             self._qzone_clear_auth_failure(state)
             return ""
-        if "qzonetoken 未在 H5 首页中找到" in reason:
+        if "qzonetoken" in reason.lower() or "qzonetoken 未在 H5 首页中找到" in reason:
             self._qzone_clear_auth_failure(state)
             return ""
         until_text = self._qzone_format_block_until(until)

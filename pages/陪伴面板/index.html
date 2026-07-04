@@ -838,6 +838,7 @@ QQ空间 = 公开札记
         <div id="moduleSummary" class="module-summary"></div>
         <nav class="module-nav" aria-label="模块工作台分组">
           <a href="#moduleWorkbench">工作台</a>
+          <a href="#module-tool-quick">快速启动</a>
           <a href="#module-tool-presets">预设</a>
           <a href="#module-tool-segmented">分段实验室</a>
           <a href="#module-tool-news">新闻源</a>
@@ -852,6 +853,23 @@ QQ空间 = 公开札记
           <button type="button" data-jump-tab="config">打开配置页</button>
         </section>
         <div class="module-tool-grid">
+          <article class="module-tool-card wide" id="module-tool-quick">
+            <header>
+              <div>
+                <span>Setup</span>
+                <h3>快速启动</h3>
+                <p>配置目标平台、私聊对象和小号转发，设定免打扰时段和管理命令范围。首次使用从这里开始。</p>
+              </div>
+            </header>
+            <form id="quickModuleForm" class="module-form">
+              <label>目标平台 <input name="target_platform" /></label>
+              <label>私聊目标 QQ <textarea name="target_user_ids" rows="4" placeholder="一行一个或逗号分隔"></textarea></label>
+              <label>主动发送到小号 <textarea name="private_user_delivery_aliases" rows="3" placeholder="大号QQ=小号QQ"></textarea></label>
+              <label>免打扰时间 <input name="quiet_hours" placeholder="23:00-08:30" /></label>
+              <label class="toggle-row"><input name="require_private_opt_in" type="checkbox" /> <span>限制管理命令仅私聊可用</span></label>
+              <button type="submit">保存快速启动</button>
+            </form>
+          </article>
           <article class="module-tool-card wide" id="module-tool-presets">
             <header>
               <div>
@@ -934,20 +952,13 @@ QQ空间 = 公开札记
             </div>
             <div id="legacyPresetCards" class="preset-grid"></div>
           </article>
-          <article class="module-card" id="module-quick">
+          <article class="module-card" id="module-quick" hidden aria-hidden="true">
             <div class="module-card-head">
               <div>
-                <h2>快速启动</h2>
+                <h2>快速启动（旧）</h2>
               </div>
               <span class="module-badge">基础</span>
             </div>
-            <form id="quickModuleForm" class="module-form">
-              <label>目标平台 <input name="target_platform" /></label>
-              <label>私聊目标 QQ <textarea name="target_user_ids" rows="4" placeholder="一行一个或逗号分隔"></textarea></label>
-              <label>主动发送到小号 <textarea name="private_user_delivery_aliases" rows="3" placeholder="大号QQ=小号QQ"></textarea></label>
-              <label>免打扰时间 <input name="quiet_hours" placeholder="23:00-08:30" /></label>
-              <button type="submit">保存快速启动</button>
-            </form>
           </article>
           <article class="module-card" id="module-environment">
             <div class="module-card-head">

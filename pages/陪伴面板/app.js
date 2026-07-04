@@ -9420,11 +9420,16 @@ function renderStorageConfig(options = {}) {
 function renderPrivateStrategyOverview(selector, info) {
   const total = Number(info.target_count ?? info.user_count ?? info.private_user_count ?? 0);
   const enabled = Number(info.enabled_count ?? info.enabled_user_count ?? total);
+  const adminIds = Array.isArray(info.admin_ids) ? info.admin_ids : [];
+  const targetIds = Array.isArray(info.target_user_ids) ? info.target_user_ids : [];
+  const manageIds = [...new Set([...adminIds, ...targetIds])];
+  const manageText = manageIds.length ? manageIds.join("、") : "未配置";
   const rows = [
     ["对象", total ? `${enabled}/${total} 启用` : `${enabled || 0} 个启用`],
     ["主动上限", `每日 ${Number(info.max_daily_messages || 0)} 条`],
     ["触达条件", `空闲 ${Number(info.idle_minutes || 0)} 分钟后，最小间隔 ${Number(info.min_interval_minutes || 0)} 分钟`],
-    ["私聊确认", toBool(info.require_opt_in ?? info.require_confirm ?? info.require_private_confirm) ? "需要" : "不需要"],
+    ["管理权限", manageText],
+    ["管理命令", toBool(info.require_opt_in ?? info.require_confirm ?? info.require_private_confirm) ? "仅私聊" : "私聊+群聊"],
   ];
   $(selector).innerHTML = compactOverviewList(rows, { columns: 1 });
 }
@@ -9456,9 +9461,9 @@ function renderLongTermStrategyOverview(selector, { creative = {}, bili = {}, qz
     },
     {
       title: "QQ 空间",
-      tone: qzone.enabled && qzone.available ? "ok" : qzone.enabled ? "warn" : "off",
+      tone: qzone.enabled && qzone.available ? (qzone.last_status && qzone.last_status.startsWith("paused:") ? "warn" : "ok") : qzone.enabled ? "warn" : "off",
       meta: [qzone.enabled ? (qzone.available ? "可用" : "待服务") : "关闭", qzone.life_publish_enabled ? "生活说说开启" : "生活说说关闭", qzone.comment_inbox_enabled ? "评论收件箱开启" : ""].filter(Boolean),
-      text: qzone.last_text || "暂无最近说说",
+      text: qzone.last_status && qzone.last_status.startsWith("paused:") ? `自动说说已暂停：${qzone.auth_failure_reason || qzone.last_status}` : (qzone.last_text || "暂无最近说说"),
     },
     {
       title: "私下创作",
@@ -9658,7 +9663,7 @@ function renderModuleWorkbench(settings) {
       tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch || settings.enable_qzone_life_publish ? "ok" : "off",
       body: [
         creative.latest_title ? `最近创作：${creative.latest_title}` : "",
-        qzone.last_text ? `最近说说：${qzone.last_text}` : "",
+        qzone.last_status && qzone.last_status.startsWith("paused:") ? `QQ 空间自动说说已暂停：${qzone.auth_failure_reason || ""}` : (qzone.last_text ? `最近说说：${qzone.last_text}` : ""),
         privateReading.last_album?.title ? `最近阅读：${privateReading.last_album.title}` : "",
       ].filter(Boolean).join("；") || "创作、空间、新闻、夹层阅读等外部生活线还没有明显产物。",
       meta: [

@@ -188,6 +188,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "user_count": len(users),
                     "enabled_user_count": enabled_users,
                     "require_opt_in": bool(getattr(self.plugin, "require_private_opt_in", True)),
+                    "admin_ids": list(self.plugin._configured_admin_ids()) if hasattr(self.plugin, "_configured_admin_ids") else [],
+                    "target_user_ids": list(self.plugin._configured_target_ids()) if hasattr(self.plugin, "_configured_target_ids") else [],
                     "max_daily_messages": getattr(self.plugin, "max_daily_messages", 0),
                     "idle_minutes": getattr(self.plugin, "idle_minutes", 0),
                     "min_interval_minutes": getattr(self.plugin, "min_interval_minutes", 0),
@@ -7035,7 +7037,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         )
 
     def _runtime_settings(self) -> dict[str, Any]:
-                keys = [
+        keys = [
             "bot_name",
             "page_font_family",
             "page_theme",
@@ -7045,6 +7047,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "private_user_aliases",
             "private_user_delivery_aliases",
             "target_platform",
+            "require_private_opt_in",
             "environment_perception_timezone",
             "holiday_country",
             "enable_environment_perception",
@@ -8525,7 +8528,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return keys
 
     def _allowed_setting_keys(self) -> set[str]:
-                keys = {
+        keys = {
             "bot_name",
             "page_font_family",
             "page_theme",
@@ -8536,6 +8539,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "private_user_aliases",
             "private_user_delivery_aliases",
             "target_platform",
+            "require_private_opt_in",
             "environment_perception_timezone",
             "holiday_country",
             "enable_environment_perception",
@@ -8875,7 +8879,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._normalize_id_list(value)
         if key == "plugin_specific_persona_id":
             return str(value or "").strip()[:160]
-                if key == "page_font_family":
+        if key == "page_font_family":
             text = str(value or "original").strip().lower()
             return text if text in {"original", "cheng"} else "original"
         if key == "page_theme":
