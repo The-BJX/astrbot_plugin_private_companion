@@ -559,6 +559,7 @@ class PrivateCompanionPlugin(
         self.enable_recall_transcribe_command = self._cfg_bool(c, "enable_recall_transcribe_command", True)
         self.recall_message_cache_ttl_seconds = self._cfg_float(c, "recall_message_cache_ttl_seconds", 600.0, 60.0)
         self.recall_message_cache_max_items = self._cfg_int(c, "recall_message_cache_max_items", 300, 0, 3000)
+        self.recall_message_image_cache_max_mb = self._cfg_float(c, "recall_message_image_cache_max_mb", 256.0, 0.0)
         self.recall_message_cache_text_chars = self._cfg_int(c, "recall_message_cache_text_chars", 500, 80, 2000)
         self.recall_cancel_reply_ttl_seconds = self.recall_message_cache_ttl_seconds
         self.enable_forbidden_word_recall = self._cfg_bool(c, "enable_forbidden_word_recall", False)
@@ -875,6 +876,7 @@ class PrivateCompanionPlugin(
             c, "enable_voice_action", bool(self._cfg_raw(c, "allow_voice_action", legacy_voice_enabled))
         )
         self.enable_qq_presence_sync = self._cfg_bool(c, "enable_qq_presence_sync", True)
+        self.enable_qq_custom_presence_sync = self._cfg_bool(c, "enable_qq_custom_presence_sync", False)
         self.poke_action_max_times = self._cfg_int(c, "poke_action_max_times", 1, 1, 3)
         self.voice_action_max_chars = self._cfg_int(c, "voice_action_max_chars", 30, 6, 80)
         self.photo_action_max_daily = self._cfg_int(c, "photo_action_max_daily", 1, 0, 5)
@@ -1495,6 +1497,7 @@ class PrivateCompanionPlugin(
         run_step("runtime_social_fact_sanitize", self._sanitize_runtime_social_facts_inplace)
         run_step("private_user_alias_merge", self._merge_private_user_alias_records)
         run_step("group_slang_cleanup", self._cleanup_all_group_slang_terms)
+        run_step("recall_image_cache_cleanup", lambda: self._cleanup_recall_message_image_cache(force=True))
 
         def cleanup_groups() -> bool:
             groups = self.data.get("groups") if isinstance(self.data.get("groups"), dict) else {}

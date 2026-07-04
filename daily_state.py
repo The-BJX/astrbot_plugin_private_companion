@@ -1066,14 +1066,30 @@ class DailyStateMixin:
             or status.get("文案"),
             28,
         )
+        custom_sync_enabled = bool(getattr(self, "enable_qq_custom_presence_sync", False))
+        custom_note = ""
         if mode in {"busy", "忙碌"}:
-            mode = "custom"
-            custom_text = custom_text or "专注中"
+            if custom_sync_enabled:
+                mode = "custom"
+                custom_text = custom_text or "专注中"
+            else:
+                mode = "busy"
+                custom_text = ""
+                custom_note = "自定义短状态未开启，已改用标准忙碌"
         if mode in {"sleep", "睡觉", "睡眠"}:
-            mode = "custom"
-            custom_text = custom_text or "休息中"
+            if custom_sync_enabled:
+                mode = "custom"
+                custom_text = custom_text or "休息中"
+            else:
+                mode = "online"
+                custom_text = ""
+                custom_note = "自定义短状态未开启，已保持在线"
         if mode in {"custom", "自定义", "自定义状态"} and not custom_text:
             mode = "online"
+        if mode in {"custom", "自定义", "自定义状态"} and not custom_sync_enabled:
+            mode = "online"
+            custom_text = ""
+            custom_note = "自定义短状态未开启，已保持在线"
         key = str((segment or {}).get("key") or "")
         state = self.data.setdefault("qq_presence_state", {})
         if not isinstance(state, dict):
@@ -1092,8 +1108,15 @@ class DailyStateMixin:
         if mode in {"custom", "自定义", "自定义状态"}:
             ok, note = await self._set_qq_custom_presence(custom_text)
             mode = "custom"
+            if not ok:
+                fallback_ok, fallback_note = await self._set_qq_online_presence("online")
+                ok = fallback_ok
+                note = f"{note}；已回退在线：{fallback_note}"
+                mode = "online"
         else:
             ok, note = await self._set_qq_online_presence(mode)
+        if custom_note:
+            note = f"{note}；{custom_note}" if note else custom_note
         state["detail_key"] = key
         state["date"] = _today_key()
         state["plan_date"] = str(self.data.get("detail_enhanced_day") or "")

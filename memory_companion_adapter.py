@@ -61,7 +61,10 @@ class MemoryCompanionAdapterMixin:
             if bridge is not None:
                 return bridge
         for module in list(sys.modules.values()):
-            if getattr(module, "PLUGIN_NAME", "") not in {"astrbot_plugin_memory_companion", "astrbot_plugin_remember_you", "RememberYou"}:
+            module_vars = getattr(module, "__dict__", {}) if module is not None else {}
+            if not isinstance(module_vars, dict):
+                continue
+            if module_vars.get("PLUGIN_NAME", "") not in {"astrbot_plugin_memory_companion", "astrbot_plugin_remember_you", "RememberYou"}:
                 continue
             bridge = self._memory_companion_bridge_from_module(module)
             if bridge is not None:
@@ -69,7 +72,8 @@ class MemoryCompanionAdapterMixin:
         return None
 
     def _memory_companion_bridge_from_module(self, module: Any | None) -> Any | None:
-        getter = getattr(module, "get_active_bridge", None) if module is not None else None
+        module_vars = getattr(module, "__dict__", {}) if module is not None else {}
+        getter = module_vars.get("get_active_bridge") if isinstance(module_vars, dict) else None
         if not callable(getter):
             return None
         try:

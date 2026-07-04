@@ -1119,6 +1119,7 @@ class EventDispatchMixin:
         cache = getattr(self, "_recall_message_cache", None)
         if not isinstance(cache, dict):
             self._recall_message_cache = {}
+            self._cleanup_recall_message_image_cache()
             return
         now = _now_ts()
         ttl = max(60.0, _safe_float(getattr(self, "recall_message_cache_ttl_seconds", 600), 600))
@@ -1130,6 +1131,90 @@ class EventDispatchMixin:
             ordered = sorted(cache.items(), key=lambda kv: _safe_float(kv[1].get("ts") if isinstance(kv[1], dict) else 0, 0))
             for key, _ in ordered[: len(cache) - max_items]:
                 cache.pop(key, None)
+        self._cleanup_recall_message_image_cache()
+
+    def _cleanup_recall_message_image_cache(self, *, force: bool = False) -> bool:
+        root = Path(getattr(self, "data_dir", "") or "") / "recall_message_images"
+        try:
+            root_resolved = root.resolve()
+            data_resolved = Path(getattr(self, "data_dir", "") or "").resolve()
+        except Exception:
+            return False
+        if not root_resolved.exists() or not root_resolved.is_dir():
+            return False
+        try:
+            root_resolved.relative_to(data_resolved)
+        except ValueError:
+            return False
+        now = _now_ts()
+        if not force:
+            last_cleanup = _safe_float(getattr(self, "_last_recall_image_cache_cleanup_ts", 0), 0)
+            if now - last_cleanup < 300:
+                return False
+        self._last_recall_image_cache_cleanup_ts = now
+        ttl = max(60.0, _safe_float(getattr(self, "recall_message_cache_ttl_seconds", 600), 600))
+        max_mb = max(0.0, _safe_float(getattr(self, "recall_message_image_cache_max_mb", 256.0), 256.0, 0.0))
+        max_bytes = int(max_mb * 1024 * 1024) if max_mb > 0 else 0
+        files: list[tuple[float, int, Path]] = []
+        removed_count = 0
+        removed_bytes = 0
+
+        try:
+            iterator = list(root_resolved.rglob("*"))
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 撤回图片缓存扫描失败: %s", exc)
+            return False
+
+        for path in iterator:
+            try:
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+                mtime = float(stat.st_mtime or 0)
+                size = int(stat.st_size or 0)
+                if now - mtime > ttl:
+                    try:
+                        path.unlink()
+                        removed_count += 1
+                        removed_bytes += size
+                    except Exception as exc:
+                        logger.debug("[PrivateCompanion] 撤回图片过期缓存删除失败: path=%s error=%s", path, exc)
+                    continue
+                files.append((mtime, size, path))
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 撤回图片缓存条目读取失败: path=%s error=%s", path, exc)
+
+        total_bytes = sum(size for _, size, _ in files)
+        if max_bytes and total_bytes > max_bytes:
+            for _, size, path in sorted(files, key=lambda item: item[0]):
+                if total_bytes <= max_bytes:
+                    break
+                try:
+                    path.unlink()
+                    total_bytes -= size
+                    removed_count += 1
+                    removed_bytes += size
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 撤回图片容量缓存删除失败: path=%s error=%s", path, exc)
+
+        for directory in sorted((p for p in iterator if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 撤回图片空目录清理失败: path=%s error=%s", directory, exc)
+
+        if removed_count:
+            logger.info(
+                "[PrivateCompanion] 已清理撤回图片缓存: files=%s size=%.1fMB ttl=%.0fs max=%.1fMB",
+                removed_count,
+                removed_bytes / 1024 / 1024,
+                ttl,
+                max_mb,
+            )
+            return True
+        return False
 
     async def _cache_message_for_recall(self, event: AstrMessageEvent) -> None:
         if not getattr(self, "enable_recall_enhancement", True):

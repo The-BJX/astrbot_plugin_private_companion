@@ -4183,12 +4183,15 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         return False, f"平台不支持 set_online_status：{label}"
 
     async def _set_qq_custom_presence(self, text: str) -> tuple[bool, str]:
+        if not getattr(self, "enable_qq_custom_presence_sync", False):
+            return False, "QQ 自定义短状态未开启"
         client = self._resolve_aiocqhttp_client()
         if client is None:
             return False, "未找到可用 QQ 客户端"
         custom_text = _single_line(text, 8)
         if not custom_text:
             return False, "自定义状态文本为空,跳过同步"
+        # Avoid set_custom_online_status: some OneBot adapters disconnect on this unsupported extension API.
         variants = (
             ("set_diy_online_status", {"face_id": 21, "face_type": 1, "wording": custom_text}),
             ("set_diy_online_status", {"face_id": "21", "face_type": "1", "wording": custom_text}),
@@ -4199,8 +4202,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             ("set_diy_online_status", {"faceId": 21, "text": custom_text}),
             ("set_diy_online_status", {"id": 21, "text": custom_text}),
             ("set_diy_online_status", {"text": custom_text}),
-            ("set_custom_online_status", {"text": custom_text}),
-            ("set_custom_online_status", {"face_id": 21, "text": custom_text}),
         )
         for action, params in variants:
             if await self._call_onebot_action(client, action, **params):

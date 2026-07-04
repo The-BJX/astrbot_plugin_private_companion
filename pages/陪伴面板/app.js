@@ -648,6 +648,8 @@ const featureMeta = {
   enable_humanized_states: ["拟人身体状态", "生成精力、睡眠、梦境、健康、饥饿和周期等扮演状态，影响日程、主动消息和被动语气。"],
   enable_health_state: ["健康/不适状态", "开启后视为可用，允许当前扮演状态出现生病、不舒服或恢复尾声。"],
   enable_hunger_state: ["饥饿/胃口状态", "开启后视为可用，允许当前扮演状态出现饿、胃口不好或想吃东西。"],
+  enable_qq_presence_sync: ["同步 QQ 在线状态", "让日程细化把在线/忙碌等基础状态同步到 QQ；不包含自定义短状态。"],
+  enable_qq_custom_presence_sync: ["同步 QQ 自定义短状态", "默认关闭；仅协议端明确支持时再开启，用于“专注中/休息中”等短状态。"],
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
@@ -1080,6 +1082,7 @@ const configLabels = {
   enable_recall_transcribe_command: "撤回转述命令",
   recall_message_cache_ttl_seconds: "撤回缓存秒数",
   recall_message_cache_max_items: "撤回缓存上限",
+  recall_message_image_cache_max_mb: "撤回图片磁盘上限",
   enable_forbidden_word_recall: "违禁词自动撤回",
   recall_forbidden_words: "撤回违禁词表",
   recall_forbidden_scope: "违禁词撤回范围",
@@ -1149,6 +1152,8 @@ const configLabels = {
   enable_humanized_states: "拟人身体状态",
   enable_health_state: "健康/不适状态",
   enable_hunger_state: "饥饿/胃口状态",
+  enable_qq_presence_sync: "同步 QQ 在线状态",
+  enable_qq_custom_presence_sync: "同步 QQ 自定义短状态",
   inject_passive_states: "被动状态注入",
   enable_passive_state_delta_injection: "被动状态增量注入",
   passive_injection_position: "动态提示词注入位置",
@@ -1369,6 +1374,8 @@ const configDescriptions = {
   enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
   enable_health_state: "开启后健康/不适状态视为可用，拟人状态可能出现生病、不舒服、头疼或恢复尾声；关闭后自动生成和手动增添都会跳过这类状态。",
   enable_hunger_state: "开启后饥饿/胃口状态视为可用，拟人状态可能出现饿、胃口不好、想吃东西或想吃甜的；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
+  enable_qq_presence_sync: "开启后，日程细化会通过 OneBot 的 set_online_status 尝试同步在线/忙碌等基础 QQ 状态；不包含自定义短状态。离开、隐身、请勿打扰会自动降级为在线。",
+  enable_qq_custom_presence_sync: "默认关闭。开启后才会尝试同步“专注中/休息中”等 QQ 自定义短状态；这依赖协议端支持非标准 OneBot 扩展。为避免 NapCat 兼容问题，插件不会调用 set_custom_online_status。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",
   passive_injection_position: "选择被动状态、环境感知、TTS 本轮频控、转发/引用上下文等动态片段的注入位置。当前请求末尾会进入统一动态块并按稳定顺序排列，更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
@@ -1444,10 +1451,11 @@ const configDescriptions = {
   smart_message_debounce_examples_limit: "每次判断时带给小模型的近期误判样本数量。0 表示不注入历史样本。",
   enable_recall_enhancement: "撤回相关能力总开关。包括撤回触发消息时取消回复、短期缓存撤回消息用于转述、违禁词自动撤回。",
   enable_recall_cancel_reply: "开启后，如果 QQ/OneBot 通知某条触发或唤醒消息已撤回，而 Bot 的回复还没真正发出，就静默取消这次回复和剩余分段。",
-  enable_recall_message_cache: "开启后短期缓存普通消息的文本摘要；收到撤回事件后可在缓存过期前通过命令转述。缓存只保存在内存中。",
+  enable_recall_message_cache: "开启后短期缓存普通消息的文本摘要；含图片消息会临时写入 recall_message_images，便于撤回后转述原图，并按缓存秒数和磁盘上限清理。",
   enable_recall_transcribe_command: "允许使用“陪伴 撤回消息”或“陪伴群 撤回消息”查看当前会话最近撤回消息。群聊需要管理权限。",
-  recall_message_cache_ttl_seconds: "撤回消息摘要和撤回记录在内存中保留多久。过期后无法转述，也不再用于取消待发送回复。",
+  recall_message_cache_ttl_seconds: "撤回消息摘要、撤回记录和临时撤回图片保留多久。过期后无法转述，也不再用于取消待发送回复。",
   recall_message_cache_max_items: "最多缓存多少条消息摘要。0 表示不按数量限制，但仍受缓存秒数限制。",
+  recall_message_image_cache_max_mb: "撤回图片临时目录的最大体积。0 表示不按体积限制，但仍受缓存秒数限制。",
   enable_forbidden_word_recall: "开启且词表非空时，Bot 自己待发送消息会先被拦截；已进入事件流的群聊消息或 Bot 自己消息会尝试调用平台撤回。",
   recall_forbidden_words: "命中任一词就触发违禁词撤回。建议一行一个词；为空时不会执行自动撤回。",
   recall_forbidden_scope: "bot_only 只检查 Bot 自己消息；group_only 检查群聊消息；bot_and_group 同时检查 Bot 自己消息和群聊消息。",
@@ -1719,7 +1727,7 @@ const featureSettingGroups = {
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: [],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
-  enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
+  enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
@@ -1728,9 +1736,9 @@ const featureSettingGroups = {
   enable_cycle_state: ["humanized_state_intensity"],
   enable_skill_growth_simulation: ["skill_growth_rate", "enable_skill_growth_passive_injection", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds", "text_message_debounce_max_wait_seconds", "message_debounce_max_merge_messages", "enable_smart_message_debounce", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds", "smart_message_debounce_examples_limit"],
-  enable_recall_enhancement: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "enable_forbidden_word_recall", "recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
+  enable_recall_enhancement: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb", "enable_forbidden_word_recall", "recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_recall_cancel_reply: ["recall_message_cache_ttl_seconds"],
-  enable_recall_message_cache: ["enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items"],
+  enable_recall_message_cache: ["enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb"],
   enable_forbidden_word_recall: ["recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
   enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
@@ -1875,6 +1883,28 @@ const featureSettingSections = {
       keys: ["enable_relationship_state_machine", "proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours", "enable_open_loop_tracking", "enable_user_habit_learning", "user_habit_min_count", "user_habit_max_items", "enable_food_menu_recommendation"],
     },
   ],
+  enable_humanized_states: [
+    {
+      title: "状态生成",
+      note: "控制身体余波和强度，只作为扮演状态，不当成真实用户事实。",
+      keys: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_cycle_state"],
+    },
+    {
+      title: "QQ 状态同步",
+      note: "基础在线状态使用标准接口；自定义短状态默认关闭，避免协议端不支持时断连。",
+      keys: ["enable_qq_presence_sync", "enable_qq_custom_presence_sync"],
+    },
+    {
+      title: "被动状态注入",
+      note: "控制普通聊天是否参考当前状态，以及是否只在变化时注入。",
+      keys: ["inject_passive_states", "enable_passive_state_delta_injection"],
+    },
+    {
+      title: "休息回复闸门",
+      note: "睡眠、午休或休息段是否静默，以及醒来后如何补看消息。",
+      keys: ["enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
+    },
+  ],
   enable_message_debounce: [
     {
       title: "重复上报去重",
@@ -1896,7 +1926,7 @@ const featureSettingSections = {
     {
       title: "撤回处理",
       note: "控制发送前取消、短期缓存和用户主动查看撤回内容。",
-      keys: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items"],
+      keys: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb"],
     },
     {
       title: "违禁词撤回",
@@ -9409,6 +9439,7 @@ function presenceLabel(presence) {
   const text = presence?.custom_text || presence?.wording || "";
   if (mode === "custom" && text) return `自定义状态：${text}`;
   if (mode === "sleep") return "状态：休息中";
+  if (mode === "busy") return "状态：忙碌";
   if (mode === "online") return "状态：在线";
   return "状态：不变";
 }
@@ -11731,6 +11762,9 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_humanized_states") {
     const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
+    if (settingKey === "enable_qq_custom_presence_sync") {
+      return boolSetting("enable_qq_presence_sync");
+    }
     if (restChildren.has(settingKey)) {
       const restEnabled = boolSetting("enable_rest_reply_simulation");
       if (!restEnabled) return false;

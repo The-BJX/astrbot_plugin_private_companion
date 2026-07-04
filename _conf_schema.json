@@ -591,6 +591,12 @@
     "default": 300,
     "invisible": true
   },
+  "recall_message_image_cache_max_mb": {
+    "description": "Legacy flat config: 撤回图片磁盘缓存上限 MB",
+    "type": "float",
+    "default": 256,
+    "invisible": true
+  },
   "recall_message_cache_text_chars": {
     "description": "Legacy flat config: 撤回缓存文本长度",
     "type": "int",
@@ -2868,6 +2874,12 @@
     "default": true,
     "invisible": true
   },
+  "enable_qq_custom_presence_sync": {
+    "description": "Legacy flat config: 允许同步 QQ 自定义短状态",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "enable_weather_context": {
     "description": "Legacy flat config: 启用天气上下文",
     "type": "bool",
@@ -3610,7 +3622,7 @@
       "enable_recall_message_cache": {
         "description": "缓存撤回消息用于转述",
         "type": "bool",
-        "hint": "开启后，短期缓存普通消息的文本摘要。用户在消息撤回后、缓存过期前，可用“陪伴 撤回消息”或“陪伴群 撤回消息”查看最近撤回内容。缓存只在内存中保存，不写入数据文件。",
+        "hint": "开启后，短期缓存普通消息的文本摘要；含图片消息会临时写入本插件数据目录的 recall_message_images，用于撤回后转述原图，并受缓存秒数和磁盘上限自动清理。",
         "default": true,
         "condition": "enable_recall_enhancement"
       },
@@ -3644,6 +3656,20 @@
         },
         "default": 300,
         "condition": "enable_recall_enhancement"
+      },
+      "recall_message_image_cache_max_mb": {
+        "description": "撤回图片磁盘上限 MB",
+        "type": "float",
+        "hint": "含图片消息会短期复制到 recall_message_images 目录，便于撤回后转述原图。该项限制这个目录的最大体积；0 表示不按体积限制，但仍按缓存秒数清理。",
+        "slider": {
+          "min": 0,
+          "max": 2048,
+          "step": 32
+        },
+        "default": 256,
+        "condition": {
+          "enable_recall_message_cache": true
+        }
       },
       "recall_message_cache_text_chars": {
         "description": "撤回缓存文本长度",
@@ -8079,13 +8105,22 @@
   "presence_sync_config": {
     "description": "QQ 状态同步",
     "type": "object",
-    "hint": "同步 QQ 在线状态、忙碌/休息等存在感。",
+    "hint": "同步 QQ 在线/忙碌等基础在线状态；自定义短状态涉及非标准 OneBot 扩展，默认关闭。",
     "items": {
       "enable_qq_presence_sync": {
-        "description": "允许细化模型同步 QQ 全局状态",
+        "description": "同步 QQ 在线状态",
         "type": "bool",
-        "hint": "开启后，当前时间段细化可决定在线/睡觉/自定义短状态，并通过 OneBot 尝试同步。会减少忙碌，避免离开/隐身/请勿打扰；失败会静默跳过。",
+        "hint": "开启后，当前时间段细化可决定在线/忙碌等基础状态，并通过 OneBot 的 set_online_status 尝试同步。离开、隐身、请勿打扰会自动降级为在线；失败会静默跳过。",
         "default": true
+      },
+      "enable_qq_custom_presence_sync": {
+        "description": "同步 QQ 自定义短状态",
+        "type": "bool",
+        "hint": "默认关闭。开启后才会尝试同步“专注中/休息中”等自定义短状态；该能力依赖协议端支持非标准 OneBot 扩展，不会调用已知会让部分 NapCat 版本断连的 set_custom_online_status。",
+        "default": false,
+        "condition": {
+          "enable_qq_presence_sync": true
+        }
       }
     },
     "condition": {
