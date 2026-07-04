@@ -240,8 +240,6 @@ _PLATFORM_DISPLAY_NAMES = {
     "wechat": "微信",
     "discord": "Discord",
 }
-_DAILY_OUTFIT_RETRY_MAX = 5
-_DAILY_OUTFIT_RETRY_INTERVAL = 180  # 秒，约3分钟
 
 
 class SyntheticPrivateWakeEvent(AstrMessageEvent):
@@ -2497,11 +2495,7 @@ class ProactiveMessageMixin:
         return "\n".join(kept)[:260].strip()
 
     def _proactive_review_strength(self) -> str:
-        effective_getter = getattr(self, "_effective_proactive_review_strength", None)
-        if callable(effective_getter):
-            strength = str(effective_getter() or "lenient").strip().lower()
-        else:
-            strength = str(getattr(self, "proactive_review_strength", "lenient") or "lenient").strip().lower()
+        strength = str(getattr(self, "proactive_review_strength", "lenient") or "lenient").strip().lower()
         return strength if strength in {"lenient", "balanced", "strict"} else "lenient"
 
     @staticmethod
@@ -4707,19 +4701,10 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if not force and not getattr(self, "enable_daily_outfit_photo", False):
             return None
         today = _today_key()
-        now = _now_ts()
         async with self._data_lock:
             existing = self.data.get("daily_outfit_photo") if isinstance(self.data.get("daily_outfit_photo"), dict) else {}
             if existing.get("date") == today:
-                if existing.get("path"):
-                    return dict(existing)
-                if not force:
-                    retry_count = int(existing.get("retry_count", 0) or 0)
-                    if retry_count >= _DAILY_OUTFIT_RETRY_MAX:
-                        return dict(existing)
-                    next_retry_at = float(existing.get("next_retry_at", 0) or 0)
-                    if now < next_retry_at:
-                        return dict(existing)
+                return dict(existing)
         if not self.enable_photo_text_action:
             return await self._record_daily_outfit_photo_result(today, "", "主动拍照/生图未开启")
         if not self._photo_text_available():
@@ -4778,23 +4763,16 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         prompt: str = "",
         note: str = "",
     ) -> dict[str, Any]:
-        now = _now_ts()
+        item = {
+            "date": _single_line(date_key, 20),
+            "path": _single_line(image_path, 300),
+            "error": _single_line(error, 240),
+            "backend": _single_line(backend, 80),
+            "prompt": _single_line(prompt, 500),
+            "note": _single_line(note, 220),
+            "generated_at": _now_ts(),
+        }
         async with self._data_lock:
-            existing = self.data.get("daily_outfit_photo") if isinstance(self.data.get("daily_outfit_photo"), dict) else {}
-            prev_retry_count = int(existing.get("retry_count", 0) or 0) if existing.get("date") == date_key else 0
-            retry_count = 0 if image_path else prev_retry_count + 1
-            next_retry_at = 0.0 if image_path else now + _DAILY_OUTFIT_RETRY_INTERVAL
-            item = {
-                "date": _single_line(date_key, 20),
-                "path": _single_line(image_path, 300),
-                "error": _single_line(error, 240),
-                "backend": _single_line(backend, 80),
-                "prompt": _single_line(prompt, 500),
-                "note": _single_line(note, 220),
-                "generated_at": now,
-                "retry_count": retry_count,
-                "next_retry_at": next_retry_at,
-            }
             self.data["daily_outfit_photo"] = item
             self._save_data_sync()
         if image_path:
@@ -4805,21 +4783,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 _single_line(image_path, 160),
             )
         else:
-            if retry_count >= _DAILY_OUTFIT_RETRY_MAX:
-                logger.info(
-                    "[PrivateCompanion] 每日穿搭照片未生成(第%d次,已达上限%d次,今日不再重试): %s",
-                    retry_count,
-                    _DAILY_OUTFIT_RETRY_MAX,
-                    _single_line(error or note, 180),
-                )
-            else:
-                logger.info(
-                    "[PrivateCompanion] 每日穿搭照片未生成(第%d次,上限%d次,%.0f秒后重试): %s",
-                    retry_count,
-                    _DAILY_OUTFIT_RETRY_MAX,
-                    _DAILY_OUTFIT_RETRY_INTERVAL,
-                    _single_line(error or note, 180),
-                )
+            logger.info("[PrivateCompanion] 每日穿搭照片未生成: %s", _single_line(error or note, 180))
         return item
 
     def _daily_outfit_schedule_text(self) -> str:
@@ -6061,25 +6025,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             target = "在线图片 API"
         return f"{target}超时（{timeout_seconds}秒内没有返回），可调高在线生图超时秒数或切换/回退本地生图后端"
 
-    def _external_image_custom_headers(self) -> dict[str, str]:
-        """Parse custom headers from config string (one per line, 'Key: Value' format)."""
-        raw = str(getattr(self, "external_image_api_custom_headers", "") or "").strip()
-        if not raw:
-            return {}
-        result: dict[str, str] = {}
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            sep = line.find(":")
-            if sep <= 0:
-                continue
-            key = line[:sep].strip()
-            val = line[sep + 1:].strip()
-            if key:
-                result[key] = val
-        return result
-
     async def _save_external_generated_image(
         self,
         image_bytes: bytes,
@@ -6315,9 +6260,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 while True:
                     if time.monotonic() >= deadline:
                         return "", self._external_image_timeout_note(label="百炼异步生图任务轮询")
-                    _poll_headers = {"Authorization": f"Bearer {self.external_image_api_key}"}
-                    _poll_headers.update(self._external_image_custom_headers())
-                    async with session.get(task_endpoint, headers=_poll_headers) as response:
+                    task_headers = {
+                        "Authorization": f"Bearer {self.external_image_api_key}",
+                        **self._external_image_custom_headers(),
+                    }
+                    async with session.get(task_endpoint, headers=task_headers) as response:
                         text = await response.text()
                         logger.info(
                             "[PrivateCompanion] 百炼任务查询响应: status=%s task=%s chars=%s preview=%s",
@@ -6406,6 +6353,28 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 reference_image_path=reference_image_path,
                 image_size=image_size,
             )
+
+    def _parse_custom_headers(self, raw: str) -> dict[str, str]:
+        """Parse custom HTTP headers from multi-line 'Key: Value' text."""
+        result: dict[str, str] = {}
+        if not raw or not isinstance(raw, str):
+            return result
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            idx = line.find(":")
+            if idx <= 0:
+                continue
+            key = line[:idx].strip()
+            value = line[idx + 1:].strip()
+            if key:
+                result[key] = value
+        return result
+
+    def _external_image_custom_headers(self) -> dict[str, str]:
+        """Return parsed custom headers for the currently active (primary or backup) image API."""
+        return self._parse_custom_headers(getattr(self, "external_image_api_custom_headers", ""))
 
     async def _run_external_photo_generation_serial(
         self,
@@ -6837,6 +6806,23 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         except Exception:
             return None
 
+    def _platform_instance_id(self, platform: Any | None) -> str:
+        if platform is None:
+            return ""
+        try:
+            meta = platform.meta()
+        except Exception:
+            return ""
+        return str(getattr(meta, "id", "") or getattr(meta, "name", "") or "").strip()
+
+    def _session_for_platform(self, session: MessageSession, platform: Any | None = None) -> MessageSession:
+        platform_id = self._platform_instance_id(platform) or str(getattr(session, "platform_id", "") or "")
+        return MessageSession(
+            platform_name=platform_id,
+            message_type=self._message_type_for_session(session),
+            session_id=str(getattr(session, "session_id", "") or ""),
+        )
+
     def _get_platform_for_session(self, session: MessageSession) -> Any | None:
         platform_id = str(getattr(session, "platform_id", "") or "")
         manager = getattr(self.context, "platform_manager", None)
@@ -6881,11 +6867,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         message_type = _single_line(getattr(session, "message_type", ""), 60)
         platform_desc = "found" if platform else "missing"
         if platform:
-            try:
-                meta = platform.meta()
-                platform_desc = _single_line(getattr(meta, "id", "") or getattr(meta, "name", ""), 80) or "found"
-            except Exception:
-                platform_desc = platform.__class__.__name__
+            platform_desc = _single_line(self._platform_instance_id(platform), 80) or platform.__class__.__name__
         return (
             f"umo={_single_line(umo, 140) or '-'} "
             f"platform_id={platform_id or '-'} type={message_type or '-'} session_id={session_id or '-'} platform={platform_desc}"
@@ -7382,11 +7364,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 if status is not None and status != PlatformStatus.RUNNING:
                     logger.warning("[PrivateCompanion] 目标平台未运行,跳过主动发送: %s", umo)
                     return
-                session_obj = MessageSession(
-                    platform_name=str(getattr(session, "platform_id", "") or ""),
-                    message_type=self._message_type_for_session(session),
-                    session_id=str(getattr(session, "session_id", "") or ""),
-                )
+                session_obj = self._session_for_platform(session, platform)
                 await platform.send_by_session(session_obj, MessageChain(processed_chain))
                 return
             except Exception as e:
@@ -7398,8 +7376,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 )
         core_error: Exception | None = None
         core_result: Any = None
+        core_session: str | MessageSession = umo
+        if session and platform:
+            core_session = self._session_for_platform(session, platform)
         try:
-            core_result = await self.context.send_message(umo, self._build_result_from_chain(processed_chain))
+            core_result = await self.context.send_message(core_session, self._build_result_from_chain(processed_chain))
             if core_result is not False:
                 return
             logger.warning(

@@ -1726,6 +1726,9 @@ class ProactiveEngineMixin:
             "topic": _single_line(selected.get("topic"), 80),
             "motive": self._motive_with_hesitation_memory(selected, _single_line(selected.get("motive"), 180)),
             "score": int(max(0.0, min(1.0, self._score_proactive_impulse(user, selected, now=check_now))) * 100),
+            "context_key": _single_line(selected.get("context_key"), 60),
+            "context": selected.get("context"),
+            "chain": selected.get("chain") if isinstance(selected.get("chain"), list) else [],
         }
         item = self._record_proactive_candidate(
             user_id,
@@ -2399,7 +2402,7 @@ class ProactiveEngineMixin:
                 self._schedule_next_proactive(user, now=now, delay_hours=(8, 16))
             return False, "已达每日上限"
         idle_minutes = self._effective_user_idle_minutes(user)
-        recent_activity_at = self._latest_user_activity_ts(user)
+        recent_activity_at = self._latest_private_user_activity_ts(user)
         if not is_troubleshooting and not due_timer_active and now - recent_activity_at < idle_minutes * 60:
             idle_limit = (
                 self._effective_user_greeting_idle_minutes(user) * 60
@@ -2962,7 +2965,7 @@ class ProactiveEngineMixin:
                 blocker=False,
             )
 
-        last_seen = _safe_float(user.get("last_seen"), 0)
+        last_seen = self._latest_private_user_activity_ts(user)
         idle_minutes = self._effective_user_idle_minutes(user)
         if self._is_greeting_reason(planned_reason):
             idle_minutes = self._effective_user_greeting_idle_minutes(user)
@@ -3290,7 +3293,7 @@ class ProactiveEngineMixin:
         suppressed_greetings = probe.get("greetings_suppressed_by_inbound")
         if not isinstance(suppressed_greetings, list):
             suppressed_greetings = []
-        last_activity_at = self._latest_user_activity_ts(probe)
+        last_activity_at = self._latest_private_user_activity_ts(probe)
         last_sent_at = _safe_float(probe.get("last_sent"), 0)
         last_seen_gap = now - last_activity_at if last_activity_at > 0 else -1
         last_sent_gap = now - last_sent_at if last_sent_at > 0 else -1
@@ -4281,7 +4284,7 @@ class ProactiveEngineMixin:
             user["greetings_suppressed_by_inbound"] = suppressed
         now_dt = self._environment_fromtimestamp(now or _now_ts())
         minute = now_dt.hour * 60 + now_dt.minute
-        recent_activity_at = self._latest_user_activity_ts(user)
+        recent_activity_at = self._latest_private_user_activity_ts(user)
         anchors = [
             ("morning_greeting", "07:45-10:20", "刚睡醒，想第一时间和用户说声早安", "早上刚醒来"),
             ("noon_greeting", "12:05-13:35", "中午有些犯困，想和用户打声招呼", "午后犯困"),

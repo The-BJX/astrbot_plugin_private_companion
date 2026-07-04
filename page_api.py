@@ -116,13 +116,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/bookshelf/tags", self.update_bookshelf_item_tags, ["POST"], "Private Companion Page update bookshelf item tags"),
             ("/bookshelf/comments/update", self.update_bookshelf_item_comments, ["POST"], "Private Companion Page update bookshelf item comments"),
             ("/qzone/status", self.get_qzone_status, ["GET"], "Private Companion Page qzone status"),
+            ("/qzone/health", self.get_qzone_status, ["GET"], "Private Companion Page qzone status alias"),
+            ("/qzone/summary", self.get_qzone_status, ["GET"], "Private Companion Page qzone status alias"),
+            ("/qzone/state", self.get_qzone_status, ["GET"], "Private Companion Page qzone status alias"),
             ("/qzone/feed", self.get_qzone_feed, ["GET"], "Private Companion Page qzone feed"),
+            ("/qzone/feeds", self.get_qzone_feed, ["GET"], "Private Companion Page qzone feed alias"),
+            ("/qzone/list", self.get_qzone_feed, ["GET"], "Private Companion Page qzone feed alias"),
             ("/qzone/detail", self.get_qzone_detail, ["GET"], "Private Companion Page qzone detail"),
+            ("/qzone/post", self.get_qzone_detail, ["GET"], "Private Companion Page qzone detail alias"),
+            ("/qzone/item", self.get_qzone_detail, ["GET"], "Private Companion Page qzone detail alias"),
             ("/qzone/refresh_cookies", self.refresh_qzone_cookies, ["POST"], "Private Companion Page qzone refresh cookies"),
+            ("/qzone/refresh-cookies", self.refresh_qzone_cookies, ["POST"], "Private Companion Page qzone refresh cookies alias"),
+            ("/qzone/cookies/refresh", self.refresh_qzone_cookies, ["POST"], "Private Companion Page qzone refresh cookies alias"),
+            ("/qzone/cookie/refresh", self.refresh_qzone_cookies, ["POST"], "Private Companion Page qzone refresh cookies alias"),
+            ("/qzone/refresh", self.refresh_qzone_cookies, ["POST"], "Private Companion Page qzone refresh cookies alias"),
             ("/qzone/publish", self.publish_qzone_post, ["POST"], "Private Companion Page qzone publish"),
+            ("/qzone/post/publish", self.publish_qzone_post, ["POST"], "Private Companion Page qzone publish alias"),
+            ("/qzone/post", self.publish_qzone_post, ["POST"], "Private Companion Page qzone publish alias"),
             ("/qzone/like", self.like_qzone_post, ["POST"], "Private Companion Page qzone like"),
+            ("/qzone/post/like", self.like_qzone_post, ["POST"], "Private Companion Page qzone like alias"),
             ("/qzone/comment", self.comment_qzone_post, ["POST"], "Private Companion Page qzone comment"),
+            ("/qzone/post/comment", self.comment_qzone_post, ["POST"], "Private Companion Page qzone comment alias"),
             ("/qzone/delete", self.delete_qzone_post, ["POST"], "Private Companion Page qzone delete"),
+            ("/qzone/post/delete", self.delete_qzone_post, ["POST"], "Private Companion Page qzone delete alias"),
             ("/creative/project", self.get_creative_project, ["GET"], "Private Companion Page creative project detail"),
             ("/creative/project/update", self.update_creative_project, ["POST"], "Private Companion Page update creative project"),
             ("/creative/project/chunk/update", self.update_creative_chunk, ["POST"], "Private Companion Page update creative chunk"),
@@ -5534,6 +5550,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         slang_terms = group.get("slang_terms") if isinstance(group.get("slang_terms"), list) else []
         slang_meanings = group.get("slang_meanings") if isinstance(group.get("slang_meanings"), dict) else {}
         members = group.get("members") if isinstance(group.get("members"), dict) else {}
+        group_id_text = str(group_id)
+        group_name = self._single_line(group.get("name") or group.get("group_name") or group.get("display_name"), 80)
+        if group_name == group_id_text:
+            group_name = ""
         cleaner = getattr(self.plugin, "_cleanup_group_slang_terms", None)
         if callable(cleaner):
             try:
@@ -5559,9 +5579,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         last_wakeup = group.get("last_group_wakeup") if isinstance(group.get("last_group_wakeup"), dict) else {}
         last_interjection = self._sanitize_last_bot_interjection(group.get("last_bot_interjection"))
         return {
-            "group_id": str(group_id),
+            "group_id": group_id_text,
+            "name": group_name,
+            "group_name": group_name,
+            "display_name": group_name or "未命名群聊",
             "enabled": bool(group.get("enabled", True)),
-            "allowed_by_mode": self.plugin._group_allowed_by_access_mode(str(group_id)),
+            "allowed_by_mode": self.plugin._group_allowed_by_access_mode(group_id_text),
             "message_count": group.get("message_count", 0),
             "last_seen_ts": group.get("last_seen", 0),
             "last_seen": self.plugin._format_timestamp_elapsed(group.get("last_seen", 0)),
@@ -6335,6 +6358,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             qzone_cookie = self._config_get("QZONE_COOKIE") or str(getattr(self.plugin, "qzone_cookie", "") or "")
             if qzone_cookie:
                 settings["QZONE_COOKIE"] = qzone_cookie
+            search_api_key = self._config_get("WEB_EXPLORATION_API_KEY") or str(getattr(self.plugin, "web_exploration_api_key", "") or "")
+            if search_api_key:
+                settings["WEB_EXPLORATION_API_KEY"] = search_api_key
         return settings
 
     def _migration_feature_snapshot(self, selected: set[str]) -> dict[str, bool]:
@@ -6401,6 +6427,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if text == "provider_config_mode":
             return "providers"
         if text == "QZONE_COOKIE":
+            return "sensitive"
+        if text == "WEB_EXPLORATION_API_KEY":
             return "sensitive"
         if text.startswith("private_reading_") or text.startswith("enable_private_reading_"):
             return "sensitive"
@@ -7332,6 +7360,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "web_exploration_share_probability",
             "web_exploration_max_results",
             "web_exploration_interests",
+            "WEB_EXPLORATION_API_BASE_URL",
+            "WEB_EXPLORATION_API_KEY",
+            "WEB_EXPLORATION_API_MODEL",
             "enable_qzone_integration",
             "QZONE_COOKIE",
             "enable_qzone_life_publish",
@@ -7983,7 +8014,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return
         if key == "page_theme":
             text = str(value or "classic").strip().lower()
-            self.plugin.page_theme = text if text in {"classic", "dark", "warm", "forest", "sakura"} else "classic"
+            self.plugin.page_theme = text if text in {"classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"} else "classic"
             return
         if key == "storage_backend":
             backend = str(value or "json").strip().lower() or "json"
@@ -8031,6 +8062,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
             "NEWS_PROVIDER_ID": "news_provider_id",
             "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
+            "WEB_EXPLORATION_API_BASE_URL": "web_exploration_api_base_url",
+            "WEB_EXPLORATION_API_KEY": "web_exploration_api_key",
+            "WEB_EXPLORATION_API_MODEL": "web_exploration_api_model",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": "smart_message_debounce_provider_id",
             "REST_WAKEUP_PROVIDER_ID": "rest_wakeup_provider_id",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME": "comfyui_text2img_workflow_name",
@@ -8816,6 +8850,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "external_event_self_link_cooldown_hours",
             "web_exploration_max_results",
             "web_exploration_interests",
+            "WEB_EXPLORATION_API_BASE_URL",
+            "WEB_EXPLORATION_API_KEY",
+            "WEB_EXPLORATION_API_MODEL",
             "enable_qzone_integration",
             "QZONE_COOKIE",
             "enable_qzone_life_publish",
@@ -8884,7 +8921,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return text if text in {"original", "cheng"} else "original"
         if key == "page_theme":
             text = str(value or "classic").strip().lower()
-            return text if text in {"classic", "dark", "warm", "forest", "sakura"} else "classic"
+            return text if text in {"classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"} else "classic"
         if key == "provider_config_mode":
             normalizer = getattr(self.plugin, "_normalize_provider_config_mode", None)
             if callable(normalizer):
@@ -8955,6 +8992,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._normalize_multiline_source_config(value, limit=4000)
         if key in {"news_hot_sources", "web_exploration_interests", "private_reading_default_keywords", "private_reading_blocked_tags"}:
             return str(value or "").strip()[:1200]
+        if key == "WEB_EXPLORATION_API_BASE_URL":
+            raw = str(value or "").strip()[:800]
+            if not raw or raw.startswith(("http://", "https://")):
+                return raw
+            if re.match(r"^[a-z][a-z0-9+.-]*://", raw, flags=re.I):
+                return raw
+            local_pattern = r"^(localhost|127\.|10\.|172\.(1[6-9]|2\d|3[0-1])\.|192\.168\.|\[?::1\]?)"
+            scheme = "http://" if re.match(local_pattern, raw, flags=re.I) else "https://"
+            return f"{scheme}{raw}"
+        if key == "WEB_EXPLORATION_API_KEY":
+            return str(value or "").strip()[:800]
+        if key == "WEB_EXPLORATION_API_MODEL":
+            return str(value or "").strip()[:160]
         if key == "worldbook_self_registration_block_words":
             return str(value or "").strip()[:1200]
         if key == "worldbook_self_registration_block_reply":
@@ -9260,6 +9310,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(5, min(1440, int(value)))
             except (TypeError, ValueError):
                 return 180
+        if key == "web_exploration_min_interval_hours":
+            try:
+                return max(1, min(168, int(value)))
+            except (TypeError, ValueError):
+                return 8
+        if key == "web_exploration_max_results":
+            try:
+                return max(3, min(20, int(value)))
+            except (TypeError, ValueError):
+                return 6
         if key in {
             "check_interval_seconds",
             "daily_token_limit",
@@ -9319,8 +9379,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "news_hot_max_items",
             "ai_daily_check_interval_minutes",
             "external_event_self_link_cooldown_hours",
-            "web_exploration_min_interval_hours",
-            "web_exploration_max_results",
             "qzone_life_publish_min_interval_hours",
             "qzone_emotional_vent_threshold",
             "qzone_emotional_vent_cooldown_hours",
@@ -10238,14 +10296,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
         notes = state.get("notes") if isinstance(state.get("notes"), list) else []
         history = self._browsing_history_entries(data)
+        custom_available = bool(getattr(self.plugin, "_custom_web_exploration_search_configured", lambda: False)())
         try:
-            available = bool(getattr(self.plugin, "_astrbot_any_web_search_available", lambda: False)())
+            astrbot_available = bool(getattr(self.plugin, "_astrbot_any_web_search_available", lambda: False)())
         except Exception:
-            available = False
+            astrbot_available = False
+        available = bool(custom_available or astrbot_available)
+        search_backend = "custom" if custom_available else ("astrbot" if astrbot_available else "none")
         return {
             "enabled": bool(getattr(self.plugin, "enable_web_exploration", False)),
             "boredom_search_enabled": bool(getattr(self.plugin, "enable_web_exploration_boredom_search", False)),
             "available": available,
+            "search_backend": search_backend,
+            "custom_search_enabled": custom_available,
+            "astrbot_search_available": astrbot_available,
             "last_explore_at": self.plugin._format_timestamp_elapsed(state.get("last_explore_at", 0)),
             "last_status": self._single_line(state.get("last_status"), 80),
             "last_query": {
@@ -10415,9 +10479,37 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "last_life_publish_at": self.plugin._format_timestamp_elapsed(state.get("last_life_publish_at", 0)),
             "last_status": state.get("last_life_publish_status", ""),
             "last_text": state.get("last_life_publish_text", ""),
+            "generated_image_enabled": bool(enabled and getattr(self.plugin, "enable_qzone_generated_image_publish", False)),
+            "generated_image_probability": self._float(getattr(self.plugin, "qzone_generated_image_probability", 0)),
+            "last_life_publish_images": self._int(state.get("last_life_publish_images")),
+            "last_life_publish_generated_image_status": state.get("last_life_publish_generated_image_status", ""),
+            "last_life_publish_generated_image_note": state.get("last_life_publish_generated_image_note", ""),
+            "last_life_publish_generated_image_backend": state.get("last_life_publish_generated_image_backend", ""),
+            "last_life_publish_generated_image_caption": state.get("last_life_publish_generated_image_caption", ""),
+            "last_life_publish_generated_image_reference": state.get("last_life_publish_generated_image_reference", ""),
+            "last_life_publish_generated_image_reference_exists": bool(state.get("last_life_publish_generated_image_reference_exists", False)),
+            "last_life_publish_generated_image_anchor": state.get("last_life_publish_generated_image_anchor", ""),
+            "last_life_publish_generated_image_composition": state.get("last_life_publish_generated_image_composition", ""),
+            "last_manual_publish_generated_image_status": state.get("last_manual_publish_generated_image_status", ""),
+            "last_manual_publish_generated_image_note": state.get("last_manual_publish_generated_image_note", ""),
+            "last_manual_publish_generated_image_backend": state.get("last_manual_publish_generated_image_backend", ""),
+            "last_manual_publish_generated_image_caption": state.get("last_manual_publish_generated_image_caption", ""),
+            "last_manual_publish_generated_image_reference": state.get("last_manual_publish_generated_image_reference", ""),
+            "last_manual_publish_generated_image_reference_exists": bool(state.get("last_manual_publish_generated_image_reference_exists", False)),
+            "last_manual_publish_generated_image_anchor": state.get("last_manual_publish_generated_image_anchor", ""),
+            "last_manual_publish_generated_image_composition": state.get("last_manual_publish_generated_image_composition", ""),
             "last_emotional_vent_at": self.plugin._format_timestamp_elapsed(state.get("last_emotional_vent_at", 0)),
             "last_emotional_vent_status": state.get("last_emotional_vent_status", ""),
             "last_emotional_vent_text": state.get("last_emotional_vent_text", ""),
+            "last_emotional_vent_images": self._int(state.get("last_emotional_vent_images")),
+            "last_emotional_vent_generated_image_status": state.get("last_emotional_vent_generated_image_status", ""),
+            "last_emotional_vent_generated_image_note": state.get("last_emotional_vent_generated_image_note", ""),
+            "last_emotional_vent_generated_image_backend": state.get("last_emotional_vent_generated_image_backend", ""),
+            "last_emotional_vent_generated_image_caption": state.get("last_emotional_vent_generated_image_caption", ""),
+            "last_emotional_vent_generated_image_reference": state.get("last_emotional_vent_generated_image_reference", ""),
+            "last_emotional_vent_generated_image_reference_exists": bool(state.get("last_emotional_vent_generated_image_reference_exists", False)),
+            "last_emotional_vent_generated_image_anchor": state.get("last_emotional_vent_generated_image_anchor", ""),
+            "last_emotional_vent_generated_image_composition": state.get("last_emotional_vent_generated_image_composition", ""),
             "last_comment_inbox_checked_at": self.plugin._format_timestamp_elapsed(state.get("last_comment_inbox_checked_at", 0)),
             "last_comment_inbox_status": state.get("last_comment_inbox_status", ""),
             "last_comment_inbox_reply_text": state.get("last_comment_inbox_reply_text", ""),

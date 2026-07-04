@@ -130,8 +130,11 @@ class PrivateCompanionPageApiQzoneMixin:
 
     async def get_qzone_detail(self) -> dict[str, Any]:
         try:
-            post_id = self._single_line(request.args.get("id"), 120)
-            post = self._qzone_page_resolve_post(post_id)
+            post = await self._qzone_page_resolve_post_reference(
+                self._single_line(request.args.get("id") or request.args.get("post_id"), 120),
+                request.args,
+                with_detail=True,
+            )
             cookie_header = await self.plugin._qzone_get_cookies(None)
             ctx = self.plugin._qzone_context_from_cookies(cookie_header)
             refreshed = await self.plugin._qzone_query_feeds(
@@ -150,8 +153,10 @@ class PrivateCompanionPageApiQzoneMixin:
     async def publish_qzone_post(self) -> dict[str, Any]:
         try:
             payload = await request.get_json(silent=True) or {}
-            content = self._multi_line(payload.get("content"), 300)
-            result = await self.plugin._publish_qzone_text(content, None, images=[])
+            content = self._multi_line(payload.get("content") if payload.get("content") is not None else payload.get("text"), 300)
+            if not content:
+                return self._error("说说内容不能为空")
+            result = await self.plugin._publish_qzone_text(content, None, images=[], auto_generate_image=True)
             if not result.get("success"):
                 return self._error(result.get("message") or "发布失败")
             return self._ok(result)
@@ -161,18 +166,33 @@ class PrivateCompanionPageApiQzoneMixin:
     async def like_qzone_post(self) -> dict[str, Any]:
         try:
             payload = await request.get_json(silent=True) or {}
-            post = self._qzone_page_resolve_post(self._single_line(payload.get("id"), 120))
-            await self.plugin._qzone_like_post(None, post)
-            setattr(post, "liked", True)
-            return self._ok({"liked": True, "id": self._qzone_page_post_id(post)})
+            post = await self._qzone_page_resolve_post_reference(
+                self._single_line(payload.get("id") or payload.get("post_id"), 120),
+                payload,
+                with_detail=False,
+            )
+            result = await self.plugin._qzone_like_post(None, post)
+            setattr(post, "liked", bool(result.get("liked", True)))
+            return self._ok(
+                {
+                    "liked": bool(result.get("liked", True)),
+                    "verified": bool(result.get("verified")),
+                    "verify_message": result.get("verify_message") or "",
+                    "id": self._qzone_page_post_id(post),
+                }
+            )
         except Exception as exc:
             return self._error(str(exc))
 
     async def comment_qzone_post(self) -> dict[str, Any]:
         try:
             payload = await request.get_json(silent=True) or {}
-            post = self._qzone_page_resolve_post(self._single_line(payload.get("id"), 120))
-            content = self._multi_line(payload.get("content"), 120)
+            post = await self._qzone_page_resolve_post_reference(
+                self._single_line(payload.get("id") or payload.get("post_id"), 120),
+                payload,
+                with_detail=True,
+            )
+            content = self._multi_line(payload.get("content") if payload.get("content") is not None else payload.get("text"), 120)
             if not content:
                 return self._error("评论内容不能为空")
             sent = await self.plugin._qzone_comment_post(None, post, content=content)
@@ -206,7 +226,11 @@ class PrivateCompanionPageApiQzoneMixin:
     async def delete_qzone_post(self) -> dict[str, Any]:
         try:
             payload = await request.get_json(silent=True) or {}
-            post = self._qzone_page_resolve_post(self._single_line(payload.get("id"), 120))
+            post = await self._qzone_page_resolve_post_reference(
+                self._single_line(payload.get("id") or payload.get("post_id"), 120),
+                payload,
+                with_detail=False,
+            )
             cookie_header = await self.plugin._qzone_get_cookies(None)
             ctx = self.plugin._qzone_context_from_cookies(cookie_header)
             viewer_uin = int(ctx.get("uin") or 0)
@@ -239,6 +263,60 @@ class PrivateCompanionPageApiQzoneMixin:
         if post is None:
             raise RuntimeError("说说引用已失效，请刷新页面后重试")
         return post
+
+    async def _qzone_page_resolve_post_reference(self, post_id: str = "", source: Any = None, *, with_detail: bool = False) -> Any:
+        post_key = self._single_line(post_id, 160)
+        if post_key:
+            post = self._qzone_page_store().get(post_key)
+            if post is not None:
+                return post
+
+        def pick(*keys: str) -> str:
+            getter = getattr(source, "get", None)
+            if not callable(getter):
+                return ""
+            for key in keys:
+                value = getter(key)
+                if value not in (None, ""):
+                    return self._single_line(value, 160)
+            return ""
+
+        hostuin = pick("hostuin", "host_uin", "uin", "author_uin", "target_uin")
+        fid = pick("fid", "tid", "post_tid")
+        topic_id = pick("topicId", "topic_id")
+        if topic_id and "_" in topic_id:
+            topic_parts = topic_id.split("_")
+            if len(topic_parts) >= 2:
+                hostuin = hostuin or self._single_line(topic_parts[0], 40)
+                fid = fid or self._single_line(topic_parts[1], 120)
+        if post_key and ":" in post_key:
+            left, right = post_key.split(":", 1)
+            hostuin = hostuin or self._single_line(left, 40)
+            fid = fid or self._single_line(right, 120)
+        if not fid:
+            raise RuntimeError("说说引用已失效，请刷新页面后重试")
+
+        cookie_header = await self.plugin._qzone_get_cookies(None)
+        if not hostuin:
+            ctx = self.plugin._qzone_context_from_cookies(cookie_header)
+            hostuin = self._single_line(ctx.get("uin"), 40)
+        if not hostuin:
+            raise RuntimeError("说说引用已失效，请刷新页面后重试")
+        posts = await self.plugin._qzone_query_feeds(
+            None,
+            target_id=hostuin,
+            pos=0,
+            num=20,
+            with_detail=with_detail,
+            cookie_header=cookie_header,
+        )
+        for post in posts:
+            post_tid = self._single_line(getattr(post, "tid", ""), 120)
+            post_fid = self._single_line(getattr(post, "fid", ""), 120)
+            if fid and fid in {post_tid, post_fid}:
+                self._qzone_page_remember_post(post)
+                return post
+        raise RuntimeError("未找到这条说说，请刷新动态后重试")
 
     @staticmethod
     def _qzone_page_raw_value(post: Any, *keys: str) -> Any:

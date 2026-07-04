@@ -102,6 +102,7 @@ from .dreaming import (
 from .helpers import (
     _date_key,
     _flat_get,
+    _missing_optional_model_dependency,
     _normalize_outbound_punctuation_flow,
     _now_ts,
     _safe_float,
@@ -427,7 +428,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.6.8",
+    "5.6.10",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -1120,12 +1121,15 @@ class PrivateCompanionPlugin(
             "按 Bot 人格自行决定；可偏向最近聊天、日程、人设兴趣、作品、技术、生活小知识、流行梗、时讯、新鲜事物。",
         )
         self.web_exploration_provider_id = self._cfg_str(c, "WEB_EXPLORATION_PROVIDER_ID", "")
+        self.web_exploration_api_base_url = self._cfg_str(c, "WEB_EXPLORATION_API_BASE_URL", "")
+        self.web_exploration_api_key = self._cfg_str(c, "WEB_EXPLORATION_API_KEY", "")
+        self.web_exploration_api_model = self._cfg_str(c, "WEB_EXPLORATION_API_MODEL", "")
         self.enable_qzone_integration = self._cfg_bool(c, "enable_qzone_integration", True)
         self.qzone_cookie = self._cfg_str(c, "QZONE_COOKIE", "")
         self.enable_qzone_life_publish = self._cfg_bool(c, "enable_qzone_life_publish", False)
         self.qzone_life_publish_min_interval_hours = self._cfg_int(c, "qzone_life_publish_min_interval_hours", 24, 4, 168)
         self.qzone_life_publish_probability = self._cfg_unit_interval(c, "qzone_life_publish_probability", 0.18, 0.0)
-        self.enable_qzone_generated_image_publish = self._cfg_bool(c, "enable_qzone_generated_image_publish", False)
+        self.enable_qzone_generated_image_publish = self._cfg_bool(c, "enable_qzone_generated_image_publish", True)
         self.qzone_generated_image_probability = self._cfg_unit_interval(c, "qzone_generated_image_probability", 0.25, 0.0)
         self.enable_qzone_comment_inbox = self._cfg_bool(c, "enable_qzone_comment_inbox", False)
         self.qzone_comment_inbox_interval_minutes = self._cfg_int(c, "qzone_comment_inbox_interval_minutes", 60, 5, 1440)
@@ -1416,6 +1420,7 @@ class PrivateCompanionPlugin(
         if not self.enabled:
             logger.info("[PrivateCompanion] 插件总开关已关闭,不启动主动消息循环")
             return
+        self._log_registered_command_handlers()
         self._install_send_message_to_user_tool_sanitizer()
         self._schedule_default_persona_prompt_refresh()
         needs_startup_save = False
@@ -1443,6 +1448,32 @@ class PrivateCompanionPlugin(
         asyncio.create_task(self._reset_stale_qq_presence_if_needed())
         asyncio.create_task(self._startup_prepare_today())
         asyncio.create_task(self._refresh_passive_injection_cache())
+
+    def _log_registered_command_handlers(self) -> None:
+        expected = {
+            "companion_command": "/陪伴(alias: /私聊陪伴, /主动陪伴)",
+            "group_companion_command": "/陪伴群(alias: /群陪伴, /群聊陪伴)",
+        }
+        found: set[str] = set()
+        try:
+            for handler in star_handlers_registry:
+                callback = getattr(handler, "handler", None) or getattr(handler, "func", None)
+                handler_name = (
+                    getattr(handler, "handler_name", "")
+                    or getattr(handler, "name", "")
+                    or getattr(callback, "__name__", "")
+                )
+                if handler_name in expected:
+                    found.add(handler_name)
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 指令注册诊断失败: %s", _single_line(exc, 120))
+            return
+        registered = [expected[name] for name in expected if name in found]
+        missing = [expected[name] for name in expected if name not in found]
+        if registered:
+            logger.info("[PrivateCompanion] AstrBot 指令已注册: %s", "；".join(registered))
+        if missing:
+            logger.warning("[PrivateCompanion] AstrBot 指令注册诊断未找到: %s", "；".join(missing))
 
     def _run_startup_data_maintenance_locked(self) -> bool:
         changed = False
@@ -2946,7 +2977,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
 
     @filter.llm_tool(name="pc_qzone_view_feed")
-    async def pc_qzone_view_feed(self, event: AstrMessageEvent, user_id: str = "", pos: int = 0, like: bool = False, reply: bool = False) -> str:
+    async def pc_qzone_view_feed(
+        self,
+        event: AstrMessageEvent,
+        user_id: str = "",
+        pos: int = 0,
+        like: bool = False,
+        reply: bool = False,
+        selector: str = "",
+        fid: str = "",
+    ) -> str:
         """查看某位用户 QQ 空间说说,可按需点赞或评论。
 
         Args:
@@ -2954,10 +2994,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             pos(number): 可选,说说位置,0 表示最新一条。
             like(boolean): 可选,是否给该条说说点赞。
             reply(boolean): 可选,是否按工具内部规则尝试评论。
+            selector(string): 可选,自然语言选择器,如“最新”“第2条”“最后”；也可以填 fid。
+            fid(string): 可选,明确指定说说 fid。
         """
         if self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
-        return await self._pc_qzone_view_feed_impl(event, user_id=user_id, pos=pos, like=like, reply=reply)
+        return await self._pc_qzone_view_feed_impl(event, user_id=user_id, pos=pos, like=like, reply=reply, selector=selector, fid=fid)
 
     @filter.llm_tool(name="pc_qzone_publish_feed")
     async def pc_qzone_publish_feed(
@@ -3374,7 +3416,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return text
 
         precision_keys = (
-            "LLM_PROVIDER_ID",
             "MAI_STYLE_PROVIDER_ID",
             "DAILY_PLAN_PROVIDER_ID",
             "DETAIL_ENHANCEMENT_PROVIDER_ID",
@@ -5523,6 +5564,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._note_private_display_name_observation(user, user_id, sender_display_name, now=received_ts)
             user["last_seen"] = received_ts
             user["last_activity_at"] = received_ts
+            self._note_private_inbound_activity(user, received_ts, text=text)
             self._mark_greetings_satisfied_by_recent_activity(user, activity_ts=received_ts)
             if text:
                 safe_text = self._sanitize_orphan_tts_placeholders(text)
@@ -5541,6 +5583,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
                 user["awaiting_reply_since"] = 0
                 user["last_reply_at"] = received_ts
+                user["last_private_reply_at"] = received_ts
                 user["pending_followup_event"] = {}
                 user["planned_proactive_quota_exempt"] = False
             user["ignored_streak"] = 0
@@ -6952,6 +6995,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *bookshelf_password_reset_actions,
             "发说说", "发QQ空间", "发布说说", "空间发布", "发布空间",
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
+            "测试说说配图", "测试空间配图", "测试QQ空间配图", "测试qzone配图",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI日报", "ai日报", "日报", "AI早报", "ai早报", "早报",
             "TTS语种", "tts语种", "语音语种", "TTS", "tts",
             *companion_manual_query_actions,
@@ -6983,6 +7027,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *bookshelf_password_output_actions,
             "发说说", "发QQ空间", "发布说说", "空间发布", "发布空间",
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
+            "测试说说配图", "测试空间配图", "测试QQ空间配图", "测试qzone配图",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI日报", "ai日报", "日报", "AI早报", "ai早报", "早报",
             "TTS语种", "tts语种", "语音语种", "TTS", "tts",
             "撤回消息", "防撤回", "转述撤回", "撤回转述",
@@ -7134,6 +7179,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response = "正在发布 QQ 空间说说。"
             elif action in {"测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布"}:
                 response = "正在模拟 QQ 空间发布链路。"
+            elif action in {"测试说说配图", "测试空间配图", "测试QQ空间配图", "测试qzone配图"}:
+                response = "正在测试 QQ 空间配图生成链路。"
             elif action in {"AI日报", "ai日报", "日报", "AI早报", "ai早报", "早报"}:
                 response = "我先看看最近的 AI 日报记录。"
             elif action in {"新闻", "今日新闻", "AI新闻", "ai新闻"}:
@@ -7206,7 +7253,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 event.stop_event()
                 return
             await self._reply(event, response)
-            result = await self._publish_qzone_text(publish_text, event, images=image_sources)
+            result = await self._publish_qzone_text(publish_text, event, images=image_sources, auto_generate_image=True)
             if result.get("success"):
                 await self._reply(
                     event,
@@ -7224,6 +7271,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if action in {"测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布"}:
             await self._reply(event, response)
             await self._reply(event, await self._test_qzone_publish_tool_chain(event))
+            event.stop_event()
+            return
+        if action in {"测试说说配图", "测试空间配图", "测试QQ空间配图", "测试qzone配图"}:
+            await self._reply(event, response)
+            await self._reply(event, await self._test_qzone_publish_image_chain(event))
             event.stop_event()
             return
         if action in {"AI日报", "ai日报", "日报", "AI早报", "ai早报", "早报"}:
@@ -7389,8 +7441,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
             return
         natural_photo_text = _single_line(event.message_str, 800)
-        if natural_photo_text and await self._maybe_handle_natural_language_photo_request(event, user_id, natural_photo_text):
-            return
+        if natural_photo_text:
+            try:
+                if await self._maybe_handle_natural_language_photo_request(event, user_id, natural_photo_text):
+                    return
+            except Exception as exc:
+                missing = _missing_optional_model_dependency(exc)
+                if not missing:
+                    raise
+                logger.warning(
+                    "[PrivateCompanion] 私聊自然语言生图前置处理缺少可选模型依赖，已降级放行普通私聊: user=%s module=%s err=%s",
+                    user_id,
+                    missing,
+                    _single_line(exc, 160),
+                )
         if self._proactive_only_blocks_passive_event(event, "private_event_pipeline"):
             await self._record_proactive_only_private_feedback(
                 event,
@@ -7437,7 +7501,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         setattr(message_obj, "message_str", quoted_relation_text)
                 except Exception:
                     pass
-        if not text and not forward_only_prompt and not self._private_event_has_image(event):
+        if not text and not forward_only_prompt and not self._private_event_has_image_safe(event, label="private_empty_guard"):
             component_types: list[str] = []
             try:
                 for item in self._event_components(event):
@@ -7466,7 +7530,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         reference_media_with_text = False
         if text and not forward_only_prompt:
-            reference_media_with_text = await self._event_references_media_or_forward_with_text(event, text)
+            try:
+                reference_media_with_text = await self._event_references_media_or_forward_with_text(event, text)
+            except Exception as exc:
+                missing = _missing_optional_model_dependency(exc)
+                if not missing:
+                    raise
+                logger.warning(
+                    "[PrivateCompanion] 私聊引用媒体检测缺少可选模型依赖，已按普通文本继续: user=%s module=%s err=%s",
+                    user_id,
+                    missing,
+                    _single_line(exc, 160),
+                )
+                reference_media_with_text = False
             if reference_media_with_text:
                 logger.info(
                     "[PrivateCompanion] 私聊引用媒体/合并消息附带文字,跳过文本收口等待: user=%s text=%s",
@@ -7519,17 +7595,29 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._note_private_display_name_observation(fast_user, user_id, sender_display_name, now=received_ts)
             fast_user["last_seen"] = received_ts
             fast_user["last_activity_at"] = received_ts
+            self._note_private_inbound_activity(fast_user, received_ts, text=text)
             self._mark_greetings_satisfied_by_recent_activity(fast_user, activity_ts=received_ts)
             safe_text = self._sanitize_orphan_tts_placeholders(text)
             fast_user["last_user_message"] = safe_text or text
             fast_user["last_user_message_at"] = received_ts
-            self._memory_companion_apply_emotional_drift(session_id=event.unified_msg_origin or "")
-            self._memory_companion_attach_private_context(
-                event,
-                user_id=user_id,
-                user=fast_user,
-                text=safe_text or text,
-            )
+            try:
+                self._memory_companion_apply_emotional_drift(session_id=event.unified_msg_origin or "")
+                self._memory_companion_attach_private_context(
+                    event,
+                    user_id=user_id,
+                    user=fast_user,
+                    text=safe_text or text,
+                )
+            except Exception as exc:
+                missing = _missing_optional_model_dependency(exc)
+                if not missing:
+                    raise
+                logger.warning(
+                    "[PrivateCompanion] 私聊轻量链路记忆桥缺少可选模型依赖，已跳过记忆增强: user=%s module=%s err=%s",
+                    user_id,
+                    missing,
+                    _single_line(exc, 160),
+                )
             rest_silence_applied = self._apply_user_rest_silence_from_message(fast_user, safe_text or text, now=received_ts)
             fast_user["inbound_count"] = _safe_int(fast_user.get("inbound_count"), 0) + 1
             fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
@@ -7544,6 +7632,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 2
                 fast_user["awaiting_reply_since"] = 0
                 fast_user["last_reply_at"] = received_ts
+                fast_user["last_private_reply_at"] = received_ts
                 fast_user["pending_followup_event"] = {}
                 fast_user["planned_proactive_quota_exempt"] = False
             fast_user["ignored_streak"] = 0
@@ -7603,13 +7692,38 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 and not forward_only_prompt
                 and private_image_enhancement_enabled
                 and not private_image_only
-                and self._private_event_has_image(event)
+                and self._private_event_has_image_safe(event, label="private_text_image")
             ):
-                persisted_images = await self._persist_private_inbound_images(event, user_id)
-                usable_images = [source for source in persisted_images if self._private_image_source_to_model_url(source)]
+                try:
+                    persisted_images = await self._persist_private_inbound_images(event, user_id)
+                    usable_images = [source for source in persisted_images if self._private_image_source_to_model_url(source)]
+                except Exception as exc:
+                    missing = _missing_optional_model_dependency(exc)
+                    if not missing:
+                        raise
+                    logger.warning(
+                        "[PrivateCompanion] 私聊图文图片预处理缺少可选模型依赖，已按纯文本继续: user=%s module=%s err=%s",
+                        user_id,
+                        missing,
+                        _single_line(exc, 160),
+                    )
+                    persisted_images = []
+                    usable_images = []
                 if usable_images:
                     umo = str(getattr(event, "unified_msg_origin", "") or "")
-                    has_visual_provider = self._has_private_image_visual_provider(umo)
+                    try:
+                        has_visual_provider = self._has_private_image_visual_provider(umo)
+                    except Exception as exc:
+                        missing = _missing_optional_model_dependency(exc)
+                        if not missing:
+                            raise
+                        logger.warning(
+                            "[PrivateCompanion] 私聊图文视觉 provider 检测缺少可选模型依赖，已关闭本轮识图: user=%s module=%s err=%s",
+                            user_id,
+                            missing,
+                            _single_line(exc, 160),
+                        )
+                        has_visual_provider = False
                     setattr(event, "private_companion_delayed_image_sources", usable_images[:5])
                     has_dynamic_gif_sources = (
                         bool(getattr(self, "enable_private_image_gif_enhancement", True))
@@ -7622,15 +7736,27 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     image_mode = "direct" if direct_image_mode else "caption" if has_visual_provider else "no_vision"
                     setattr(event, "private_companion_delayed_image_mode", image_mode)
                     if image_mode == "caption":
-                        vision_text = _single_line(
-                            await self._transcribe_private_inbound_images(
-                                usable_images[:5],
-                                umo=umo,
-                                user_text=text,
-                                force_contextual=self._private_image_user_mentions_combo_result(text) or self._private_image_user_has_specific_vision_request(text),
-                            ),
-                            self._private_image_vision_text_limit(len(usable_images)),
-                        )
+                        try:
+                            vision_text = _single_line(
+                                await self._transcribe_private_inbound_images(
+                                    usable_images[:5],
+                                    umo=umo,
+                                    user_text=text,
+                                    force_contextual=self._private_image_user_mentions_combo_result(text) or self._private_image_user_has_specific_vision_request(text),
+                                ),
+                                self._private_image_vision_text_limit(len(usable_images)),
+                            )
+                        except Exception as exc:
+                            missing = _missing_optional_model_dependency(exc)
+                            if not missing:
+                                raise
+                            logger.warning(
+                                "[PrivateCompanion] 私聊图文视觉摘要缺少可选模型依赖，已按无视觉摘要继续: user=%s module=%s err=%s",
+                                user_id,
+                                missing,
+                                _single_line(exc, 160),
+                            )
+                            vision_text = ""
                         if vision_text:
                             setattr(event, "private_companion_delayed_image_vision_text", vision_text)
                     logger.info(
@@ -7759,14 +7885,30 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         _single_line(cleaned_text, 80),
                     )
                 else:
-                    smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
-                        event,
-                        key=key,
-                        text=text,
-                        sender_id=user_id,
-                        sender_name=sender_display_name,
-                        private_chat=True,
-                    )
+                    try:
+                        smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
+                            event,
+                            key=key,
+                            text=text,
+                            sender_id=user_id,
+                            sender_name=sender_display_name,
+                            private_chat=True,
+                        )
+                    except Exception as exc:
+                        missing = _missing_optional_model_dependency(exc)
+                        if not missing:
+                            raise
+                        logger.warning(
+                            "[PrivateCompanion] 私聊智能收口模型缺少可选依赖，已回退固定等待: user=%s module=%s err=%s",
+                            user_id,
+                            missing,
+                            _single_line(exc, 160),
+                        )
+                        smart_wait = self._message_debounce_seconds("text")
+                        try:
+                            setattr(event, "private_companion_smart_message_debounce_result", {"decision": "fixed", "confidence": 0.0, "reason": f"missing {missing}"})
+                        except Exception:
+                            pass
                     smart_result = getattr(event, "private_companion_smart_message_debounce_result", None)
                     smart_decision = str(smart_result.get("decision") or "") if isinstance(smart_result, dict) else ""
                     smart_handled = smart_decision in {"complete", "incomplete"}
@@ -7790,6 +7932,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 self._clear_pending_proactive_plan(user)
             user["last_seen"] = _now_ts()
             user["last_activity_at"] = received_ts or _now_ts()
+            self._note_private_inbound_activity(user, received_ts or _now_ts(), text=text)
             self._mark_greetings_satisfied_by_recent_activity(user, activity_ts=received_ts or _now_ts())
             if text:
                 user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
@@ -7816,6 +7959,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
                 user["awaiting_reply_since"] = 0
                 user["last_reply_at"] = _now_ts()
+                user["last_private_reply_at"] = user["last_reply_at"]
                 user["pending_followup_event"] = {}
                 user["planned_proactive_quota_exempt"] = False
             user["ignored_streak"] = 0
@@ -7898,12 +8042,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
             response = ""
             if is_target_user:
-                self._memory_companion_attach_private_context(
-                    event,
-                    user_id=user_id,
-                    user=user,
-                    text=(safe_text if text else "") or text,
-                )
+                try:
+                    self._memory_companion_attach_private_context(
+                        event,
+                        user_id=user_id,
+                        user=user,
+                        text=(safe_text if text else "") or text,
+                    )
+                except Exception as exc:
+                    missing = _missing_optional_model_dependency(exc)
+                    if not missing:
+                        raise
+                    logger.warning(
+                        "[PrivateCompanion] 私聊记忆上下文挂载缺少可选模型依赖，已跳过记忆增强: user=%s module=%s err=%s",
+                        user_id,
+                        missing,
+                        _single_line(exc, 160),
+                    )
             self._schedule_data_save()
             user_snapshot = dict(user)
 
@@ -7971,6 +8126,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     group_id=group_id,
                     scene=scene,
                     message_id=self._event_message_id(event),
+                    event=event,
                 )
                 self._save_data_sync()
                 group_snapshot = deepcopy(group)
@@ -8023,6 +8179,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     target_user = self._get_user(sender_id)
                     target_user["last_activity_at"] = received_ts
                     self._mark_greetings_satisfied_by_recent_activity(target_user, activity_ts=received_ts)
+                    self._maybe_schedule_group_ignore_complaint(
+                        group_id,
+                        group,
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                        text=text,
+                        now=received_ts,
+                    )
             group["umo"] = _single_line(getattr(event, "unified_msg_origin", ""), 160)
             _, resting_mention_notice = self._group_resting_mention_notice(
                 event,
@@ -8311,6 +8475,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         group_id=group_id,
                         scene=scene,
                         message_id=self._event_message_id(event),
+                        event=event,
                     )
                     self._save_data_sync()
                     logger.info(
@@ -8378,6 +8543,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 group_id=group_id,
                 scene=scene,
                 message_id=self._event_message_id(event),
+                event=event,
             )
             registration_payload = self._maybe_worldbook_self_register_from_group_message(
                 event,

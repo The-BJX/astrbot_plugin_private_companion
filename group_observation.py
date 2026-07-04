@@ -556,6 +556,69 @@ class GroupObservationMixin:
             lines.pop(0)
         return "\n".join(lines)
 
+    def _group_name_from_event(self, event: Any) -> str:
+        if event is None:
+            return ""
+
+        def clean(value: Any) -> str:
+            text = _single_line(value, 80)
+            if not text or text.isdigit():
+                return ""
+            return text
+
+        getter = getattr(event, "get_group_name", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if hasattr(value, "__await__"):
+                    value = ""
+                name = clean(value)
+                if name:
+                    return name
+            except Exception:
+                pass
+
+        raw: dict[str, Any] = {}
+        raw_getter = getattr(self, "_event_raw_payload", None)
+        if callable(raw_getter):
+            try:
+                payload = raw_getter(event)
+                raw = payload if isinstance(payload, dict) else {}
+            except Exception:
+                raw = {}
+        for key in ("group_name", "group_card", "group_display_name", "group_remark", "name", "display_name", "title"):
+            value = clean(raw.get(key))
+            if value:
+                return value
+        for obj_key in ("group", "group_info", "sender_group", "guild"):
+            group_obj = raw.get(obj_key) if isinstance(raw.get(obj_key), dict) else {}
+            for key in ("group_name", "name", "display_name", "group_remark", "title", "card"):
+                value = clean(group_obj.get(key))
+                if value:
+                    return value
+        message_obj = getattr(event, "message_obj", None)
+        sources = [message_obj]
+        if message_obj is not None:
+            raw_message = getattr(message_obj, "raw_message", None)
+            if isinstance(raw_message, dict):
+                sources.append(raw_message)
+            sources.append(getattr(message_obj, "group", None))
+            sources.append(getattr(message_obj, "group_info", None))
+        for source in sources:
+            if source is None:
+                continue
+            for attr in ("group_name", "name", "display_name", "group_card", "group_remark", "title", "card"):
+                if isinstance(source, dict):
+                    value = clean(source.get(attr))
+                else:
+                    try:
+                        value = clean(getattr(source, attr, None))
+                    except Exception:
+                        value = ""
+                if value:
+                    return value
+        return ""
+
     def _update_group_observation(
         self,
         group: dict[str, Any],
@@ -566,6 +629,7 @@ class GroupObservationMixin:
         group_id: str = "",
         scene: dict[str, Any] | None = None,
         message_id: str = "",
+        event: Any = None,
     ) -> None:
         cleaned = _single_line(text, 260)
         if not cleaned:
@@ -574,6 +638,11 @@ class GroupObservationMixin:
         injection_guard = self._analyze_group_injection_guard(cleaned, sender_id=sender_id)
         blocked_by_guard = bool(injection_guard.get("blocked"))
         group["group_id"] = str(group_id or group.get("group_id") or group.get("id") or "")
+        group_name = self._group_name_from_event(event)
+        if group_name and group_name != group["group_id"]:
+            group["name"] = group_name
+            group["group_name"] = group_name
+            group["last_group_name_seen_at"] = now
         group["last_seen"] = now
         group["message_count"] = _safe_int(group.get("message_count"), 0, 0) + 1
 
@@ -980,6 +1049,83 @@ class GroupObservationMixin:
             user["last_group_share_at"] = now
             changed = True
         return changed
+
+    def _maybe_schedule_group_ignore_complaint(
+        self,
+        group_id: str,
+        group: dict[str, Any],
+        *,
+        sender_id: str = "",
+        sender_name: str = "",
+        text: str = "",
+        now: float | None = None,
+    ) -> bool:
+        if not sender_id or not self.enable_group_companion:
+            return False
+        users = self.data.get("users")
+        if not isinstance(users, dict):
+            return False
+        user = users.get(str(sender_id))
+        if not isinstance(user, dict) or not user.get("enabled", True) or not user.get("umo"):
+            return False
+        if self._private_user_role(user, str(sender_id)) == "friend":
+            return False
+        awaiting_since = _safe_float(user.get("awaiting_reply_since"), 0)
+        last_sent = _safe_float(user.get("last_sent"), 0)
+        if awaiting_since <= 0 or last_sent <= 0:
+            return False
+        now = _now_ts() if now is None else now
+        wait_seconds = now - max(awaiting_since, last_sent)
+        if wait_seconds < 90 * 60:
+            return False
+        if _safe_int(user.get("ignored_streak"), 0, 0) <= 0:
+            return False
+        cooldown_key = f"group_ignore_complaint:{_today_key()}"
+        if str(user.get("last_group_ignore_complaint_key") or "") == cooldown_key:
+            return False
+        if now - _safe_float(user.get("last_group_ignore_complaint_at"), 0) < 24 * 3600:
+            return False
+        if _safe_float(user.get("next_proactive_at"), 0) > 0 and _safe_float(user.get("next_proactive_at"), 0) <= now + 90 * 60:
+            return False
+        profile = self._persona_action_profile()
+        chance = 0.035
+        if profile.get("clingy"):
+            chance += 0.055
+        if profile.get("playful"):
+            chance += 0.035
+        if profile.get("observant"):
+            chance += 0.015
+        if not (profile.get("clingy") or profile.get("playful") or profile.get("observant")):
+            chance *= 0.35
+        chance += min(0.035, max(0, _safe_int(user.get("ignored_streak"), 0, 0) - 1) * 0.015)
+        if random.random() > min(0.16, chance):
+            return False
+        delay_minutes = random.randint(12, 36)
+        display_name = self._group_member_identity_name(str(sender_id), sender_name or str(sender_id), limit=24)
+        group_name = _single_line(group.get("name") or group.get("group_name"), 40) or str(group_id)
+        accepted = self._offer_proactive_candidate(
+            str(sender_id),
+            user,
+            {
+                "source": "group_ignore_complaint",
+                "reason": "quiet_care",
+                "action": "message",
+                "scheduled_ts": now + delay_minutes * 60,
+                "topic": "刚才私聊没回但在群里冒泡",
+                "score": 68,
+                "motive": (
+                    f"{display_name} 已经有 {self._format_elapsed(wait_seconds).removesuffix('前')}没回私聊，"
+                    f"但刚刚在群 {group_name} 里冒泡了；如果符合人格，可以低压地小声抱怨一句或撒娇一下，不要质问，不要泄露群聊细节。"
+                ),
+            },
+        )
+        if not accepted:
+            return False
+        user["last_group_ignore_complaint_key"] = cooldown_key
+        user["last_group_ignore_complaint_at"] = now
+        user["last_group_ignore_complaint_group_id"] = str(group_id)
+        user["last_group_ignore_complaint_text"] = _single_line(text, 80)
+        return True
 
     def _learn_group_slang(self, group: dict[str, Any], text: str) -> None:
         if self._group_text_blocked_by_injection_guard(text):

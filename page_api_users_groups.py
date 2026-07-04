@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import re
 import time
 from copy import deepcopy
 from datetime import datetime
@@ -281,6 +282,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     if isinstance(group, dict) and not self._looks_like_member_shadow_group(str(group_id), group)
                 ]
                 shadow_count = len(groups) - len(visible_groups)
+            await self._refresh_group_names_from_platform(visible_groups)
             items = [self._group_summary(group_id, group) for group_id, group in visible_groups]
             items.sort(key=lambda item: item.get("last_seen_ts") or 0, reverse=True)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -315,6 +317,226 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if not self._single_line(group.get("name") or group.get("group_name"), 80) and same_sender_hits == len(sender_ids) and len(members) <= 2:
             return True
         return False
+
+    def _group_display_name_missing(self, group_id: str, group: dict[str, Any]) -> bool:
+        name = self._single_line(group.get("name") or group.get("group_name") or group.get("display_name"), 80)
+        gid = str(group_id or group.get("group_id") or "").strip()
+        return not name or name == gid or name == f"群 {gid}" or name.isdigit()
+
+    def _clean_group_display_name(self, value: Any, group_id: str = "") -> str:
+        text = self._single_line(value, 80)
+        gid = str(group_id or "").strip()
+        if not text or text == gid or text == f"群 {gid}" or text.isdigit():
+            return ""
+        return text
+
+    def _extract_onebot_list(self, result: Any) -> list[dict[str, Any]]:
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            groups = result.get("groups") or result.get("items") or result.get("result")
+            if isinstance(groups, list):
+                return [item for item in groups if isinstance(item, dict)]
+        return []
+
+    def _extract_onebot_object(self, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        data = result.get("data")
+        if isinstance(data, dict):
+            return data
+        result_obj = result.get("result")
+        if isinstance(result_obj, dict):
+            return result_obj
+        return result
+
+    def _name_from_group_payload(self, item: dict[str, Any], group_id: str) -> str:
+        return self._clean_group_display_name(
+            item.get("group_name")
+            or item.get("group_remark")
+            or item.get("group_display_name")
+            or item.get("name")
+            or item.get("display_name")
+            or item.get("title"),
+            group_id,
+        )
+
+    def _group_names_from_loaded_history(self, target_ids: set[str]) -> dict[str, str]:
+        found: dict[str, str] = {}
+        if not target_ids:
+            return found
+        patterns = {
+            group_id: re.compile(rf"群号\s*{re.escape(group_id)}\(([^)\r\n]{{1,80}})\)")
+            for group_id in target_ids
+        }
+        stack: list[Any] = [getattr(self.plugin, "data", {})]
+        scanned_strings = 0
+        while stack and len(found) < len(target_ids) and scanned_strings < 20000:
+            value = stack.pop()
+            if isinstance(value, dict):
+                stack.extend(value.values())
+                continue
+            if isinstance(value, list):
+                stack.extend(value)
+                continue
+            if not isinstance(value, str) or "群号" not in value:
+                continue
+            scanned_strings += 1
+            for group_id, pattern in patterns.items():
+                if group_id in found:
+                    continue
+                match = pattern.search(value)
+                if not match:
+                    continue
+                name = self._clean_group_display_name(match.group(1), group_id)
+                if name:
+                    found[group_id] = name
+        return found
+
+    @staticmethod
+    def _lookup_float(value: Any) -> float:
+        try:
+            return float(value or 0)
+        except Exception:
+            return 0.0
+
+    def _page_onebot_call_actions(self) -> list[Any]:
+        candidates: list[Any] = []
+        finder = getattr(self.plugin, "_qzone_find_runtime_bot", None)
+        if callable(finder):
+            try:
+                bot = finder()
+                if bot is not None:
+                    candidates.append(bot)
+            except Exception:
+                pass
+        context = getattr(self.plugin, "context", None)
+        if context is not None:
+            try:
+                platform = context.get_platform("aiocqhttp")
+            except Exception:
+                platform = None
+            if platform is not None:
+                candidates.append(platform)
+                for attr in ("bot", "client", "adapter", "connection", "api"):
+                    try:
+                        value = getattr(platform, attr, None)
+                    except Exception:
+                        value = None
+                    if value is not None:
+                        candidates.append(value)
+        platform_manager = getattr(context, "platform_manager", None) if context is not None else None
+        for attr in ("platform_insts", "platform_instances", "instances", "platforms"):
+            try:
+                value = getattr(platform_manager, attr, None)
+            except Exception:
+                value = None
+            if not value:
+                continue
+            try:
+                iterable = value.values() if isinstance(value, dict) else value
+                candidates.extend(list(iterable or []))
+            except Exception:
+                pass
+        calls: list[Any] = []
+        seen: set[int] = set()
+        for candidate in candidates:
+            if candidate is None or id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            api = getattr(candidate, "api", None)
+            call_action = getattr(api, "call_action", None)
+            if not callable(call_action):
+                call_action = getattr(candidate, "call_action", None)
+            if callable(call_action):
+                calls.append(call_action)
+        return calls
+
+    async def _page_call_onebot_action(self, action: str, **kwargs: Any) -> Any:
+        last_error: Exception | None = None
+        for call_action in self._page_onebot_call_actions():
+            try:
+                result = call_action(action, **kwargs)
+                return await result if hasattr(result, "__await__") else result
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("没有可用的 OneBot call_action")
+
+    async def _refresh_group_names_from_platform(self, visible_groups: list[tuple[str, dict[str, Any]]], *, force: bool = False) -> None:
+        now = time.time()
+        display_missing = [
+            (str(group_id), group)
+            for group_id, group in visible_groups
+            if self._group_display_name_missing(str(group_id), group)
+        ]
+        if not display_missing:
+            return
+        target_ids = {group_id for group_id, _ in display_missing if group_id}
+        found: dict[str, str] = self._group_names_from_loaded_history(target_ids)
+        missing = [
+            (group_id, group)
+            for group_id, group in display_missing
+            if group_id not in found
+            and (force or now - self._lookup_float(group.get("last_group_name_lookup_at")) > 5 * 60)
+        ]
+        platform_target_ids = {group_id for group_id, _ in missing if group_id}
+        try:
+            if platform_target_ids:
+                raw_groups = await self._page_call_onebot_action("get_group_list")
+                for item in self._extract_onebot_list(raw_groups):
+                    group_id = str(item.get("group_id") or item.get("group_uin") or item.get("group_no") or "").strip()
+                    if group_id not in platform_target_ids:
+                        continue
+                    name = self._name_from_group_payload(item, group_id)
+                    if name:
+                        found[group_id] = name
+        except Exception as exc:
+            logger.info("[PrivateCompanionPage] 群列表名称刷新失败: %s", self._single_line(exc, 120))
+        if len(found) < len(target_ids) and platform_target_ids:
+            for group_id, _ in missing[:30]:
+                if group_id in found:
+                    continue
+                try:
+                    raw_item = await self._page_call_onebot_action("get_group_info", group_id=int(group_id) if group_id.isdigit() else group_id)
+                except Exception:
+                    continue
+                item = self._extract_onebot_object(raw_item)
+                if not isinstance(item, dict):
+                    continue
+                name = self._name_from_group_payload(item, group_id)
+                if name:
+                    found[group_id] = name
+        if not found and not missing:
+            return
+        changed = False
+        async with self.plugin._data_lock:
+            groups = self.plugin.data.get("groups")
+            if not isinstance(groups, dict):
+                return
+            for group_id, snapshot in display_missing:
+                group = groups.get(group_id)
+                if not isinstance(group, dict):
+                    continue
+                if group_id in platform_target_ids:
+                    group["last_group_name_lookup_at"] = now
+                name = found.get(group_id, "")
+                if name:
+                    group["name"] = name
+                    group["group_name"] = name
+                    group["last_group_name_seen_at"] = now
+                    snapshot["name"] = name
+                    snapshot["group_name"] = name
+                    snapshot["last_group_name_seen_at"] = now
+                    changed = True
+                if group_id in platform_target_ids:
+                    snapshot["last_group_name_lookup_at"] = now
+            if changed:
+                self.plugin._save_data_sync()
     async def get_group(self) -> dict[str, Any]:
         group_id = str(request.args.get("group_id", "")).strip()
         if not group_id:
@@ -324,6 +546,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 group = deepcopy((self.plugin.data.get("groups") or {}).get(group_id))
             if not isinstance(group, dict):
                 return self._error("群不存在")
+            await self._refresh_group_names_from_platform([(group_id, group)], force=True)
             detail = self._group_summary(group_id, group)
             detail.update(
                 {

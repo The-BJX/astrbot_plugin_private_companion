@@ -47,6 +47,39 @@ LEGACY_PROACTIVE_ACTION_FLAG_KEYS: dict[str, str] = {
     "voice": "enable_voice_action",
 }
 
+PRECISION_PROVIDER_MODE_KEYS: tuple[str, ...] = (
+    "MAI_STYLE_PROVIDER_ID",
+    "DAILY_PLAN_PROVIDER_ID",
+    "DETAIL_ENHANCEMENT_PROVIDER_ID",
+    "DREAM_DIARY_PROVIDER_ID",
+    "CREATIVE_PROVIDER_ID",
+    "CREATIVE_OUTLINE_PROVIDER_ID",
+    "CREATIVE_REVIEW_PROVIDER_ID",
+    "VOICE_PROMPT_PROVIDER_ID",
+    "tts_conversion_provider_id",
+    "PHOTO_PROMPT_PROVIDER_ID",
+    "NARRATION_PROVIDER_ID",
+    "HISTORY_SUMMARY_PROVIDER_ID",
+    "RESPONSE_REVIEW_PROVIDER_ID",
+    "SMART_SILENCE_PROVIDER_ID",
+    "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
+    "TROUBLESHOOTING_PROVIDER_ID",
+    "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+    "REST_WAKEUP_PROVIDER_ID",
+    "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
+    "EMOTION_JUDGEMENT_PROVIDER_ID",
+    "COMPANION_MEMORY_PROVIDER_ID",
+    "DIALOGUE_EPISODE_PROVIDER_ID",
+    "GROUP_INTERJECT_PROVIDER_ID",
+    "GROUP_EPISODE_PROVIDER_ID",
+    "GROUP_SLANG_PROVIDER_ID",
+    "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
+    "FORWARD_MESSAGE_PROVIDER_ID",
+    "PRIVATE_READING_VISION_PROVIDER_ID",
+    "NEWS_PROVIDER_ID",
+    "WEB_EXPLORATION_PROVIDER_ID",
+)
+
 
 def migrate_flat_config_into_schema_groups(
     config: Any,
@@ -80,6 +113,8 @@ def _migrate_flat_config_into_schema_groups(
 
     changed: list[str] = []
     for key, item in schema_map.items():
+        if key == "provider_config_mode":
+            continue
         if key not in root:
             continue
         old_value = root.get(key)
@@ -109,6 +144,8 @@ def _migrate_flat_config_into_schema_groups(
                 if _copy_into_schema_group(root, schema_map, new_key, old_value):
                     changed.append(f"{old_key}->{new_key}")
 
+    if _ensure_provider_config_mode(root, schema_map):
+        changed.append("provider_config_mode~mode-infer")
     added_compat_defaults = _ensure_flat_schema_compat_defaults(root, schema_map)
     if added_compat_defaults:
         changed.extend(f"{key}~compat-default" for key in added_compat_defaults)
@@ -154,6 +191,92 @@ def _migrate_flat_config_into_schema_groups(
     if save:
         _save_config_after_schema_migration(config, logger=logger)
     return len(changed)
+
+
+def _ensure_provider_config_mode(root: dict[str, Any], schema_map: dict[str, dict[str, Any]]) -> bool:
+    item = schema_map.get("provider_config_mode")
+    if not item:
+        return False
+    group_key = str(item.get("group") or "")
+    group = root.get(group_key)
+    if not isinstance(group, dict):
+        group = {}
+        root[group_key] = group
+
+    root_mode = _normalize_provider_config_mode_value(root.get("provider_config_mode"))
+    group_mode = _normalize_provider_config_mode_value(group.get("provider_config_mode"))
+    quick_keys = (
+        "FAST_RESPONSE_PROVIDER_ID",
+        "COMPLEX_REASONING_PROVIDER_ID",
+        "CREATIVE_MODEL_PROVIDER_ID",
+        "PLUGIN_VISION_PROVIDER_ID",
+    )
+    has_quick_provider = _has_any_configured_provider(root, group, quick_keys)
+    has_precision_provider = _has_any_configured_provider(root, group, PRECISION_PROVIDER_MODE_KEYS)
+    explicit = ""
+    if group_mode and root_mode and group_mode != root_mode:
+        # Official AstrBot config pages save the visible schema group first.
+        # When it disagrees with the hidden flat compatibility key, prefer what
+        # the user can actually see and just sync the hidden copy afterward.
+        explicit = group_mode
+    elif group_mode:
+        if not root_mode and group_mode == "quick" and has_precision_provider and not has_quick_provider:
+            explicit = ""
+        else:
+            explicit = group_mode
+    elif root_mode:
+        explicit = root_mode
+    if explicit:
+        changed = False
+        if group.get("provider_config_mode") != explicit:
+            group["provider_config_mode"] = explicit
+            changed = True
+        if root.get("provider_config_mode") != explicit:
+            root["provider_config_mode"] = explicit
+            changed = True
+        return changed
+
+    inferred = "precision" if has_precision_provider else "quick"
+    group["provider_config_mode"] = inferred
+    root["provider_config_mode"] = inferred
+    return True
+
+
+def _normalize_provider_config_mode_value(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "quick": "quick",
+        "fast": "quick",
+        "simple": "quick",
+        "快速": "quick",
+        "快速配置": "quick",
+        "precision": "precision",
+        "precise": "precision",
+        "advanced": "precision",
+        "detail": "precision",
+        "detailed": "precision",
+        "精准": "precision",
+        "精准配置": "precision",
+        "分流": "precision",
+        "分流模型": "precision",
+    }
+    return aliases.get(text, "")
+
+
+def _has_any_configured_provider(
+    root: dict[str, Any],
+    mode_group: dict[str, Any],
+    keys: tuple[str, ...],
+) -> bool:
+    for key in keys:
+        if str(mode_group.get(key) or "").strip():
+            return True
+        if str(root.get(key) or "").strip():
+            return True
+        for value in root.values():
+            if isinstance(value, dict) and str(value.get(key) or "").strip():
+                return True
+    return False
 
 
 def _cleanup_flat_schema_item_keys(root: dict[str, Any], schema_map: dict[str, dict[str, Any]]) -> list[str]:

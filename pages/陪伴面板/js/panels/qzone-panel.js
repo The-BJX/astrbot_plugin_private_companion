@@ -33,6 +33,48 @@ window.PrivateCompanionQzonePanel = (() => {
     notice.dataset.tone = tone;
   }
 
+  function isRouteMissingError(error) {
+    return /未找到该路由|找不到该路由|路由不存在|route\s*(?:not\s*found|missing)|not\s*found.*route|^not\s*found$|HTTP\s*404|\b404\b/i.test(String(error?.message || "").trim());
+  }
+
+  async function qzoneFetch(paths) {
+    const candidates = Array.isArray(paths) ? paths : [paths];
+    let lastError = null;
+    for (const path of candidates) {
+      try {
+        return await state.context.fetchJson(path);
+      } catch (error) {
+        lastError = error;
+        if (!isRouteMissingError(error)) break;
+      }
+    }
+    throw lastError || new Error("QQ 空间请求失败");
+  }
+
+  async function qzonePost(paths, body = {}) {
+    const candidates = Array.isArray(paths) ? paths : [paths];
+    let lastError = null;
+    for (const path of candidates) {
+      try {
+        return await state.context.postJson(path, body);
+      } catch (error) {
+        lastError = error;
+        if (!isRouteMissingError(error)) break;
+      }
+    }
+    throw lastError || new Error("QQ 空间请求失败");
+  }
+
+  async function refreshCookies() {
+    return qzonePost([
+      "/qzone/refresh_cookies",
+      "/qzone/refresh-cookies",
+      "/qzone/cookies/refresh",
+      "/qzone/refresh",
+      "/qzone/cookie/refresh",
+    ], {});
+  }
+
   function renderAccount() {
     const login = state.status?.login || {};
     const summary = state.status?.summary || {};
@@ -46,10 +88,24 @@ window.PrivateCompanionQzonePanel = (() => {
     }
     const summaryBox = document.getElementById("qzoneQuickSummary");
     if (summaryBox) {
+      const imageStatus = summary.last_life_publish_generated_image_status || "";
+      const imageNote = summary.last_life_publish_generated_image_note || "";
+      const imageLabel = summary.last_life_publish_images > 0
+        ? `${summary.last_life_publish_images} 张`
+        : (imageStatus ? imageStatus.replace(/^skipped:/, "跳过:").replace(/^failed:/, "失败:") : `${state.posts.length} 条`);
+      const referenceMeta = summary.last_life_publish_generated_image_reference
+        ? `参考图${summary.last_life_publish_generated_image_reference_exists ? "可用" : "不可用"}`
+        : "";
+      const designMeta = [summary.last_life_publish_generated_image_anchor, summary.last_life_publish_generated_image_composition]
+        .filter(Boolean)
+        .join(" / ");
+      const imageMeta = summary.generated_image_enabled
+        ? ([imageNote, designMeta, referenceMeta].filter(Boolean).join(" · ") || `配图概率 ${Math.round(Number(summary.generated_image_probability || 0) * 100)}%`)
+        : "说说配图关闭";
       summaryBox.innerHTML = `
         <article><b>${summary.life_publish_enabled ? "开启" : "关闭"}</b><span>生活说说</span></article>
         <article><b>${summary.comment_inbox_enabled ? "开启" : "关闭"}</b><span>评论收件箱</span></article>
-        <article><b>${state.posts.length}</b><span>当前动态</span></article>
+        <article title="${state.context.escapeHtml(imageMeta)}"><b>${state.context.escapeHtml(imageLabel)}</b><span>最近配图</span></article>
       `;
     }
   }
@@ -157,7 +213,7 @@ window.PrivateCompanionQzonePanel = (() => {
   async function loadStatus(force = false) {
     if (state.status && !force) return state.status;
     try {
-      state.status = await state.context.fetchJson("/qzone/status");
+      state.status = await qzoneFetch(["/qzone/status", "/qzone/summary", "/qzone/state", "/qzone/health"]);
       renderAccount();
       return state.status;
     } catch (error) {
@@ -189,7 +245,12 @@ window.PrivateCompanionQzonePanel = (() => {
       params.set("scope", state.scope);
       params.set("page", String(state.page || 1));
       if (state.scope === "profile" && state.targetUin.trim()) params.set("hostuin", state.targetUin.trim());
-      const payload = await state.context.fetchJson(`/qzone/feed?${params.toString()}`);
+      const query = params.toString();
+      const payload = await qzoneFetch([
+        `/qzone/feed?${query}`,
+        `/qzone/feeds?${query}`,
+        `/qzone/list?${query}`,
+      ]);
       state.posts = Array.isArray(payload.items) ? payload.items : [];
       state.loaded = true;
       if (!state.selectedId && state.posts[0]) state.selectedId = state.posts[0].id;
@@ -215,7 +276,12 @@ window.PrivateCompanionQzonePanel = (() => {
     state.detailLoadingId = id;
     renderFeed();
     try {
-      const payload = await state.context.fetchJson(`/qzone/detail?id=${encodeURIComponent(id)}`);
+      const encodedId = encodeURIComponent(id);
+      const payload = await qzoneFetch([
+        `/qzone/detail?id=${encodedId}`,
+        `/qzone/post?id=${encodedId}`,
+        `/qzone/item?id=${encodedId}`,
+      ]);
       const post = payload.post;
       if (post) {
         state.posts = state.posts.map((item) => (item.id === id ? post : item));
@@ -232,13 +298,20 @@ window.PrivateCompanionQzonePanel = (() => {
     state.pendingLikes.add(id);
     renderFeed();
     try {
-      await state.context.postJson("/qzone/like", { id });
+      const payload = await qzonePost(["/qzone/like", "/qzone/post/like"], { id });
       state.posts = state.posts.map((item) => (
         item.id === id
-          ? { ...item, liked: true, stats: { ...(item.stats || {}), likes: Number(item.stats?.likes || 0) + 1 } }
+          ? {
+              ...item,
+              liked: Boolean(payload?.liked),
+              stats: {
+                ...(item.stats || {}),
+                likes: Number(item.stats?.likes || 0) + (!item.liked && payload?.liked ? 1 : 0),
+              },
+            }
           : item
       ));
-      state.context.showToast("已发送点赞请求");
+      state.context.showToast(payload?.verified ? "点赞已确认" : (payload?.verify_message || "已发送点赞请求"));
     } catch (error) {
       state.context.showToast(`点赞失败：${error.message}`, "error");
     } finally {
@@ -252,7 +325,7 @@ window.PrivateCompanionQzonePanel = (() => {
     const clean = text(content).trim();
     if (!post || !clean) return;
     try {
-      const payload = await state.context.postJson("/qzone/comment", { id: post.id, content: clean });
+      const payload = await qzonePost(["/qzone/comment", "/qzone/post/comment"], { id: post.id, content: clean });
       if (payload?.post) {
         state.posts = state.posts.map((item) => (item.id === post.id ? payload.post : item));
       }
@@ -311,7 +384,7 @@ window.PrivateCompanionQzonePanel = (() => {
     renderFeed();
     try {
       state.context.showToast("正在删除说说...");
-      await state.context.postJson("/qzone/delete", { id: cleanId });
+      await qzonePost(["/qzone/delete", "/qzone/post/delete"], { id: cleanId });
       state.posts = state.posts.filter((item) => item.id !== cleanId);
       if (state.selectedId === cleanId) state.selectedId = state.posts[0]?.id || "";
       state.context.showToast("说说已删除");
@@ -332,7 +405,7 @@ window.PrivateCompanionQzonePanel = (() => {
       return;
     }
     try {
-      await state.context.postJson("/qzone/publish", { content });
+      await qzonePost(["/qzone/publish", "/qzone/post/publish", "/qzone/post"], { content });
       if (input) input.value = "";
       state.context.showToast("说说已发布");
       await loadFeed(true);
@@ -421,7 +494,7 @@ window.PrivateCompanionQzonePanel = (() => {
     });
     document.getElementById("qzoneRefreshCookiesBtn")?.addEventListener("click", async () => {
       try {
-        const payload = await state.context.postJson("/qzone/refresh_cookies", {});
+        const payload = await refreshCookies();
         state.context.showToast(`Cookies 已刷新：QQ ${payload?.uin || "未知"}`);
         await loadStatus(true);
         await loadFeed(true);

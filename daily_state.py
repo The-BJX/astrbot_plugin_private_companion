@@ -9000,7 +9000,7 @@ class DailyStateMixin:
         idle_seconds = max(0, idle_minutes) * 60
         if idle_seconds <= 0:
             return ""
-        recent_at = self._latest_user_activity_ts(user)
+        recent_at = self._latest_private_user_activity_ts(user)
         if recent_at <= 0:
             return ""
         remaining = recent_at + idle_seconds - check_now
@@ -9025,7 +9025,7 @@ class DailyStateMixin:
             if self._is_greeting_reason(reason)
             else self._effective_user_idle_minutes(user)
         )
-        recent_at = self._latest_user_activity_ts(user)
+        recent_at = self._latest_private_user_activity_ts(user)
         quiet_until = recent_at + max(0, idle_minutes) * 60 if recent_at > 0 else check_now + 10 * 60
         if self._is_sticky_greeting_reason(reason) and self._reschedule_greeting_within_window(user, reason, now=check_now):
             pass
@@ -9564,9 +9564,8 @@ class DailyStateMixin:
                     )
                     self._debug_tick_skip(user_id, group_share_block_reason, prefix="取消")
                     continue
-            task_start_last_seen = _safe_float(user.get("last_seen"), 0)
-            task_start_last_activity_at = self._latest_user_activity_ts(user)
-            task_start_inbound_count = _safe_int(user.get("inbound_count"), 0)
+            task_start_private_activity_at = self._latest_private_user_activity_ts(user)
+            task_start_private_inbound_count = _safe_int(user.get("private_inbound_count"), 0)
             pending_send_retry = None if is_troubleshooting_for_send else self._pending_proactive_send_retry(user)
             if pending_send_retry:
                 reason = _single_line(pending_send_retry.get("reason"), 40) or normalize_legacy_tag_text(user.get("planned_proactive_reason")) or "check_in"
@@ -10004,36 +10003,46 @@ class DailyStateMixin:
             async with self._data_lock:
                 current_after_render = self._get_user(user_id)
                 has_new_user_message = (
-                    _safe_float(current_after_render.get("last_seen"), 0) > task_start_last_seen
-                    or self._latest_user_activity_ts(current_after_render) > task_start_last_activity_at
-                    or _safe_int(current_after_render.get("inbound_count"), 0) > task_start_inbound_count
+                    self._latest_private_user_activity_ts(current_after_render) > task_start_private_activity_at
+                    or _safe_int(current_after_render.get("private_inbound_count"), 0) > task_start_private_inbound_count
                 )
             if has_new_user_message:
-                logger.info(
-                    "[PrivateCompanion] 用户在主动消息生成期间已有新消息,丢弃本次主动发送: %s",
-                    user_id,
-                )
-                async with self._data_lock:
-                    current_for_clear = self._get_user(user_id)
-                    current_for_clear["proactive_sending"] = False
-                    current_for_clear["proactive_sending_started_at"] = 0
-                    if is_troubleshooting_for_send:
-                        self._append_troubleshooting_proactive_step(current_for_clear, "并发保护", "error", "用户在生成期间发来新消息，主动被取消")
+                if is_troubleshooting_for_send:
+                    logger.info(
+                        "[PrivateCompanion] 排障临时主动检测到生成期间有新消息,继续发送以验证链路: %s",
+                        user_id,
+                    )
+                    async with self._data_lock:
+                        current_for_warn = self._get_user(user_id)
+                        self._append_troubleshooting_proactive_step(
+                            current_for_warn,
+                            "并发保护",
+                            "warn",
+                            "生成期间检测到新消息；排障测试继续发送以验证链路",
+                        )
                         self._record_troubleshooting_proactive_result(
                             user_id,
-                            current_for_clear,
-                            ok=False,
-                            detail="用户在生成期间发来新消息，主动发送按安全规则取消",
-                            error="用户在生成期间发来新消息",
+                            current_for_warn,
+                            ok=True,
+                            detail="生成期间检测到新消息；排障测试继续发送以验证链路",
                             text=text,
                             action=effective_action_for_send or planned_action_for_send or "message",
                             reason=reason or "check_in",
                             extra_count=len(extra_components),
                         )
-                        self._restore_troubleshooting_proactive_plan(current_for_clear)
-                    self._update_proactive_audit(audit_id, status="cancelled", note="用户在生成期间发来新消息,已取消本次主动")
-                    self._save_data_sync()
-                continue
+                        self._save_data_sync()
+                else:
+                    logger.info(
+                        "[PrivateCompanion] 用户在主动消息生成期间已有新消息,丢弃本次主动发送: %s",
+                        user_id,
+                    )
+                    async with self._data_lock:
+                        current_for_clear = self._get_user(user_id)
+                        current_for_clear["proactive_sending"] = False
+                        current_for_clear["proactive_sending_started_at"] = 0
+                        self._update_proactive_audit(audit_id, status="cancelled", note="用户在生成期间发来新消息,已取消本次主动")
+                        self._save_data_sync()
+                    continue
             async with self._data_lock:
                 current_for_recent_chat = self._get_user(user_id)
                 recent_chat_guard_reason = self._recent_chat_proactive_guard_reason(

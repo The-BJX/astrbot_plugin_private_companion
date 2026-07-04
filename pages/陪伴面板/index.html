@@ -4,7 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260627-outfit-contain1" />
+  <link rel="stylesheet" href="./app.css?v=20260704-theme-fouc-fix" />
+  <script>
+    (function () {
+      try {
+        var theme = localStorage.getItem("pc_theme") || "classic";
+        var font = localStorage.getItem("pc_font") || "original";
+        var allowedThemes = ["classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"];
+        if (allowedThemes.indexOf(theme) === -1) theme = "classic";
+        if (font !== "cheng") font = "original";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.pageFont = font;
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <main class="shell">
@@ -130,10 +143,6 @@
           <article class="wide">
             <h2>配置健康检查</h2>
             <div id="healthPanel" class="health-list"></div>
-          </article>
-          <article class="wide">
-            <h2>运行诊断</h2>
-            <div id="diagnosticPanel" class="diagnostic-list"></div>
           </article>
           <article class="wide">
             <h2>拓展页自检</h2>
@@ -633,25 +642,29 @@ QQ空间 = 公开札记
       <section class="panel" id="panel-bookshelf">
         <div class="section-head">
           <h2>书柜</h2>
-          <span class="muted">上层放正在写的书，下层抽屉收着日记本和私密阅读记录</span>
+          <span class="muted">创作作品 · 私密日记 · 夹层阅读 — 管理可见性与内容</span>
         </div>
         <div id="bookcaseHome" class="bookcase-home">
           <div class="bookcase-hero">
             <article>
               <span>书架作品</span>
               <b id="bookshelfPublicCount">0</b>
+              <small>Bot 自主推进的创作</small>
             </article>
             <article>
               <span>抽屉夹层</span>
               <b id="bookshelfSecretCount">0</b>
+              <small>密码保护的私密内容</small>
             </article>
             <article>
               <span>日记本</span>
               <b id="bookshelfDiaryCount">0</b>
+              <small>按日期归档的内心独白</small>
             </article>
             <article>
               <span>阅读</span>
               <b id="bookshelfJmCount">0</b>
+              <small>夹层阅读记录</small>
             </article>
           </div>
           <div class="bookcase-layout">
@@ -661,7 +674,7 @@ QQ空间 = 公开札记
                   <h2>上层书架</h2>
                   <p id="bookshelfIntro" class="section-desc"></p>
                 </div>
-                <dl id="creativeSettings"></dl>
+                <div id="creativeSettings" class="creative-status-bar"></div>
               </div>
               <div id="bookshelfPublicBooks" class="book-category-list"></div>
             </article>
@@ -669,7 +682,7 @@ QQ空间 = 公开札记
               <div class="drawer-head">
                 <div>
                   <h2>抽屉夹层</h2>
-                  <p class="section-desc">需要密码</p>
+                  <p class="section-desc">日记与私密阅读 · 需要密码解锁</p>
                 </div>
                 <span id="bookshelfLockState" class="module-badge">未解锁</span>
               </div>
@@ -826,6 +839,13 @@ QQ空间 = 公开札记
             </div>
             <div id="troubleshootingFaq" class="troubleshooting-faq"></div>
           </article>
+          <article class="troubleshooting-diagnostics-panel">
+            <div>
+              <h2>运行诊断</h2>
+              <span class="muted">从配置、目标用户、群聊开关和运行态中整理出的诊断项</span>
+            </div>
+            <div id="diagnosticPanel" class="diagnostic-list"></div>
+          </article>
         </div>
       </section>
 
@@ -856,18 +876,30 @@ QQ空间 = 公开札记
           <article class="module-tool-card wide" id="module-tool-quick">
             <header>
               <div>
-                <span>Setup</span>
+                <span>Admin Setup</span>
                 <h3>快速启动</h3>
-                <p>配置目标平台、私聊对象和小号转发，设定免打扰时段和管理命令范围。首次使用从这里开始。</p>
+                <p>设定 Bot 的运行平台、服务对象与转发策略，并配置免打扰时段和管理命令权限范围。面板仅管理员可见，以下配置项变更后立即生效。</p>
               </div>
             </header>
             <form id="quickModuleForm" class="module-form">
-              <label>目标平台 <input name="target_platform" /></label>
-              <label>私聊目标 QQ <textarea name="target_user_ids" rows="4" placeholder="一行一个或逗号分隔"></textarea></label>
-              <label>主动发送到小号 <textarea name="private_user_delivery_aliases" rows="3" placeholder="大号QQ=小号QQ"></textarea></label>
-              <label>免打扰时间 <input name="quiet_hours" placeholder="23:00-08:30" /></label>
-              <label class="toggle-row"><input name="require_private_opt_in" type="checkbox" /> <span>限制管理命令仅私聊可用</span></label>
-              <button type="submit">保存快速启动</button>
+              <div class="module-subgroup">
+                <h3>部署与目标</h3>
+                <label class="wide-field">运行平台
+                  <input name="target_platform" placeholder="如 aiocqhttp" />
+                </label>
+                <label class="wide-field">私聊服务对象 QQ
+                  <textarea name="target_user_ids" rows="3" placeholder="一行一个 QQ 号，或用逗号分隔"></textarea>
+                </label>
+                <label class="wide-field">大号→小号转发映射
+                  <textarea name="private_user_delivery_aliases" rows="2" placeholder="格式：大号QQ=小号QQ，一行一组"></textarea>
+                </label>
+              </div>
+              <div class="module-subgroup">
+                <h3>运行策略与权限</h3>
+                <label>免打扰时段 <input name="quiet_hours" placeholder="如 23:00-08:30" /></label>
+                <label class="toggle-row"><input name="require_private_opt_in" type="checkbox" /> <span>管理命令仅限私聊执行（群聊中不响应状态修改指令）</span></label>
+              </div>
+              <button type="submit">保存配置</button>
             </form>
           </article>
           <article class="module-tool-card wide" id="module-tool-presets">
@@ -1018,6 +1050,7 @@ QQ空间 = 公开札记
                 <label>不分段字数阈值 <input name="segmented_proactive_threshold" type="number" min="20" max="500" /></label>
                 <label>短片段合并阈值 <input name="segmented_proactive_min_segment_chars" type="number" min="1" max="40" /></label>
                 <label>最多分段数 <input name="segmented_proactive_max_segments" type="number" min="1" max="8" /></label>
+                <label class="toggle-row"><input name="segmented_proactive_send_as_forward" type="checkbox" /> <span>分段后合并发送</span></label>
                 <label>分段模式
                   <select name="segmented_proactive_split_mode">
                     <option value="regex">正则</option>
@@ -1545,7 +1578,7 @@ QQ空间 = 公开札记
 
   <script src="./js/features/daily-outfit.js?v=20260702-outfit-preview"></script>
   <script src="./js/panels/provider-tree.js?v=20260702-provider-tree"></script>
-  <script src="./js/panels/qzone-panel.js?v=20260703-qzone-delete-clickfix"></script>
-  <script src="./app.js?v=20260702-provider-tree"></script>
+  <script src="./js/panels/qzone-panel.js?v=20260704-qzone-stable-api"></script>
+  <script src="./app.js?v=20260704-qzone-route-error-fallback"></script>
 </body>
 </html>

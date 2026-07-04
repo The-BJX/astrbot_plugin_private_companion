@@ -58,6 +58,28 @@ def _single_line(text: Any, limit: int = 80) -> str:
     return normalized[:limit]
 
 
+_OPTIONAL_MODEL_DEPENDENCIES = {
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "sentence_transformers",
+    "transformers",
+}
+
+
+def _missing_optional_model_dependency(exc: BaseException) -> str:
+    if isinstance(exc, ModuleNotFoundError):
+        name = str(getattr(exc, "name", "") or "").strip()
+        if name in _OPTIONAL_MODEL_DEPENDENCIES:
+            return name
+    text = str(exc or "")
+    match = re.search(r"No module named ['\"]([^'\"]+)['\"]", text)
+    if not match:
+        return ""
+    name = match.group(1).strip()
+    return name if name in _OPTIONAL_MODEL_DEPENDENCIES else ""
+
+
 _GARBLED_TEXT_MARKERS = ("Ã", "â", "鈥", "銆", "鏉", "锟", "Ð", "Ê", "¤", "\ufffd")
 _BINARY_TEXT_PREFIXES = ("JFIF", "EXIF", "GIF87A", "GIF89A", "%PDF-", "PK\x03\x04")
 

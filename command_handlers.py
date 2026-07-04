@@ -14,7 +14,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from .constants import DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
-from .helpers import _flat_get, _now_ts, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
+from .helpers import _flat_get, _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
 
 
 _PHOTO_REFERENCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -386,6 +386,9 @@ class CommandHandlersMixin:
             "photo_generation_fixed_prompt": {"label": "全局固定生图提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
             "enable_qzone_integration": {"label": "QQ 空间联动", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动"},
             "enable_qzone_life_publish": {"label": "QQ 空间生活说说", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 生活说说"},
+            "WEB_EXPLORATION_API_BASE_URL": {"label": "主动搜索接口地址", "location": "拓展页 -> 功能开关 -> 长线主动 -> 主动搜索详情 -> 自定义搜索接口"},
+            "WEB_EXPLORATION_API_KEY": {"label": "主动搜索接口 API Key", "location": "拓展页 -> 功能开关 -> 长线主动 -> 主动搜索详情 -> 自定义搜索接口"},
+            "WEB_EXPLORATION_API_MODEL": {"label": "主动搜索接口模型", "location": "拓展页 -> 功能开关 -> 长线主动 -> 主动搜索详情 -> 自定义搜索接口"},
             "max_daily_messages": {"label": "主动消息每日上限", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
             "min_interval_minutes": {"label": "主动消息最小间隔", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
             "proactive_review_strength": {"label": "主动发送前复核强度", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情"},
@@ -3300,10 +3303,26 @@ class CommandHandlersMixin:
                 event.stop_event()
                 return True
             return False
-        has_reference = bool(self._private_event_has_image(event) if callable(getattr(self, "_private_event_has_image", None)) else False)
-        has_reference = has_reference or bool(self._photo_reference_sources_from_reply_cache(event))
-        if not has_reference:
-            has_reference = bool(await self._photo_reference_sources_from_reply_event(event))
+        try:
+            safe_has_image = getattr(self, "_private_event_has_image_safe", None)
+            if callable(safe_has_image):
+                has_reference = bool(safe_has_image(event, label="natural_photo_intent"))
+            else:
+                has_reference_checker = getattr(self, "_private_event_has_image", None)
+                has_reference = bool(has_reference_checker(event) if callable(has_reference_checker) else False)
+            has_reference = has_reference or bool(self._photo_reference_sources_from_reply_cache(event))
+            if not has_reference:
+                has_reference = bool(await self._photo_reference_sources_from_reply_event(event))
+        except Exception as exc:
+            missing = _missing_optional_model_dependency(exc)
+            if not missing:
+                raise
+            logger.warning(
+                "[PrivateCompanion] 自然语言生图参考图检测缺少可选模型依赖，已按无参考图继续: module=%s err=%s",
+                missing,
+                _single_line(exc, 160),
+            )
+            has_reference = False
         intent = self._natural_language_photo_intent(text, has_reference=has_reference, directed=directed)
         if not intent:
             if directed:
@@ -3352,7 +3371,20 @@ class CommandHandlersMixin:
         reference_path = ""
         reference_label = ""
         if intent.get("kind") == "edit":
-            reference_path, reference_label, saw_image = await self._photo_reference_image_from_command_context(event, user_id)
+            try:
+                reference_path, reference_label, saw_image = await self._photo_reference_image_from_command_context(event, user_id)
+            except Exception as exc:
+                missing = _missing_optional_model_dependency(exc)
+                if not missing:
+                    raise
+                logger.warning(
+                    "[PrivateCompanion] 自然语言改图参考图解析缺少可选模型依赖: module=%s err=%s",
+                    missing,
+                    _single_line(exc, 160),
+                )
+                await self._reply(event, f"改图参考图解析缺少可选依赖 {missing}，这次先不改图。")
+                event.stop_event()
+                return True
             logger.info(
                 "[PrivateCompanion] 自然语言改图参考图解析: user=%s saw_image=%s label=%s path=%s exists=%s",
                 _single_line(user_id, 40),
@@ -3403,12 +3435,25 @@ class CommandHandlersMixin:
             has_reference=bool(reference_path),
         )
         await self._reply(event, ack_text)
-        backend_name, image_path, note = await self._generate_photo_image(
-            workflow_kind=workflow_kind,
-            prompt_text=prompt_text,
-            session_key=f"natural_photo_{user_id}",
-            reference_image_path=reference_path,
-        )
+        try:
+            backend_name, image_path, note = await self._generate_photo_image(
+                workflow_kind=workflow_kind,
+                prompt_text=prompt_text,
+                session_key=f"natural_photo_{user_id}",
+                reference_image_path=reference_path,
+            )
+        except Exception as exc:
+            missing = _missing_optional_model_dependency(exc)
+            if not missing:
+                raise
+            logger.warning(
+                "[PrivateCompanion] 自然语言生图后端缺少可选模型依赖: module=%s err=%s",
+                missing,
+                _single_line(exc, 160),
+            )
+            await self._reply(event, f"生图后端缺少可选依赖 {missing}，这次先不生成。")
+            event.stop_event()
+            return True
         logger.info(
             "[PrivateCompanion] 自然语言生图结果: user=%s backend=%s ok=%s note=%s image=%s",
             _single_line(user_id, 40),
@@ -3473,10 +3518,26 @@ class CommandHandlersMixin:
             event.stop_event()
             return True
 
-        has_reference = bool(self._private_event_has_image(event) if callable(getattr(self, "_private_event_has_image", None)) else False)
-        has_reference = has_reference or bool(self._photo_reference_sources_from_reply_cache(event))
-        if not has_reference:
-            has_reference = bool(await self._photo_reference_sources_from_reply_event(event))
+        try:
+            safe_has_image = getattr(self, "_private_event_has_image_safe", None)
+            if callable(safe_has_image):
+                has_reference = bool(safe_has_image(event, label="natural_photo_quota"))
+            else:
+                has_reference_checker = getattr(self, "_private_event_has_image", None)
+                has_reference = bool(has_reference_checker(event) if callable(has_reference_checker) else False)
+            has_reference = has_reference or bool(self._photo_reference_sources_from_reply_cache(event))
+            if not has_reference:
+                has_reference = bool(await self._photo_reference_sources_from_reply_event(event))
+        except Exception as exc:
+            missing = _missing_optional_model_dependency(exc)
+            if not missing:
+                raise
+            logger.warning(
+                "[PrivateCompanion] 指令生图参考图检测缺少可选模型依赖，已按无参考图继续: module=%s err=%s",
+                missing,
+                _single_line(exc, 160),
+            )
+            has_reference = False
 
         compact = re.sub(r"\s+", "", prompt)
         if forced_kind == "text2img":
@@ -3521,7 +3582,20 @@ class CommandHandlersMixin:
         reference_path = ""
         reference_label = ""
         if forced_kind == "edit":
-            reference_path, reference_label, saw_image = await self._photo_reference_image_from_command_context(event, user_id)
+            try:
+                reference_path, reference_label, saw_image = await self._photo_reference_image_from_command_context(event, user_id)
+            except Exception as exc:
+                missing = _missing_optional_model_dependency(exc)
+                if not missing:
+                    raise
+                logger.warning(
+                    "[PrivateCompanion] 指令改图参考图解析缺少可选模型依赖: module=%s err=%s",
+                    missing,
+                    _single_line(exc, 160),
+                )
+                await self._reply(event, f"改图参考图解析缺少可选依赖 {missing}，这次先不改图。")
+                event.stop_event()
+                return True
             logger.info(
                 "[PrivateCompanion] 指令改图参考图解析: user=%s saw_image=%s label=%s path=%s exists=%s",
                 _single_line(user_id, 40),
@@ -3576,12 +3650,25 @@ class CommandHandlersMixin:
             has_reference=bool(reference_path),
         )
         await self._reply(event, ack_text)
-        backend_name, image_path, note = await self._generate_photo_image(
-            workflow_kind=workflow_kind,
-            prompt_text=prompt_text,
-            session_key=f"command_photo_{user_id}",
-            reference_image_path=reference_path,
-        )
+        try:
+            backend_name, image_path, note = await self._generate_photo_image(
+                workflow_kind=workflow_kind,
+                prompt_text=prompt_text,
+                session_key=f"command_photo_{user_id}",
+                reference_image_path=reference_path,
+            )
+        except Exception as exc:
+            missing = _missing_optional_model_dependency(exc)
+            if not missing:
+                raise
+            logger.warning(
+                "[PrivateCompanion] 指令生图后端缺少可选模型依赖: module=%s err=%s",
+                missing,
+                _single_line(exc, 160),
+            )
+            await self._reply(event, f"生图后端缺少可选依赖 {missing}，这次先不生成。")
+            event.stop_event()
+            return True
         logger.info(
             "[PrivateCompanion] 指令生图结果: user=%s action=%s backend=%s ok=%s note=%s image=%s",
             _single_line(user_id, 40),

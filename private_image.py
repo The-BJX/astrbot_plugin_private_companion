@@ -26,7 +26,7 @@ from astrbot.core import file_token_service
 from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .helpers import _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks
+from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks
 from .segmented_message import split_plain_component_chain
 
 class PrivateImageMixin:
@@ -40,6 +40,26 @@ class PrivateImageMixin:
             if class_name == "image":
                 return True
         return bool(self._raw_private_image_sources(event))
+
+    def _private_event_has_image_safe(self, event: AstrMessageEvent, *, label: str = "") -> bool:
+        try:
+            return self._private_event_has_image(event)
+        except Exception as exc:
+            missing = _missing_optional_model_dependency(exc)
+            if missing:
+                logger.warning(
+                    "[PrivateCompanion] 私聊图片存在性检测缺少可选模型依赖，已按无图片继续: label=%s module=%s err=%s",
+                    _single_line(label, 40) or "-",
+                    missing,
+                    _single_line(exc, 160),
+                )
+                return False
+            logger.warning(
+                "[PrivateCompanion] 私聊图片存在性检测失败，已按无图片继续: label=%s err=%s",
+                _single_line(label, 40) or "-",
+                _single_line(exc, 160),
+            )
+            return False
 
     def _is_private_image_only_message(self, event: AstrMessageEvent, text: str) -> bool:
         cleaned = _single_line(text, 120)
@@ -1611,13 +1631,35 @@ class PrivateImageMixin:
 
     async def _transcribe_private_inbound_images(self, image_sources: list[str], *, umo: str = "", user_text: str = "", force_contextual: bool = False) -> str:
         original_sources = [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]
-        sources = await self._prepare_private_image_sources_for_model(
-            original_sources,
-            namespace="private_vision",
-        )
+        try:
+            sources = await self._prepare_private_image_sources_for_model(
+                original_sources,
+                namespace="private_vision",
+            )
+        except Exception as exc:
+            missing = _missing_optional_model_dependency(exc)
+            if missing:
+                logger.warning(
+                    "[PrivateCompanion] 私聊图片预处理缺少可选模型依赖，已跳过本轮识图: module=%s err=%s",
+                    missing,
+                    _single_line(exc, 160),
+                )
+                return ""
+            raise
         if not sources:
             return ""
-        image_items, source_image_count, has_gif_frames = self._private_image_model_image_items_with_meta(sources)
+        try:
+            image_items, source_image_count, has_gif_frames = self._private_image_model_image_items_with_meta(sources)
+        except Exception as exc:
+            missing = _missing_optional_model_dependency(exc)
+            if missing:
+                logger.warning(
+                    "[PrivateCompanion] 私聊图片模型输入构造缺少可选模型依赖，已跳过本轮识图: module=%s err=%s",
+                    missing,
+                    _single_line(exc, 160),
+                )
+                return ""
+            raise
         image_keys = [key for key, _ in image_items]
         image_urls = [url for _, url in image_items]
         if not image_urls:
@@ -1780,6 +1822,16 @@ class PrivateImageMixin:
                 self._mark_private_image_provider_failure(provider_id, provider_source, timeout_note, task="private_image_vision")
                 continue
             except Exception as exc:
+                missing = _missing_optional_model_dependency(exc)
+                if missing:
+                    logger.warning(
+                        "[PrivateCompanion] 私聊图片视觉 provider 缺少可选模型依赖，已降级跳过该 provider: provider=%s module=%s err=%s",
+                        provider_id,
+                        missing,
+                        _single_line(exc, 160),
+                    )
+                    self._mark_private_image_provider_failure(provider_id, provider_source, exc, task="private_image_vision")
+                    continue
                 self._record_llm_usage(
                     provider_id=provider_id,
                     task="private_image_vision",

@@ -1281,6 +1281,9 @@ const configLabels = {
   web_exploration_share_probability: "探索分享概率",
   web_exploration_max_results: "搜索结果数",
   web_exploration_interests: "探索兴趣倾向",
+  WEB_EXPLORATION_API_BASE_URL: "主动搜索接口地址",
+  WEB_EXPLORATION_API_KEY: "主动搜索接口 API Key",
+  WEB_EXPLORATION_API_MODEL: "主动搜索接口模型",
   enable_web_exploration_boredom_search: "空档自主搜索",
   QZONE_COOKIE: "QQ 空间手动 Cookie",
   qzone_life_publish_min_interval_hours: "说说最小间隔",
@@ -1579,7 +1582,10 @@ const configDescriptions = {
   enable_web_exploration_boredom_search: "开启后 Bot 空闲或无聊时会自己决定搜索主题并调用网页搜索。",
   web_exploration_min_interval_hours: "两次自主搜索之间的最小间隔。",
   web_exploration_share_probability: "完成探索后，主动私聊分享的概率，按百分比填写。",
-  web_exploration_max_results: "每次调用 AstrBot 网页搜索时最多读取多少条结果。",
+  web_exploration_max_results: "每次主动搜索最多读取多少条结果；AstrBot 全局网页搜索和自定义接口都会按这个数量裁剪。",
+  WEB_EXPLORATION_API_BASE_URL: "可选自定义搜索接口地址。只影响主动搜索空档探索的联网检索；留空继续使用 AstrBot 全局网页搜索。",
+  WEB_EXPLORATION_API_KEY: "自定义搜索接口鉴权 Key。填写后请求头会带 Authorization: Bearer；本地接口无需鉴权可留空。",
+  WEB_EXPLORATION_API_MODEL: "传给自定义搜索接口的模型名，不影响主动搜索的选题/整理模型。",
   QZONE_COOKIE: "可填写浏览器 QQ 空间 Cookie，作为查看、点赞、评论和发布说说的优先凭据；留空时仍使用 OneBot 自动 Cookie。需包含 uin/p_uin 与 p_skey 或 skey，填写后可在 QQ 空间页刷新 Cookies 或到排障中心测试链路。",
   qzone_life_publish_min_interval_hours: "两次低频生活说说之间的最小间隔。",
   qzone_life_publish_probability: "满足条件时发布生活说说的概率，按百分比填写。",
@@ -1815,8 +1821,8 @@ const featureSettingGroups = {
   enable_ai_daily_watch: ["ai_daily_sources", "ai_daily_prefer_text_version"],
   enable_news_boredom_read: ["news_min_interval_hours", "news_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
   enable_external_event_self_link: ["external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_share_probability", "web_exploration_share_probability"],
-  enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
-  enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
+  enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results", "WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
+  enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results", "WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
   enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability", "enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability"],
@@ -2000,6 +2006,11 @@ const featureSettingSections = {
       title: "搜索兴趣",
       note: "控制主动搜索的主题、频率和结果规模。",
       keys: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "web_exploration_max_results"],
+    },
+    {
+      title: "自定义搜索接口",
+      note: "只接管主动搜索的联网检索；选题和整理仍使用上方“搜索决策/整理”模型。",
+      keys: ["WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
     },
     {
       title: "外界信息自我关联",
@@ -2228,6 +2239,7 @@ const featureSettingTypes = {
   backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"]] },
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
   BACKUP_EXTERNAL_IMAGE_API_KEY: { type: "password" },
+  WEB_EXPLORATION_API_KEY: { type: "password" },
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
   segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
   segmented_proactive_send_as_forward: { type: "checkbox" },
@@ -2640,6 +2652,16 @@ function normalizeResponse(payload) {
   if (payload && typeof payload === "object" && Object.prototype.hasOwnProperty.call(payload, "success")) {
     return payload;
   }
+  if (payload && typeof payload === "object") {
+    const status = String(payload.status || "").trim().toLowerCase();
+    if (["error", "fail", "failed"].includes(status) || payload.ok === false) {
+      return {
+        success: false,
+        error: payload.message || payload.error || "请求失败",
+        data: payload.data || {},
+      };
+    }
+  }
   return { success: true, data: payload };
 }
 
@@ -2977,9 +2999,11 @@ function applyOverviewData(overview) {
 }
 
 function applyPageFontFamily() {
-  document.body.dataset.pageFont = state.pageFontFamily === "cheng" ? "cheng" : "original";
+  const font = state.pageFontFamily === "cheng" ? "cheng" : "original";
+  document.documentElement.dataset.pageFont = font;
+  try { localStorage.setItem("pc_font", font); } catch (e) {}
   const appearanceSelect = document.getElementById("appearanceFontSelect");
-  if (appearanceSelect) appearanceSelect.value = document.body.dataset.pageFont;
+  if (appearanceSelect) appearanceSelect.value = font;
 }
 
 const PAGE_THEMES = [
@@ -2988,6 +3012,10 @@ const PAGE_THEMES = [
   { value: "warm", label: "暖阳书房", swatch: ["#faf5ef", "#b86b2e", "#c0793c"] },
   { value: "forest", label: "森林绿径", swatch: ["#eef4ee", "#2d6a4f", "#40916c"] },
   { value: "sakura", label: "樱粉日记", swatch: ["#fdf0f3", "#d4517a", "#fce8ed"] },
+  { value: "ocean", label: "深海渐变", swatch: ["#0a1929", "#00b4d8", "#0077b6"] },
+  { value: "lavender", label: "薰衣草", swatch: ["#f5f0fa", "#7c5cbf", "#a78bda"] },
+  { value: "ink", label: "水墨黑白", swatch: ["#f8f8f6", "#1a1a1a", "#4a4a4a"] },
+  { value: "sunset", label: "日落晚霞", swatch: ["#fff4e6", "#e85d3c", "#f4a261"] },
 ];
 
 function normalizePageTheme(raw) {
@@ -2998,7 +3026,8 @@ function normalizePageTheme(raw) {
 
 function applyPageTheme() {
   const theme = normalizePageTheme(state.pageTheme);
-  document.body.dataset.theme = theme;
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem("pc_theme", theme); } catch (e) {}
 }
 
 function renderAppearanceSettings() {
@@ -3112,15 +3141,15 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
   }
 }
 
-async function loadDashboardDiagnostics(force = false) {
+async function loadDiagnostics(force = false) {
   if (state.lazyLoaded.diagnostics && !force) return state.diagnostics;
   const diagnostics = await fetchJson("/diagnostics");
   state.diagnostics = diagnostics.items || [];
   state.lazyLoaded.diagnostics = true;
-  if (state.activeTab === "dashboard") {
+  if (state.activeTab === "troubleshooting") {
     renderDiagnostics();
-    renderDashboardPulse();
   }
+  renderDashboardPulse();
   return state.diagnostics;
 }
 
@@ -3157,7 +3186,6 @@ async function loadConfigBackups(force = false) {
 
 async function ensureTabData(tabName, force = false) {
   if (tabName === "dashboard") {
-    loadDashboardDiagnostics(force).catch(() => {});
     return;
   }
   if (tabName === "tokens") {
@@ -3173,6 +3201,7 @@ async function ensureTabData(tabName, force = false) {
     await loadImageCache();
   } else if (tabName === "troubleshooting") {
     renderTroubleshooting();
+    loadDiagnostics(force).catch(() => {});
     await loadTroubleshooting();
   }
 }
@@ -3206,7 +3235,6 @@ function renderDashboard() {
   renderDashboardPulse();
   renderStrategyOverview();
   renderHealthPanel();
-  renderDiagnostics();
   renderUxReviewPanel();
   renderRelationshipChart();
   renderGroupBubbleChart();
@@ -3306,7 +3334,7 @@ function renderDashboardPulse() {
       "排障中心",
       state.lazyLoaded.diagnostics
         ? `${(state.diagnostics || []).filter((item) => ["warn", "error"].includes(item.level)).length} 个诊断项`
-        : "后台轻量检查中",
+        : "去排障页查看",
     ],
     ["image-cache", "图片缓存", `${overview.cache?.private_image_vision?.items || 0}/${overview.cache?.private_image_vision?.max_items || "不限"} 条`],
     ["modules", "模块工作台", moduleShortcutNote(overview)],
@@ -3412,6 +3440,11 @@ function renderWebExplorationPanel() {
   const displayTitle = digest.topic || recentWebHistory.title || query.query || "暂无主动搜索记录";
   const displayNote = digest.note || recentWebHistory.intro || recentWebHistory.content || (enabled ? "等待下一次主动搜索留下笔记。" : "主动搜索未开启");
   const displayTime = exploration.last_explore_at || recentWebHistory.generated_at || recentWebHistory.date || "未搜索";
+  const backendLabel = exploration.search_backend === "custom"
+    ? "自定义搜索接口"
+    : exploration.search_backend === "astrbot"
+      ? "AstrBot 网页搜索"
+      : "搜索未配置";
   const historyHtml = history.length
     ? history.slice().reverse().map((item) => {
       const sourceLabel = item.source_label || (item.source === "news" ? "新闻阅读" : "主动搜索");
@@ -3441,7 +3474,7 @@ function renderWebExplorationPanel() {
     <p>${escapeHtml(displayNote)}</p>
     <div class="insight-meta">
       <span>${escapeHtml(insightStatus(exploration.last_status))}</span>
-      <span>${exploration.available ? "网页搜索可用" : "网页搜索未配置"}</span>
+      <span>${escapeHtml(backendLabel)}</span>
       <span>${exploration.boredom_search_enabled ? "空档搜索开启" : "空档搜索关闭"}</span>
       <span>历史 ${escapeHtml(exploration.history_count ?? history.length)} 条</span>
     </div>
@@ -5889,8 +5922,8 @@ function renderGroups() {
       <button type="button" data-group-id="${escapeHtml(group.group_id)}" class="group-card ${String(group.group_id) === String(state.selectedGroupId) ? "is-selected" : ""} ${group.enabled ? "" : "is-off"} ${group.allowed_by_mode ? "" : "is-blocked"}">
         <header>
           <span class="group-card-title">
-            <b>${escapeHtml(group.name || group.group_name || `群 ${group.group_id}`)}</b>
-            <small>${escapeHtml(group.group_id)}</small>
+            <b>${escapeHtml(groupDisplayName(group))}</b>
+            <small>${escapeHtml(groupIdText(group))}</small>
           </span>
           <span class="badge ${group.enabled ? "" : "off"}">${escapeHtml(group.enabled ? "观测中" : "停用")}</span>
         </header>
@@ -5917,6 +5950,18 @@ function renderGroups() {
     });
   });
   renderGroupDetail();
+}
+
+function groupDisplayName(group) {
+  const id = String(group?.group_id || "").trim();
+  const name = String(group?.display_name || group?.name || group?.group_name || "").trim();
+  if (name && name !== id && name !== `群 ${id}`) return name;
+  return "未命名群聊";
+}
+
+function groupIdText(group) {
+  const id = String(group?.group_id || "").trim();
+  return id ? `群号 ${id}` : "群号未知";
 }
 
 function groupWakeupCardLine(group) {
@@ -5950,14 +5995,14 @@ async function renderGroupDetail(forceFetch = false) {
       return;
     }
   }
-  const groupName = detail.name || detail.group_name || `群 ${detail.group_id}`;
+  const groupName = groupDisplayName(detail);
   box.innerHTML = `
     <div class="group-detail-hero">
       <div class="group-detail-title">
         <span class="eyebrow">群聊详情</span>
         <h2>${escapeHtml(groupName)}</h2>
         <div class="group-detail-status">
-          <span>${escapeHtml(detail.group_id)}</span>
+          <span>${escapeHtml(groupIdText(detail))}</span>
           <span class="${detail.enabled ? "ok-text" : "warn-text"}">${escapeHtml(detail.enabled ? "观测中" : "已停用")}</span>
           <span class="${detail.allowed_by_mode ? "ok-text" : "warn-text"}">${escapeHtml(detail.allowed_by_mode ? "名单允许" : "名单拦截")}</span>
           <span>最近 ${escapeHtml(detail.last_seen || "暂无")}</span>
@@ -7515,6 +7560,23 @@ function renderDreamFragments(fragments) {
   }).join("");
 }
 
+function renderCreativeStatusBar(selector, chips) {
+  const el = $(selector);
+  if (!el) return;
+  if (!Array.isArray(chips) || !chips.length) {
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = chips.map((chip) => {
+    const tone = chip.tone || "info";
+    const isOff = tone === "off";
+    return `<span class="creative-chip ${escapeHtml(tone)}"${isOff ? ' data-off="1"' : ""}>
+      <small>${escapeHtml(chip.label || "")}</small>
+      <b>${escapeHtml(chip.value || "")}</b>
+    </span>`;
+  }).join("");
+}
+
 function renderBookshelf() {
   const creative = state.overview?.creative || {};
   const bookshelf = state.bookshelfUnlocked || state.overview?.bookshelf || {};
@@ -7532,20 +7594,49 @@ function renderBookshelf() {
     passwordHintEl.hidden = !passwordHint;
   }
   $("#bookshelfIntro").textContent = creative.enabled
-    ? "上层书架"
-    : "创作未开启";
-  const creativeSettings = {
-    "创作": creative.enabled ? "开启" : "关闭",
-    "提起方式": creative.hidden_mode ? "节点自然提起" : "普通模式",
-    "灵感触发概率": formatPercent(settings.creative_inspiration_probability),
-    "节点提起概率": formatPercent(settings.creative_share_probability),
-    "单次创作": `${settings.creative_chars_per_session || settings.creative_base_chars_per_hour || 0} 字/次`,
-  };
-  if (privateReading.available) {
-    creativeSettings["夹层阅读"] = privateReading.boredom_read_enabled ? "可触发" : "关闭";
-    creativeSettings["征求推荐"] = privateReading.ask_recommendation_enabled ? "可触发" : "关闭";
+    ? "Bot 自主推进的公开创作作品"
+    : "创作功能未开启";
+  const creativeChips = [];
+  creativeChips.push({
+    label: "创作",
+    value: creative.enabled ? "开启" : "关闭",
+    tone: creative.enabled ? "ok" : "off",
+  });
+  if (creative.enabled) {
+    creativeChips.push({
+      label: "提起方式",
+      value: creative.hidden_mode ? "节点自然提起" : "普通模式",
+      tone: "info",
+    });
+    creativeChips.push({
+      label: "灵感触发",
+      value: formatPercent(settings.creative_inspiration_probability),
+      tone: "metric",
+    });
+    creativeChips.push({
+      label: "节点提起",
+      value: formatPercent(settings.creative_share_probability),
+      tone: "metric",
+    });
+    creativeChips.push({
+      label: "单次创作",
+      value: `${settings.creative_chars_per_session || settings.creative_base_chars_per_hour || 0} 字`,
+      tone: "metric",
+    });
   }
-  renderDl("#creativeSettings", creativeSettings);
+  if (privateReading.available) {
+    creativeChips.push({
+      label: "夹层阅读",
+      value: privateReading.boredom_read_enabled ? "可触发" : "关闭",
+      tone: privateReading.boredom_read_enabled ? "ok" : "off",
+    });
+    creativeChips.push({
+      label: "征求推荐",
+      value: privateReading.ask_recommendation_enabled ? "可触发" : "关闭",
+      tone: privateReading.ask_recommendation_enabled ? "ok" : "off",
+    });
+  }
+  renderCreativeStatusBar("#creativeSettings", creativeChips);
   const publicBooks = bookshelf.public_books || [];
   $("#bookshelfPublicBooks").innerHTML = publicBooks.length
     ? renderBookCategoryShelves(publicBooks, { emptyText: "上层书架为空", reverseBooks: true })
@@ -13358,11 +13449,27 @@ async function runAction(action, successMessage = "", control = null) {
 }
 
 function switchTab(tabName) {
-  state.activeTab = tabName || "dashboard";
+  tabName = tabName || "dashboard";
+  if (tabName === state.activeTab) return;
+  const currentPanel = document.querySelector(".panel.is-active");
+  const nextPanel = document.getElementById(`panel-${tabName}`);
+  state.activeTab = tabName;
   document.querySelectorAll(".tab").forEach((item) => item.classList.toggle("is-active", item.dataset.tab === tabName));
-  document.querySelectorAll(".panel").forEach((item) => item.classList.toggle("is-active", item.id === `panel-${tabName}`));
-  renderActiveTab(state.activeTab);
-  ensureTabData(state.activeTab).catch((error) => showToast(`页面数据加载失败：${error.message}`, "error"));
+  if (currentPanel && nextPanel && currentPanel !== nextPanel) {
+    currentPanel.classList.add("is-leaving");
+    currentPanel.classList.remove("is-active");
+    setTimeout(() => {
+      currentPanel.classList.remove("is-leaving");
+      currentPanel.style.display = "";
+      nextPanel.classList.add("is-active");
+      renderActiveTab(state.activeTab);
+      ensureTabData(state.activeTab).catch((error) => showToast(`页面数据加载失败：${error.message}`, "error"));
+    }, 140);
+  } else {
+    document.querySelectorAll(".panel").forEach((item) => item.classList.toggle("is-active", item.id === `panel-${tabName}`));
+    renderActiveTab(state.activeTab);
+    ensureTabData(state.activeTab).catch((error) => showToast(`页面数据加载失败：${error.message}`, "error"));
+  }
 }
 
 document.querySelectorAll(".tab").forEach((button) => {
@@ -13389,7 +13496,7 @@ document.addEventListener("click", async (event) => {
   if (troubleshootingRefresh) {
     setActionBusy(troubleshootingRefresh, true);
     try {
-      await loadTroubleshooting();
+      await Promise.all([loadTroubleshooting(), loadDiagnostics(true)]);
       showToast("排障信息已刷新");
     } catch (error) {
       showToast(`刷新失败：${error.message}`, "error");
@@ -13959,7 +14066,9 @@ $("#refreshImageCacheBtn")?.addEventListener("click", () => {
   loadImageCache().catch((error) => showToast(`刷新失败：${error.message}`, "error"));
 });
 $("#refreshTroubleshootingBtn")?.addEventListener("click", () => {
-  loadTroubleshooting().then(() => showToast("排障信息已刷新")).catch((error) => showToast(`刷新失败：${error.message}`, "error"));
+  Promise.all([loadTroubleshooting(), loadDiagnostics(true)])
+    .then(() => showToast("排障信息已刷新"))
+    .catch((error) => showToast(`刷新失败：${error.message}`, "error"));
 });
 $("#imageCacheFilter")?.addEventListener("input", (event) => {
   state.imageCacheFilter = event.target.value || "";

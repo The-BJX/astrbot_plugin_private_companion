@@ -10,7 +10,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _single_line
+from .helpers import _missing_optional_model_dependency, _single_line
 
 
 class MemoryCompanionAdapterMixin:
@@ -19,9 +19,29 @@ class MemoryCompanionAdapterMixin:
     _bridge_cache: Any | None = None
     _bridge_cache_ts: float = 0.0
     _BRIDGE_CACHE_TTL: float = 30.0
+    _bridge_dependency_failure_until: float = 0.0
+    _bridge_dependency_failure_module: str = ""
+
+    def _memory_companion_optional_dependency_failed(self, exc: BaseException, *, where: str = "") -> bool:
+        module = _missing_optional_model_dependency(exc)
+        if not module:
+            return False
+        self._bridge_cache = None
+        self._bridge_cache_ts = 0.0
+        self._bridge_dependency_failure_until = time.monotonic() + 300.0
+        self._bridge_dependency_failure_module = module
+        logger.warning(
+            "[PrivateCompanion] 记忆插件可选模型依赖缺失，已临时降级 MemoryCompanion 桥接: module=%s where=%s err=%s",
+            module,
+            _single_line(where, 80) or "-",
+            _single_line(exc, 160),
+        )
+        return True
 
     def _memory_companion_bridge(self) -> Any | None:
         now = time.monotonic()
+        if now < self._bridge_dependency_failure_until:
+            return None
         if self._bridge_cache is not None and (now - self._bridge_cache_ts) < self._BRIDGE_CACHE_TTL:
             return self._bridge_cache
         bridge = self._memory_companion_bridge_uncached()
@@ -54,7 +74,8 @@ class MemoryCompanionAdapterMixin:
             return None
         try:
             return getter()
-        except Exception:
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="get_active_bridge")
             return None
 
     def _memory_companion_coordination_status(self) -> dict[str, Any]:
@@ -67,6 +88,8 @@ class MemoryCompanionAdapterMixin:
         try:
             status = getter()
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="coordination_status"):
+                return {"available": False, "error": f"missing optional dependency: {self._bridge_dependency_failure_module}"}
             logger.debug("[PrivateCompanion] MemoryCompanion 协同状态读取失败: %s", _single_line(exc, 120))
             return {"available": True, "error": _single_line(exc, 120)}
         return status if isinstance(status, dict) else {"available": True}
@@ -81,6 +104,8 @@ class MemoryCompanionAdapterMixin:
         try:
             usage = getter()
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="token_usage"):
+                return {"available": False, "display_name": "我会牢牢记住你", "reason": f"缺少可选依赖 {self._bridge_dependency_failure_module}"}
             logger.debug("[PrivateCompanion] 记忆插件 Token 统计读取失败: %s", _single_line(exc, 120))
             return {"available": False, "display_name": "我会牢牢记住你", "reason": _single_line(exc, 120)}
         if not isinstance(usage, dict):
@@ -130,6 +155,8 @@ class MemoryCompanionAdapterMixin:
         try:
             should_defer = bool(checker(section))
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="should_defer"):
+                return False
             logger.debug("[PrivateCompanion] MemoryCompanion 协同状态读取失败: %s", _single_line(exc, 120))
             return False
         if should_defer:
@@ -330,6 +357,8 @@ class MemoryCompanionAdapterMixin:
                 timeout=4.0,
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="compose_schedule_context"):
+                return ""
             logger.debug("[PrivateCompanion] MemoryCompanion 日程上下文读取失败: %s", _single_line(exc, 120))
             return ""
         text = str(text or "").strip()
@@ -414,6 +443,8 @@ class MemoryCompanionAdapterMixin:
                 timeout=max(0.5, min(6.0, float(timeout_seconds or 4.0))),
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where=f"compose_feature_context:{kind}"):
+                return ""
             logger.debug("[PrivateCompanion] MemoryCompanion 功能上下文读取失败: kind=%s err=%s", _single_line(kind, 60), _single_line(exc, 120))
             return ""
         text = str(text or "").strip()
@@ -474,6 +505,8 @@ class MemoryCompanionAdapterMixin:
                 importance=0.5,
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_daily_plan"):
+                return
             logger.debug("[PrivateCompanion] MemoryCompanion 日程写入失败: %s", _single_line(exc, 120))
 
     async def _memory_companion_record_detail_enhancement(
@@ -550,6 +583,8 @@ class MemoryCompanionAdapterMixin:
                 importance=0.42,
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_detail_enhancement"):
+                return
             logger.debug("[PrivateCompanion] MemoryCompanion 细化写入失败: %s", _single_line(exc, 120))
 
     def _memory_companion_build_group_context(
@@ -736,6 +771,8 @@ class MemoryCompanionAdapterMixin:
                 importance=0.58,
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_proactive_message"):
+                return
             logger.debug("[PrivateCompanion] MemoryCompanion 主动消息桥接写入失败: %s", _single_line(exc, 120))
 
     async def _memory_companion_record_image_observation(
@@ -801,6 +838,8 @@ class MemoryCompanionAdapterMixin:
                 source_plugin="private_companion",
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_image_observation"):
+                return
             logger.debug("[PrivateCompanion] MemoryCompanion 图片观察写入失败: %s", _single_line(exc, 120))
 
     async def _memory_companion_record_user_habit(
@@ -897,6 +936,8 @@ class MemoryCompanionAdapterMixin:
                 source_plugin="private_companion",
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_user_habit"):
+                return
             logger.debug("[PrivateCompanion] MemoryCompanion 用户习惯写入失败: %s", _single_line(exc, 120))
 
     async def _memory_companion_record_daily_outfit(self, item: dict[str, Any]) -> None:
@@ -945,6 +986,8 @@ class MemoryCompanionAdapterMixin:
                 occurred_at=self._memory_companion_now_iso(),
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_daily_outfit"):
+                return
             logger.debug("[PrivateCompanion] MemoryCompanion 每日穿搭写入失败: %s", _single_line(exc, 120))
 
     async def _memory_companion_record_creative_progress(
@@ -1022,6 +1065,8 @@ class MemoryCompanionAdapterMixin:
                 occurred_at=self._memory_companion_now_iso(),
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_creative_progress"):
+                return
             logger.debug("[PrivateCompanion] MemoryCompanion 创作进展写入失败: %s", _single_line(exc, 120))
 
     def _memory_companion_now_iso(self) -> str:
@@ -1051,6 +1096,8 @@ class MemoryCompanionAdapterMixin:
         try:
             events = getter(session_id=session_id, limit=3)
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="get_emotional_events"):
+                return
             logger.debug("[PrivateCompanion] 情绪漂移拉取失败: %s", _single_line(exc, 120))
             return
         # Cross-window emotional residue: check if there are recent emotional events
@@ -1071,8 +1118,8 @@ class MemoryCompanionAdapterMixin:
                     if warm_count > 0:
                         cross_window_delta += min(1.5, warm_count * 0.5)
                         cross_window_hints.append("微暖")
-            except Exception:
-                pass
+            except Exception as exc:
+                self._memory_companion_optional_dependency_failed(exc, where="get_recent_emotional_state")
         if not events and not cross_window_hints:
             return
         data = getattr(self, "data", None)
@@ -1137,6 +1184,8 @@ class MemoryCompanionAdapterMixin:
         try:
             return await searcher(session_id=session_id, limit=limit)
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="search_open_loops"):
+                return []
             logger.debug("[PrivateCompanion] open-loop 搜索失败: %s", _single_line(exc, 120))
             return []
 
@@ -1181,6 +1230,8 @@ class MemoryCompanionAdapterMixin:
                 occurred_at=self._memory_companion_now_iso(),
             )
         except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_dream_fragment"):
+                return
             logger.debug("[PrivateCompanion] 梦境碎片写入失败: %s", _single_line(exc, 120))
 
     def _memory_companion_get_relationship_phase(self, *, session_id: str = "") -> dict[str, Any]:
@@ -1193,5 +1244,6 @@ class MemoryCompanionAdapterMixin:
             return {"phase": "unknown", "momentum": 0.0}
         try:
             return getter(session_id=session_id, scope="private")
-        except Exception:
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="get_relationship_phase")
             return {"phase": "unknown", "momentum": 0.0}

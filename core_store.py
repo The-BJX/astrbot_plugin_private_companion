@@ -690,6 +690,7 @@ class CoreStoreMixin:
     def _merge_user_record_values(self, target: dict[str, Any], source: dict[str, Any], alias_id: str) -> None:
         additive_keys = {
             "inbound_count",
+            "private_inbound_count",
             "reply_count",
             "proactive_sent_count",
             "relationship_score",
@@ -909,6 +910,24 @@ class CoreStoreMixin:
             _safe_float(user.get("last_user_message_at"), 0),
             _safe_float(user.get("last_reply_at"), 0),
         )
+
+    def _latest_private_user_activity_ts(self, user: dict[str, Any] | None) -> float:
+        if not isinstance(user, dict):
+            return 0.0
+        private_seen = _safe_float(user.get("last_private_seen"), 0)
+        return max(
+            private_seen,
+            _safe_float(user.get("last_private_activity_at"), private_seen),
+            _safe_float(user.get("last_private_reply_at"), 0),
+        )
+
+    def _note_private_inbound_activity(self, user: dict[str, Any], ts: float, *, text: str = "") -> None:
+        if not isinstance(user, dict):
+            return
+        user["last_private_seen"] = ts
+        user["last_private_activity_at"] = ts
+        if text:
+            user["private_inbound_count"] = _safe_int(user.get("private_inbound_count"), 0) + 1
 
     def _is_target_private_user(self, user_id: str, user: dict[str, Any] | None = None) -> bool:
         user_id = self._canonical_private_user_id(str(user_id or "").strip())
