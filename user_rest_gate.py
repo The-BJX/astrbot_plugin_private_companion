@@ -36,6 +36,29 @@ class UserRestGateMixin:
             or any(mark in cleaned for mark in ("“", "”", '"', "'"))
         )
 
+    @staticmethod
+    def _user_rest_text_is_scoped_reply_instruction(cleaned: str) -> bool:
+        """A reply-style instruction is not a request to silence the whole chat."""
+        if not cleaned:
+            return False
+        compact = re.sub(r"\s+", "", cleaned)
+        if not compact:
+            return False
+        scoped_no_content = re.search(
+            r"(?:不用|不必|无需|别|不要|先别|暂时别)(?:再)?(?:回(?:复)?|评价|点评|分析|解读|描述|说)"
+            r"(?:我|我的|这(?:张|个|些)?|那(?:张|个|些)?)?"
+            r"(?:图|图片|照片|截图|表情包|画面|内容|图片内容|图里内容|画面内容|文字内容)",
+            compact,
+        )
+        if not scoped_no_content:
+            return False
+        alternative_reply = re.search(
+            r"(?:夸|夸夸|夸一下|哄|安慰|鼓励|表扬|说好看|说可爱|就行|就好|即可|只要|只需|只用|改成|换成|而是|但是|但)",
+            compact,
+        )
+        future_image = re.search(r"(?:待会|等会|一会|马上|下一张|下张|发).{0,12}(?:图|图片|照片)", compact)
+        return bool(alternative_reply or future_image)
+
     def _user_rest_signal_should_block_current_reply(self, text: str) -> bool:
         """Only explicit no-reply / do-not-disturb intent should silence this passive turn."""
         cleaned = _single_line(text, 260).lower()
@@ -43,8 +66,10 @@ class UserRestGateMixin:
             return False
         if self._user_rest_text_is_meta_discussion(cleaned) or self._user_rest_text_is_quoted_or_report(cleaned):
             return False
+        if self._user_rest_text_is_scoped_reply_instruction(cleaned):
+            return False
         compact = re.sub(r"\s+", "", cleaned)
-        no_reply_boundary = r"(?:了|啦|吧|我|这(?:个|条|句|段)(?:消息|话|话题|内容|问题)?|这(?:条)?消息|本条消息|消息|哈|噢|哦|$|[，。！？,.!?])"
+        no_reply_boundary = r"(?:了|啦|吧|我(?!的?(?:图|图片|照片|截图|表情包|画面|内容|文字))|这(?:个|条|句|段)(?:消息|话|话题|内容|问题)?|这(?:条)?消息|本条消息|消息|哈|噢|哦|$|[，。！？,.!?])"
         no_reply = re.search(
             r"(?:不用|不必|无需|别|不要|先别|暂时别|今晚别|今天别)(?:再)?(?:回(?:复)?|理我|搭理我|接话|说话|出声)"
             + no_reply_boundary,
@@ -68,6 +93,12 @@ class UserRestGateMixin:
         check_now = _now_ts() if now is None else now
         rest_until = _safe_float(user.get("user_rest_until"), 0)
         if rest_until <= 0:
+            return 0.0
+        if self._user_rest_text_is_scoped_reply_instruction(_single_line(user.get("user_rest_reason"), 260).lower()):
+            user["user_rest_until"] = 0
+            user["user_rest_reason"] = ""
+            user["user_rest_set_at"] = 0
+            logger.info("[PrivateCompanion] 已清理误判的用户休息静默: user=%s", user.get("user_id") or user.get("id") or "")
             return 0.0
         if rest_until <= check_now:
             user["user_rest_until"] = 0
@@ -105,7 +136,9 @@ class UserRestGateMixin:
             return -1.0
         if quoted_or_report:
             return 0.0
-        no_reply_boundary = r"(?:了|啦|吧|我|这(?:个|条|句|段)(?:消息|话|话题|内容|问题)?|这(?:条)?消息|本条消息|消息|哈|噢|哦|$|[，。！？,.!?])"
+        if self._user_rest_text_is_scoped_reply_instruction(cleaned):
+            return 0.0
+        no_reply_boundary = r"(?:了|啦|吧|我(?!的?(?:图|图片|照片|截图|表情包|画面|内容|文字))|这(?:个|条|句|段)(?:消息|话|话题|内容|问题)?|这(?:条)?消息|本条消息|消息|哈|噢|哦|$|[，。！？,.!?])"
         hard_quiet = re.search(
             r"(?:别|不要|先别|暂时别|今晚别|今天别).{0,10}(?:打扰|吵|主动|发消息|找我)"
             r"|(?:不用|不必|无需|别|不要|先别|暂时别|今晚别|今天别)(?:再)?(?:回(?:复)?|理我|搭理我|接话|说话|出声)"

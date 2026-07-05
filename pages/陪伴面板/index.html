@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260704-theme-fouc-fix" />
+  <link rel="stylesheet" href="./app.css?v=20260706-v570-guide-entry" />
   <script>
     (function () {
       try {
@@ -96,6 +96,7 @@
           <span class="seal-mark">↻</span>
           <small>REFRESH</small>
         </button>
+        <button id="setupGuideStartBtn" class="setup-guide-entry" type="button" data-setup-guide-open>配置引导</button>
       </div>
     </section>
 
@@ -1568,6 +1569,8 @@ QQ空间 = 公开札记
     </section>
   </main>
 
+  <div id="setupGuideOverlayRoot"></div>
+
   <div id="dailyOutfitPreview" class="daily-outfit-preview" aria-hidden="true">
     <div class="daily-outfit-preview__dialog" role="dialog" aria-modal="true" aria-label="今日穿搭预览">
       <button id="dailyOutfitPreviewClose" type="button" class="daily-outfit-preview__close" data-preview-dismiss="1" aria-label="关闭预览">×</button>
@@ -1579,6 +1582,6 @@ QQ空间 = 公开札记
   <script src="./js/features/daily-outfit.js?v=20260702-outfit-preview"></script>
   <script src="./js/panels/provider-tree.js?v=20260702-provider-tree"></script>
   <script src="./js/panels/qzone-panel.js?v=20260704-qzone-stable-api"></script>
-  <script src="./app.js?v=20260704-page-bridge-route-fallback"></script>
+  <script src="./app.js?v=20260706-v570-proactive-counts"></script>
 </body>
 </html>

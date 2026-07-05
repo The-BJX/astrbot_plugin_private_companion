@@ -2322,12 +2322,6 @@
     "default": "prompt",
     "invisible": true
   },
-  "framework_session_lock_mode": {
-    "description": "Legacy flat config: 主链会话锁兼容模式",
-    "type": "string",
-    "default": "auto",
-    "invisible": true
-  },
   "enable_cycle_state": {
     "description": "Legacy flat config: 启用生理期模拟",
     "type": "bool",
@@ -6974,7 +6968,7 @@
   "humanized_state_config": {
     "description": "拟人状态与休息",
     "type": "object",
-    "hint": "控制生活状态、被动状态注入、休息回复闸门和会话锁兼容。",
+    "hint": "控制生活状态、被动状态注入和休息回复闸门。",
     "items": {
       "enable_humanized_states": {
         "description": "启用拟人化身体/梦境状态",
@@ -7036,22 +7030,6 @@
         "condition": {
           "inject_passive_states": true
         }
-      },
-      "framework_session_lock_mode": {
-        "description": "主链会话锁兼容模式",
-        "type": "string",
-        "hint": "用于兼容旧版 AstrBot 会话库并发锁问题。新版本通常不需要，开启会让同一会话主链请求排队，可能增加回复延迟。auto 只在识别到受影响的旧版本时启用；always 仅建议仍遇到 database is locked 的旧版用户使用。",
-        "options": [
-          "auto",
-          "off",
-          "always"
-        ],
-        "labels": [
-          "自动（仅旧版兼容）",
-          "关闭（新版本推荐）",
-          "始终启用（旧版排障）"
-        ],
-        "default": "auto"
       },
       "enable_cycle_state": {
         "description": "启用生理期模拟",

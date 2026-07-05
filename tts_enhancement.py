@@ -553,9 +553,14 @@ class TtsEnhancementMixin:
         content = str(text or "").strip()
         if not content:
             return False
-        content = re.sub(r"[（(][^（()]*[）)]", "", content)
-        simplified = re.sub(r"\[[^\[\]\n]{1,24}\]", "", content)
-        simplified = re.sub(r"[\s\.,，。!！?？~～…:：;；、\-—_()（）\[\]{}<>《》'\"“”‘’`|｜/\\]+", "", simplified)
+        simplified = EMOTION_TAG_PATTERN.sub("", content)
+        simplified = re.sub(r"[（(][^（()]*[）)]", "", simplified)
+        simplified = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", simplified, flags=re.IGNORECASE)
+        simplified = re.sub(
+            r"[\s\.,，。!！?？~～…:：;；、\-—_()（）\[\]{}<>《》'\"“”‘’`|｜/\\]+",
+            "",
+            simplified,
+        )
         return bool(simplified)
 
     def _sanitize_tts_spoken_text(self, text: str, *, provider_kind: str) -> str:
@@ -594,6 +599,8 @@ class TtsEnhancementMixin:
         source = re.sub(r"^\s*[,，、;；]\s*", "", source)
         source = re.sub(r"\s+", " ", source).strip()
 
+        for token, original in protected.items():
+            source = source.replace(token, original)
         source = source.strip()
         if not self._has_meaningful_tts_content(source):
             return ""

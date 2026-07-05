@@ -15,9 +15,10 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from astrbot.api import logger
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from quart import request, send_file
 
 from .constants import _REASON_TEXT
@@ -156,6 +157,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/food_menu/update", self.update_food_menu, ["POST"], "Private Companion Page update food menu"),
             ("/food_menu/bulk_update", self.bulk_update_food_menu, ["POST"], "Private Companion Page bulk update food menu"),
             ("/external_ability/update", self.update_external_ability, ["POST"], "Private Companion Page update external proactive ability"),
+            ("/setup/apply", self.apply_setup_guide, ["POST"], "Private Companion Page apply first setup guide"),
+            ("/setup/daily/run", self.run_setup_daily_generation, ["POST"], "Private Companion Page setup guide daily generation"),
+            ("/roleplay/personas", self.list_roleplay_personas, ["GET"], "Private Companion Page roleplay personas"),
             ("/roleplay/draft_from_persona", self.generate_roleplay_draft_from_persona, ["POST"], "Private Companion Page roleplay draft from persona"),
             ("/preset/apply", self.apply_preset, ["POST"], "Private Companion Page apply preset"),
             ("/providers/available", self.list_available_providers, ["GET"], "Private Companion Page available providers"),
@@ -1721,7 +1725,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         add_step("目标会话", "ok", f"用户 {target_user.get('nickname') or target_user_id} / {umo}")
 
         now = time.time()
-        scheduled_ts = now + 60
+        delay_seconds = self._int(payload.get("delay_seconds"), 60, 5, 300)
+        scheduled_ts = now + delay_seconds
         test_id = secrets.token_hex(6)
         plan_keys = (
             "next_proactive_at",
@@ -1810,7 +1815,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "user_id": target_user_id,
                     "umo": umo,
                     "steps": existing_steps,
-                    "detail": "已有一个排障临时主动任务在等待执行，请约 1 分钟后刷新查看结果",
+                    "detail": "已有一个排障临时主动任务在等待执行，请稍后刷新查看结果",
                     "action": "message",
                     "reason": self._single_line(current.get("planned_proactive_reason"), 40) or "check_in",
                     "error": "",
@@ -1824,7 +1829,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             current["troubleshooting_proactive_started_at"] = now
             current["troubleshooting_proactive_steps"] = [
                 {"name": "目标会话", "status": "ok", "detail": f"用户 {current.get('nickname') or target_user_id} / {umo}"},
-                {"name": "临时任务", "status": "ok", "detail": "已预约 60 秒后由主动循环执行"},
+                {"name": "临时任务", "status": "ok", "detail": f"已预约 {delay_seconds} 秒后由主动循环执行"},
             ]
             current["user_id"] = str(current.get("user_id") or target_user_id)
             current["umo"] = umo
@@ -1860,7 +1865,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "user_id": target_user_id,
                 "umo": umo,
                 "steps": list(current["troubleshooting_proactive_steps"]),
-                "detail": "已预约 1 分钟后的排障临时主动任务；到点后由主动循环走完整生成、复核、发送和归档流程",
+                "detail": f"已预约 {delay_seconds} 秒后的排障临时主动任务；到点后由主动循环走完整生成、复核、发送和归档流程",
                 "action": "message",
                 "reason": "check_in",
                 "error": "",
@@ -1871,7 +1876,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 self.plugin.data["troubleshooting_test_results"] = raw
             raw["proactive_message"] = self._sanitize_troubleshooting_test_result(result)
             self.plugin._save_data_sync()
-        add_step("临时任务", "ok", "已预约 60 秒后由主动循环执行")
+        add_step("临时任务", "ok", f"已预约 {delay_seconds} 秒后由主动循环执行")
         return result
 
     def _preferred_tts_test_umo(self, users: dict[str, Any]) -> str:
@@ -4865,45 +4870,538 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             logger.error(f"[PrivateCompanionPage] 更新外部主动能力失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def list_roleplay_personas(self) -> dict[str, Any]:
+        try:
+            items = await self._roleplay_persona_items()
+            current = self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120)
+            default_id = ""
+            for item in items:
+                if item.get("is_default"):
+                    default_id = str(item.get("id") or "")
+                    break
+            return self._ok({"items": items, "current": current or default_id, "default": default_id})
+        except Exception as exc:
+            logger.warning(f"[PrivateCompanionPage] 获取人格列表失败: {exc}", exc_info=True)
+            return self._ok({"items": self._fallback_roleplay_persona_items(), "current": "", "default": ""})
+
+    async def _roleplay_persona_items(self) -> list[dict[str, Any]]:
+        items: dict[str, dict[str, Any]] = {
+            "": {
+                "id": "",
+                "label": "继承 AstrBot 当前配置人格",
+                "source": "当前会话",
+                "is_default": False,
+            }
+        }
+
+        def add_item(persona_id: Any, *, label: str = "", source: str = "", is_default: bool = False) -> None:
+            pid = self._single_line(persona_id, 120)
+            if not pid or pid == "*":
+                return
+            item = items.get(pid) or {"id": pid, "label": label or pid, "source": source, "is_default": False}
+            if label and item.get("label") == item.get("id"):
+                item["label"] = label
+            if source and not item.get("source"):
+                item["source"] = source
+            item["is_default"] = bool(item.get("is_default") or is_default)
+            items[pid] = item
+
+        context = getattr(self.plugin, "context", None)
+        manager = getattr(context, "persona_manager", None)
+        for method_name in ("get_all_personas", "get_personas", "list_personas", "get_persona_list", "get_all", "list"):
+            method = getattr(manager, method_name, None) if manager is not None else None
+            if not callable(method):
+                continue
+            try:
+                raw = method()
+                if hasattr(raw, "__await__"):
+                    raw = await raw
+                for persona in self._iter_persona_entries(raw):
+                    pid = persona.get("id") or persona.get("name") or persona.get("persona_id")
+                    label = persona.get("name") or persona.get("label") or persona.get("id") or pid
+                    add_item(pid, label=str(label or ""), source="运行态人格")
+            except Exception:
+                continue
+        for attr_name in ("personas", "persona_pool", "_personas", "_persona_pool"):
+            raw = getattr(manager, attr_name, None) if manager is not None else None
+            for persona in self._iter_persona_entries(raw):
+                pid = persona.get("id") or persona.get("name") or persona.get("persona_id")
+                label = persona.get("name") or persona.get("label") or persona.get("id") or pid
+                add_item(pid, label=str(label or ""), source="运行态人格")
+
+        configured = self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120)
+        if configured:
+            add_item(configured, label=f"{configured}（插件当前指定）", source="插件配置")
+
+        for path in self._astrbot_config_candidate_paths():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+            except Exception:
+                continue
+            settings = data.get("provider_settings") if isinstance(data, dict) else {}
+            if not isinstance(settings, dict):
+                continue
+            default_personality = self._single_line(settings.get("default_personality"), 120)
+            if default_personality:
+                add_item(default_personality, label=f"{default_personality}（默认）", source=path.name, is_default=True)
+            pool = settings.get("persona_pool")
+            if isinstance(pool, list):
+                for persona_id in pool:
+                    add_item(persona_id, source=path.name)
+            for persona_key in ("persona", "personas", "persona_settings", "personality", "personalities"):
+                for persona in self._iter_persona_entries(data.get(persona_key)):
+                    pid = persona.get("id") or persona.get("name") or persona.get("persona_id")
+                    label = persona.get("name") or persona.get("label") or persona.get("id") or pid
+                    add_item(pid, label=str(label or ""), source=path.name)
+
+        return list(items.values())
+
+    def _fallback_roleplay_persona_items(self) -> list[dict[str, Any]]:
+        configured = self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120)
+        if configured:
+            return [{"id": configured, "label": f"{configured}（插件当前指定）", "source": "插件配置", "is_default": True}]
+        return [{"id": "", "label": "继承 AstrBot 当前配置人格", "source": "当前会话", "is_default": True}]
+
+    def _iter_persona_entries(self, raw: Any) -> list[dict[str, Any]]:
+        if isinstance(raw, dict):
+            result: list[dict[str, Any]] = []
+            for key, value in raw.items():
+                if isinstance(value, dict):
+                    item = dict(value)
+                    item.setdefault("id", key)
+                    item.setdefault("name", item.get("label") or key)
+                    result.append(item)
+                elif isinstance(value, str):
+                    result.append({"id": key, "name": key, "prompt": value})
+                elif isinstance(value, list):
+                    result.extend(self._iter_persona_entries(value))
+            return result
+        elif isinstance(raw, list):
+            values = raw
+        else:
+            return []
+        result: list[dict[str, Any]] = []
+        for item in values:
+            if isinstance(item, dict):
+                result.append(item)
+            elif isinstance(item, str):
+                result.append({"id": item, "name": item})
+        return result
+
+    def _astrbot_config_candidate_paths(self) -> list[Path]:
+        root = Path(get_astrbot_data_path())
+        home_root = Path.home() / ".astrbot"
+        candidate_roots = [
+            root,
+            home_root / "data",
+            home_root / "backend" / "data",
+            home_root / "backend" / "app" / "data",
+        ]
+        paths: list[Path] = []
+        seen: set[str] = set()
+
+        def add_path(path: Path) -> None:
+            try:
+                key = str(path.resolve()).lower()
+            except Exception:
+                key = str(path).lower()
+            if key in seen:
+                return
+            seen.add(key)
+            paths.append(path)
+
+        for candidate_root in candidate_roots:
+            add_path(candidate_root / "cmd_config.json")
+            config_dir = candidate_root / "config"
+            if config_dir.exists():
+                for path in sorted(config_dir.glob("abconf_*.json")):
+                    add_path(path)
+        return paths
+
+    async def _roleplay_persona_prompt_for_id(self, persona_id: str, umo: str) -> tuple[str, str]:
+        pid = self._single_line(persona_id, 120)
+        if pid:
+            context = getattr(self.plugin, "context", None)
+            manager = getattr(context, "persona_manager", None)
+            for getter_name in ("get_persona", "get", "get_by_id", "get_by_name", "get_personality"):
+                getter = getattr(manager, getter_name, None) if manager is not None else None
+                if not callable(getter):
+                    continue
+                try:
+                    raw = getter(pid)
+                    if hasattr(raw, "__await__"):
+                        raw = await raw
+                    prompt = self._persona_prompt_text(raw)
+                    if prompt:
+                        return prompt, pid
+                except Exception:
+                    continue
+        refresher = getattr(self.plugin, "_refresh_default_persona_prompt", None)
+        if callable(refresher):
+            prompt = await refresher(umo)
+        else:
+            getter = getattr(self.plugin, "_get_default_persona_prompt", None)
+            prompt = getter() if callable(getter) else ""
+        return str(prompt or "").strip(), pid
+
+    def _persona_prompt_text(self, raw: Any) -> str:
+        if isinstance(raw, str):
+            return raw.strip()
+        if isinstance(raw, dict):
+            for key in ("prompt", "system_prompt", "content", "persona", "personality", "description", "text"):
+                text = str(raw.get(key) or "").strip()
+                if text:
+                    return text
+        return ""
+
     async def generate_roleplay_draft_from_persona(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         umo = self._single_line(payload.get("umo"), 220)
+        persona_id = self._single_line(payload.get("persona_id"), 120)
+        extra_prompt = self._multi_line(payload.get("extra_prompt"), 800)
         scopes = self._normalize_roleplay_draft_scopes(payload.get("scopes"))
         try:
-            refresher = getattr(self.plugin, "_refresh_default_persona_prompt", None)
-            if callable(refresher):
-                persona_prompt = await refresher(umo)
-            else:
-                getter = getattr(self.plugin, "_get_default_persona_prompt", None)
-                persona_prompt = getter() if callable(getter) else ""
+            persona_prompt, effective_persona_id = await self._roleplay_persona_prompt_for_id(persona_id, umo)
             persona_prompt = str(persona_prompt or "").strip()
             if not persona_prompt or persona_prompt.startswith("未读取到 AstrBot 默认人格"):
                 return self._error("还没有读取到可用的主回复人格文本，请先让 Bot 触发一次对话或检查人格配置")
             caller = getattr(self.plugin, "_llm_call", None)
             if not callable(caller):
                 return self._error("当前插件运行态无法调用主模型")
-            provider_id = str(getattr(self.plugin, "llm_provider_id", "") or "").strip()
+            task_provider = getattr(self.plugin, "_task_provider", None)
+            if callable(task_provider):
+                provider_id = task_provider(
+                    getattr(self.plugin, "fast_response_provider_id", ""),
+                    getattr(self.plugin, "llm_provider_id", ""),
+                )
+            else:
+                provider_id = str(
+                    getattr(self.plugin, "fast_response_provider_id", "")
+                    or getattr(self.plugin, "llm_provider_id", "")
+                    or ""
+                ).strip()
             raw = await caller(
-                self._roleplay_draft_from_persona_prompt(persona_prompt, scopes),
+                self._roleplay_draft_from_persona_prompt(persona_prompt, scopes, extra_prompt=extra_prompt),
                 max_tokens=1400,
                 provider_id=provider_id,
                 task="roleplay_draft_from_persona",
             )
-            draft = self._normalize_roleplay_draft_result(self._loads_json_object(raw), scopes)
+            raw_preview_source = raw
+            parse_note = ""
+            repair_provider_id = ""
+            try:
+                parsed = self._loads_json_object(raw)
+            except Exception as parse_exc:
+                repair_provider_id = self._roleplay_draft_repair_provider_id(provider_id)
+                if repair_provider_id:
+                    try:
+                        repair_raw = await caller(
+                            self._roleplay_draft_json_repair_prompt(raw, scopes),
+                            max_tokens=1400,
+                            provider_id=repair_provider_id,
+                            task="roleplay_draft_json_repair",
+                        )
+                        parsed = self._loads_json_object(repair_raw)
+                        raw_preview_source = repair_raw
+                        parse_note = f"初次返回无法解析，已使用 {repair_provider_id} 修复为 JSON。"
+                    except Exception as repair_exc:
+                        logger.warning(
+                            "[PrivateCompanionPage] 人格草稿 JSON 修复失败: %s；初次错误: %s",
+                            self._single_line(repair_exc, 160),
+                            self._single_line(parse_exc, 160),
+                            exc_info=True,
+                        )
+                        parsed = self._fallback_roleplay_draft_result(persona_prompt, scopes, parse_exc)
+                        parse_note = "模型未返回可解析 JSON，已生成可编辑的本地兜底草稿。"
+                else:
+                    parsed = self._fallback_roleplay_draft_result(persona_prompt, scopes, parse_exc)
+                    parse_note = "模型未返回可解析 JSON，已生成可编辑的本地兜底草稿。"
+            draft = self._normalize_roleplay_draft_result(parsed, scopes)
+            if not self._roleplay_draft_has_content(draft):
+                fallback_note = "模型返回了 JSON，但没有整理出有效内容，已生成可编辑的本地兜底草稿。"
+                parsed = self._fallback_roleplay_draft_result(persona_prompt, scopes, "模型返回空草稿")
+                draft = self._normalize_roleplay_draft_result(parsed, scopes)
+                parse_note = f"{parse_note} {fallback_note}".strip()
             return self._ok(
                 {
                     "draft": draft,
                     "scopes": scopes,
                     "provider_id": provider_id,
-                    "persona_id": self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120),
+                    "provider_role": self._roleplay_provider_role(provider_id),
+                    "repair_provider_id": repair_provider_id,
+                    "repair_provider_role": self._roleplay_provider_role(repair_provider_id),
+                    "parse_note": parse_note,
+                    "persona_id": effective_persona_id or self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120),
                     "source_chars": len(persona_prompt),
                     "source_preview": self._single_line(persona_prompt, 220),
-                    "raw_preview": self._single_line(raw, 220),
+                    "raw_preview": self._single_line(raw_preview_source, 220),
                 }
             )
         except Exception as exc:
             logger.warning(f"[PrivateCompanionPage] 根据主回复人格生成设定草稿失败: {exc}", exc_info=True)
             return self._error(f"生成草稿失败: {self._single_line(exc, 160)}")
+
+    async def apply_setup_guide(self) -> dict[str, Any]:
+        """Persist the first setup guide draft into plugin config and data."""
+        payload = await request.get_json(silent=True) or {}
+        draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else payload
+        if not isinstance(draft, dict):
+            return self._error("缺少首次配置草稿")
+
+        def bool_value(key: str, default: bool = False) -> bool:
+            if key not in draft:
+                return default
+            return self._normalize_bool_value(draft.get(key))
+
+        def text_value(key: str, limit: int = 2000) -> str:
+            return str(draft.get(key) or "").strip()[:limit]
+
+        def number_value(key: str, default: Any = 0) -> Any:
+            value = draft.get(key, default)
+            return default if value in (None, "") else value
+
+        raw_target_ids = draft.get("targetUserIds", draft.get("target_user_ids", []))
+        if isinstance(raw_target_ids, str):
+            target_ids = self._normalize_id_list(re.split(r"[\s,，;；、]+", raw_target_ids))
+        else:
+            target_ids = self._normalize_id_list(raw_target_ids)
+        if not target_ids:
+            return self._error("请先填写目标用户 QQ 号")
+
+        proactive_private = bool_value("proactivePrivate", True)
+        proactive_group = bool_value("proactiveGroup", False)
+        group_interjection = self._single_line(draft.get("groupInterjection"), 40) or "observe"
+        group_wake_enhancement = proactive_group and bool_value("groupWakeEnhancement", False)
+        worldbook_enabled = bool_value("worldbookEnabled", True)
+
+        settings: dict[str, Any] = {
+            "provider_config_mode": "quick",
+            "target_user_ids": target_ids,
+            "target_platform": text_value("targetPlatform", 80) or "aiocqhttp",
+            "quiet_hours": text_value("quietHours", 80) or "23:00-08:30",
+            "require_private_opt_in": bool_value("requirePrivateOptIn", True),
+            "proactive_intensity_preset": self._single_line(draft.get("privateIntensity"), 40) or "off",
+            "max_daily_messages": number_value("privateMaxDailyMessages", 0) if proactive_private else 0,
+            "idle_minutes": number_value("privateIdleMinutes", 0),
+            "min_interval_minutes": number_value("privateMinIntervalMinutes", 0),
+            "proactive_persona_judge_send_threshold": number_value("privatePersonaJudgeThreshold", 62),
+            "proactive_review_strength": self._single_line(draft.get("privateReviewStrength"), 40) or "lenient",
+            "proactive_unanswered_slowdown_start": number_value("privateUnansweredSlowdownStart", 2),
+            "proactive_unanswered_max_interval_multiplier": number_value("privateUnansweredMaxIntervalMultiplier", 1.65),
+            "friend_unanswered_max_cooldown_hours": number_value("privateFriendUnansweredMaxCooldownHours", 30),
+            "group_wakeup_direct_words": text_value("groupWakeDirectWords", 1200),
+            "group_wakeup_context_words": text_value("groupWakeContextWords", 1200),
+            "group_wakeup_interest_keywords": text_value("groupWakeInterestKeywords", 1200),
+            "group_wakeup_interest_probability": number_value("groupWakeInterestProbability", 18),
+            "group_wakeup_question_threshold": number_value("groupWakeQuestionThreshold", 65),
+            "group_wakeup_cold_group_threshold": number_value("groupWakeColdGroupThreshold", 65),
+            "group_wakeup_cold_group_idle_minutes": number_value("groupWakeColdGroupIdleMinutes", 45),
+            "group_wakeup_cooldown_seconds": number_value("groupWakeCooldownSeconds", 90),
+            "group_wakeup_generated_keyword_limit": number_value("groupWakeGeneratedKeywordLimit", 8),
+            "group_wakeup_topic_interest_max_boost": number_value("groupWakeTopicInterestMaxBoost", 50),
+            "group_wakeup_debounce_pending_penalty": number_value("groupWakeDebouncePendingPenalty", 30),
+            "group_wakeup_fatigue_limit": number_value("groupWakeFatigueLimit", 5),
+            "group_wakeup_fatigue_decay_minutes": number_value("groupWakeFatigueDecayMinutes", 20),
+            "group_wakeup_short_text_wait_seconds": number_value("groupWakeShortTextWaitSeconds", 8),
+            "group_interject_min_interval_minutes": number_value("groupInterjectMinIntervalMinutes", 180),
+            "group_interject_max_daily": number_value("groupInterjectMaxDaily", 2),
+            "worldbook_self_registration": bool_value("worldbookSelfRegistration", True),
+        }
+        if text_value("worldKnowledgePersona", 5000):
+            settings["schedule_persona_prompt"] = text_value("worldKnowledgePersona", 5000)
+        if text_value("worldKnowledgeWorld", 5000):
+            settings["schedule_worldview_prompt"] = text_value("worldKnowledgeWorld", 5000)
+        if text_value("worldKnowledgeUser", 5000):
+            settings["roleplay_user_profile_prompt"] = text_value("worldKnowledgeUser", 5000)
+        world_knowledge_extra = text_value("worldKnowledgeExtra", 5000)
+        image_hint_match = re.search(r"自我识别提示[:：]\s*(.+?)(?:\n\s*\n|$)", world_knowledge_extra, flags=re.S)
+        if image_hint_match:
+            settings["private_image_self_recognition_hint"] = self._multi_line(image_hint_match.group(1), 1200)
+        translation_match = re.search(r"翻译词[:：]\s*(.+?)(?:\n\s*\n|$)", world_knowledge_extra, flags=re.S)
+        if translation_match:
+            settings["worldview_adaptation_mode"] = "custom"
+            settings["worldview_adaptation_prompt"] = self._multi_line(translation_match.group(1), 2000)
+
+        features: dict[str, bool] = {
+            "enable_llm_proactive_message": proactive_private,
+            "enable_llm_proactive_persona_judge": proactive_private,
+            "enable_response_self_review": proactive_private,
+            "enable_group_companion": proactive_group,
+            "enable_group_context_injection": proactive_group,
+            "enable_group_injection_guard": proactive_group,
+            "enable_group_wakeup_enhancement": group_wake_enhancement,
+            "enable_group_wakeup_question": group_wake_enhancement and bool_value("groupWakeQuestion", True),
+            "enable_group_wakeup_cold_group": group_wake_enhancement and bool_value("groupWakeColdGroup", False),
+            "enable_group_interjection": proactive_group and group_interjection == "low",
+            "enable_group_interjection_feedback": proactive_group and group_interjection == "low" and bool_value("groupInterjectionFeedback", True),
+            "enable_worldbook_member_recognition": worldbook_enabled,
+        }
+
+        providers = {
+            key: self._single_line(draft.get(key), 160)
+            for key in (
+                "FAST_RESPONSE_PROVIDER_ID",
+                "COMPLEX_REASONING_PROVIDER_ID",
+                "CREATIVE_MODEL_PROVIDER_ID",
+                "PLUGIN_VISION_PROVIDER_ID",
+            )
+            if self._single_line(draft.get(key), 160)
+        }
+        worldbook_user_id = self._normalize_worldbook_member_id(text_value("worldbookUserId", 80))
+        worldbook_name = self._single_line(draft.get("worldbookNickname"), 80)
+        worldbook_should_save = bool(worldbook_enabled and worldbook_user_id and (worldbook_name or text_value("worldbookContent", 2000)))
+        if worldbook_should_save and not self._worldbook_member_id_valid(worldbook_user_id):
+            return self._error("关系网词条必须使用有效 QQ 号或外部身份键")
+        worldbook_aliases = [
+            self._single_line(item, 40)
+            for item in re.split(r"[\n,，、;；]+", text_value("worldbookAliases", 1200))
+            if self._single_line(item, 40)
+        ][:20]
+
+        changed: dict[str, Any] = {}
+        try:
+            for key, value in features.items():
+                if key in self._allowed_feature_keys():
+                    changed[key] = self._normalize_bool_value(value)
+            for key, value in settings.items():
+                if key in self._allowed_setting_keys():
+                    changed[key] = self._normalize_setting_value(key, value)
+            for key, value in providers.items():
+                if key in self._allowed_provider_keys():
+                    changed[key] = value
+
+            for key, value in changed.items():
+                self._apply_config_value(key, value, changed)
+
+            if providers or changed.get("provider_config_mode"):
+                apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
+                if callable(apply_quick):
+                    apply_quick()
+
+            sync_targets = getattr(self.plugin, "_sync_configured_targets", None)
+            if callable(sync_targets):
+                async with self.plugin._data_lock:
+                    sync_targets()
+                    self.plugin._save_data_sync()
+
+            worldbook_saved = False
+            if worldbook_should_save:
+                async with self.plugin._data_lock:
+                    profiles = self.plugin.data.setdefault("worldbook_member_profiles", {})
+                    if not isinstance(profiles, dict):
+                        profiles = {}
+                        self.plugin.data["worldbook_member_profiles"] = profiles
+                    profile = profiles.get(worldbook_user_id)
+                    if not isinstance(profile, dict):
+                        profile = {
+                            "user_id": worldbook_user_id,
+                            "important_memories": [],
+                            "priority": 120,
+                            "source_entries": ["首次配置引导"],
+                            "observed_names": [],
+                        }
+                        profiles[worldbook_user_id] = profile
+                    profile.update(
+                        {
+                            "user_id": worldbook_user_id,
+                            "identity_type": "qq" if worldbook_user_id.isdigit() else "external",
+                            "enabled": bool_value("worldbookEnabled", True),
+                            "name": worldbook_name or worldbook_user_id,
+                            "gender": self._single_line(draft.get("worldbookGender"), 40),
+                            "aliases": worldbook_aliases,
+                            "content": text_value("worldbookContent", 2000),
+                            "identity_note": text_value("worldbookIdentityNote", 2000),
+                            "boundary_note": text_value("worldbookBoundaryNote", 1200),
+                            "manual_edit_ts": time.time(),
+                            "setup_guide_ts": time.time(),
+                        }
+                    )
+                    deleted = self.plugin.data.setdefault("worldbook_deleted_member_ids", [])
+                    if isinstance(deleted, list) and worldbook_user_id in deleted:
+                        self.plugin.data["worldbook_deleted_member_ids"] = [
+                            item for item in deleted if str(item) != worldbook_user_id
+                        ]
+                    self.plugin._save_data_sync()
+                    worldbook_saved = True
+
+            async with self.plugin._data_lock:
+                self.plugin.data["setup_guide_completed_at"] = time.time()
+                self.plugin.data["setup_guide_completed_version"] = "5.7.0-first-setup"
+                self.plugin._save_data_sync()
+
+            config_saved = True
+            if changed:
+                config_saved = await self._save_config_if_possible()
+            overview = await self.get_overview()
+            if overview.get("success"):
+                data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
+                data["setup_applied"] = True
+                data["setup_changed"] = changed
+                data["setup_worldbook_saved"] = worldbook_saved
+                data["config_saved"] = config_saved
+            return overview
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 首次配置落地失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def run_setup_daily_generation(self) -> dict[str, Any]:
+        """Run today's schedule and current detail generation for the first setup guide."""
+        try:
+            payload = await request.get_json(silent=True) or {}
+        except Exception:
+            payload = {}
+        generate_schedule = self._normalize_bool_value(payload.get("generate_schedule", True))
+        refine_schedule = self._normalize_bool_value(payload.get("refine_schedule", True))
+        plan: dict[str, Any] | None = None
+        detail: dict[str, Any] | None = None
+        current_detail_text = ""
+        try:
+            if generate_schedule:
+                plan = await self.plugin._ensure_daily_plan(force=True)
+                async with self.plugin._data_lock:
+                    self.plugin.data["detail_enhanced_day"] = str((plan or {}).get("date") or _today_key())
+                    self.plugin.data["detail_enhanced_segments"] = {}
+                    self.plugin.data["daily_story_plan"] = {}
+                    self.plugin._save_data_sync()
+            else:
+                async with self.plugin._data_lock:
+                    current_plan = self.plugin.data.get("daily_plan", {})
+                    plan = dict(current_plan) if isinstance(current_plan, dict) else {}
+
+            if refine_schedule:
+                if not plan:
+                    plan = await self.plugin._ensure_daily_plan(force=False)
+                    if not plan:
+                        plan = await self.plugin._ensure_daily_plan(force=True)
+                detail = await self.plugin._ensure_detail_enhancement(force=True)
+
+            formatter = getattr(self.plugin, "_format_current_detail_view", None)
+            if callable(formatter):
+                try:
+                    current_detail_text = formatter()
+                except Exception as exc:
+                    current_detail_text = f"当前细化展示失败：{self._single_line(exc, 160)}"
+
+            async with self.plugin._data_lock:
+                data = self._overview_data_snapshot_locked(self.plugin.data)
+
+            plan_payload = dict(plan) if isinstance(plan, dict) else {}
+            if not isinstance(plan_payload.get("items"), list) and isinstance(plan_payload.get("schedule"), list):
+                plan_payload["items"] = plan_payload.get("schedule")
+
+            return self._ok(
+                {
+                    "ok": True,
+                    "plan": plan_payload,
+                    "detail": detail if isinstance(detail, dict) else {},
+                    "current_detail_text": current_detail_text,
+                    "daily_state": self._daily_state_summary(data.get("daily_state")),
+                    "daily_timeline": self._daily_timeline_summary(data),
+                }
+            )
+        except Exception as exc:
+            logger.warning(f"[PrivateCompanionPage] 首次配置日程生成失败: {exc}", exc_info=True)
+            return self._ok({"ok": False, "error": self._single_line(exc, 220)})
 
     def _normalize_roleplay_draft_scopes(self, raw: Any) -> list[str]:
         allowed = {"persona", "world", "user"}
@@ -4932,11 +5430,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 result.append(normalized)
         return result or ["persona"]
 
-    def _roleplay_draft_from_persona_prompt(self, persona_prompt: str, scopes: list[str] | None = None) -> str:
+    def _roleplay_draft_from_persona_prompt(self, persona_prompt: str, scopes: list[str] | None = None, *, extra_prompt: str = "") -> str:
         source = str(persona_prompt or "").strip()
         if len(source) > 9000:
             source = source[:9000] + "\n（后文已截断）"
         selected = set(scopes or ["persona"])
+        extra = str(extra_prompt or "").strip()
         scope_lines = [
             "本次需要整理的范围：",
             f"- 角色设定：{'生成' if 'persona' in selected else '不要生成，字段留空'}",
@@ -4958,7 +5457,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             f"{user_rule}\n"
             "外貌线索只写角色自己的可视特征，方便识图，不要写回复策略。\n"
             "世界观只写原文明确存在的背景；现代日常默认不需要硬写世界观。\n"
-            "翻译词只在原文有明确世界观替代表达时填写，否则留空。\n"
+            + (f"用户补充约束：\n{extra}\n这些补充只用于整理取舍和边界提醒，不要把未在原人格出现的新事实当成既定设定。\n" if extra else "")
+            + "翻译词只在原文有明确世界观替代表达时填写，否则留空。\n"
             "所有字段尽量短，适合用户二次编辑。只输出 JSON 对象，不要 Markdown，不要解释。\n"
             "JSON 结构如下，缺失字段也要保留为空字符串：\n"
             "{\n"
@@ -4973,7 +5473,106 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             f"{source}"
         )
 
+    def _roleplay_provider_role(self, provider_id: Any) -> str:
+        pid = str(provider_id or "").strip()
+        if not pid:
+            return ""
+        roles = [
+            ("FAST_RESPONSE_PROVIDER_ID", getattr(self.plugin, "fast_response_provider_id", "")),
+            ("COMPLEX_REASONING_PROVIDER_ID", getattr(self.plugin, "complex_reasoning_provider_id", "")),
+            ("LLM_PROVIDER_ID", getattr(self.plugin, "llm_provider_id", "")),
+        ]
+        for role, value in roles:
+            if pid == str(value or "").strip():
+                return role
+        return "CUSTOM_PROVIDER_ID"
+
+    def _roleplay_draft_repair_provider_id(self, failed_provider_id: Any = "") -> str:
+        failed = str(failed_provider_id or "").strip()
+        candidates = [
+            getattr(self.plugin, "complex_reasoning_provider_id", ""),
+            getattr(self.plugin, "llm_provider_id", ""),
+            getattr(self.plugin, "fast_response_provider_id", ""),
+        ]
+        for candidate in candidates:
+            pid = str(candidate or "").strip()
+            if pid and pid != failed:
+                return pid
+        return ""
+
+    def _roleplay_draft_json_repair_prompt(self, raw: Any, scopes: list[str] | None = None) -> str:
+        text = str(raw or "").strip()
+        if len(text) > 6500:
+            text = text[:6500] + "\n（后文已截断）"
+        selected = set(scopes or ["persona"])
+        return (
+            "下面是一段模型输出，它本应是 JSON，但可能混入了解释、Markdown、空字段遗漏或格式错误。\n"
+            "请只把其中能确认的信息整理成一个合法 JSON 对象，不要添加解释，不要使用 Markdown。\n"
+            "没有信息的字段必须保留为空字符串；不要编造原文没有的事实。\n"
+            f"角色设定：{'需要' if 'persona' in selected else '字段保留为空'}；"
+            f"世界观设定：{'需要' if 'world' in selected else '字段保留为空'}；"
+            f"用户关系：{'需要' if 'user' in selected else '字段保留为空'}。\n"
+            "必须输出这个结构：\n"
+            "{\n"
+            '  "persona_parts": {"name":"","species":"","age":"","gender":"","appearance":"","hair":"","eyes":"","clothing":"","identity":"","personality":"","desire":"","hobbies":"","taboo":"","key_lore":"","extra":""},\n'
+            '  "world_parts": {"world":"","era":"","tone":"","rules":"","scenes":"","network":"","extra":""},\n'
+            '  "user_parts": {"nickname":"","user_gender":"","user_age":"","user_occupation":"","role_relation":"","interaction":"","extra":""},\n'
+            '  "translations": {"群聊":"","识屏":"","B站":"","QQ空间":"","书柜":""},\n'
+            '  "image_self_recognition_hint": "",\n'
+            '  "notes": []\n'
+            "}\n\n"
+            "待修复输出：\n"
+            f"{text}"
+        )
+
+    def _fallback_roleplay_draft_result(self, persona_prompt: Any, scopes: list[str] | None, reason: Any = "") -> dict[str, Any]:
+        selected = set(scopes or ["persona"])
+        source = str(persona_prompt or "").strip()
+        preview = self._multi_line(source, 620)
+        reason_text = self._single_line(reason, 140)
+        result: dict[str, Any] = {
+            "persona_parts": {},
+            "world_parts": {},
+            "user_parts": {},
+            "translations": {},
+            "image_self_recognition_hint": "",
+            "notes": ["模型没有返回可解析 JSON，已保留人格原文摘要供手动整理。"],
+        }
+        if reason_text:
+            result["notes"].append(f"解析失败原因：{reason_text}")
+        if "persona" in selected and preview:
+            result["persona_parts"] = {
+                "extra": f"请根据主回复人格原文手动整理。原文摘要：{preview}",
+            }
+        if "world" in selected:
+            result["world_parts"] = {"extra": ""}
+        if "user" in selected:
+            result["user_parts"] = {"extra": ""}
+        return result
+
+    def _roleplay_draft_has_content(self, draft: Any) -> bool:
+        if not isinstance(draft, dict):
+            return False
+        for key in ("persona_parts", "world_parts", "user_parts", "translations"):
+            value = draft.get(key)
+            if isinstance(value, dict) and any(str(item or "").strip() for item in value.values()):
+                return True
+        for key in ("image_self_recognition_hint",):
+            if str(draft.get(key) or "").strip():
+                return True
+        notes = draft.get("notes")
+        if isinstance(notes, list) and any(str(item or "").strip() for item in notes):
+            non_fallback_notes = [
+                str(item or "").strip()
+                for item in notes
+                if str(item or "").strip() and "没有返回可解析 JSON" not in str(item)
+            ]
+            return bool(non_fallback_notes)
+        return False
+
     def _loads_json_object(self, raw: Any) -> dict[str, Any]:
+        if isinstance(raw, dict):
+            return raw
         text = str(raw or "").strip()
         if not text:
             raise ValueError("模型返回为空")
@@ -7103,11 +7702,82 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     @classmethod
     def _provider_name(cls, provider: Any, provider_id: str) -> str:
-        return (
-            cls._provider_config_value(provider, "name", "display_name", "provider")
+        explicit_name = (
+            cls._provider_config_value(provider, "name", "display_name", "label", "title")
             or str(getattr(provider, "name", "") or "").strip()
-            or provider_id
+            or str(getattr(provider, "display_name", "") or "").strip()
         )
+        if explicit_name and not cls._provider_name_is_protocol(explicit_name):
+            return explicit_name
+        if provider_id and not cls._provider_name_is_protocol(provider_id):
+            return provider_id
+        inferred = cls._provider_vendor_from_config(provider)
+        if inferred:
+            return inferred
+        protocol_name = cls._provider_config_value(provider, "provider", "type", "provider_type")
+        return explicit_name or protocol_name or provider_id
+
+    @staticmethod
+    def _provider_name_is_protocol(value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        normalized = re.sub(r"[\s_\-]+", "", text)
+        return normalized in {
+            "openai",
+            "openai兼容",
+            "openai-compatible",
+            "openaicompatible",
+            "compatible",
+            "兼容",
+            "兼容模式",
+        }
+
+    @classmethod
+    def _provider_vendor_from_config(cls, provider: Any) -> str:
+        source = " ".join(
+            cls._provider_config_value(
+                provider,
+                "api_base",
+                "base_url",
+                "api_base_url",
+                "api_url",
+                "endpoint",
+                "url",
+                "model",
+                "model_name",
+                "api_model",
+                "model_id",
+            ).split()
+        ).lower()
+        if not source:
+            return ""
+        try:
+            parsed = urlparse(source if "://" in source else f"https://{source}")
+            host = parsed.netloc.lower()
+        except Exception:
+            host = ""
+        haystack = f"{source} {host}"
+        vendors = [
+            ("火山引擎", ("volces.com", "volcengine", "huoshan", "火山", "doubao", "ark.cn-beijing")),
+            ("DeepSeek", ("deepseek.com", "deepseek")),
+            ("阿里云百炼", ("dashscope", "aliyuncs.com", "bailian", "百炼", "qwen", "tongyi")),
+            ("OpenRouter", ("openrouter.ai", "openrouter")),
+            ("硅基流动", ("siliconflow.cn", "siliconflow")),
+            ("智谱", ("bigmodel.cn", "zhipu", "glm")),
+            ("月之暗面", ("moonshot.cn", "moonshot", "kimi")),
+            ("Google", ("generativelanguage.googleapis.com", "googleapis.com", "gemini")),
+            ("Anthropic", ("anthropic.com", "claude")),
+            ("OpenAI", ("api.openai.com", "openai.com", "gpt-")),
+        ]
+        for label, needles in vendors:
+            if any(needle in haystack for needle in needles):
+                return label
+        if host:
+            core = host.split(":")[0]
+            for prefix in ("api.", "ark.", "www."):
+                if core.startswith(prefix):
+                    core = core[len(prefix):]
+            return core.split(".")[0] or ""
+        return ""
 
     @classmethod
     def _provider_model(cls, provider: Any) -> str:
@@ -7157,7 +7827,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "worldview_adaptation_prompt",
             "quiet_hours",
             "passive_injection_position",
-            "framework_session_lock_mode",
             "response_review_mode",
             "smart_silence_min_confidence",
             "smart_silence_model_timeout_seconds",
@@ -8722,7 +9391,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "worldview_adaptation_mode",
             "worldview_adaptation_prompt",
             "quiet_hours",
-            "framework_session_lock_mode",
             "proactive_intensity_preset",
             "proactive_prompt_template",
             "proactive_persona_judge_send_threshold",
@@ -9072,12 +9740,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return normalizer(value)
             text = str(value or "prompt").strip().lower()
             return text if text in {"auto", "prompt", "system_prompt"} else "prompt"
-        if key == "framework_session_lock_mode":
-            normalizer = getattr(self.plugin, "_normalize_framework_session_lock_mode", None)
-            if callable(normalizer):
-                return normalizer(value)
-            text = str(value or "auto").strip().lower()
-            return text if text in {"auto", "always", "off"} else "auto"
         if key == "rest_reply_active_windows":
             return re.sub(r"\s+", "", str(value or ""))[:160]
         if key == "quote_target_strategy":
@@ -11193,6 +11855,27 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         total_attempts = 0
         pending_total = 0
 
+        def pending_status(status: Any) -> bool:
+            normalized = self._single_line(status, 24).lower()
+            return normalized in {"accepted", "deferred", "queued", "pending", "unknown", ""}
+
+        def repeat_limit(status: Any) -> int:
+            normalized = self._single_line(status, 24).lower()
+            if normalized in {"accepted", "deferred", "queued", "pending", "unknown", ""}:
+                return 12
+            if normalized == "sent":
+                return 8
+            return 6
+
+        def normalized_repeat(item: dict[str, Any], status: str) -> int:
+            count = max(1, self._int(item.get("repeat_count")))
+            limit = repeat_limit(status)
+            value = max(1, min(limit, count))
+            if count != value:
+                item["repeat_count"] = value
+                item["repeat_count_capped"] = True
+            return value
+
         def candidate_user_meta(user_id: str, user: Any) -> dict[str, str]:
             if not isinstance(user, dict):
                 return {"label": user_id or "未知用户", "role": "unknown", "role_label": "未知"}
@@ -11210,8 +11893,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         for item in raw[-240:]:
             if not isinstance(item, dict):
                 continue
-            repeat_count = max(1, self._int(item.get("repeat_count")))
             status = self._single_line(item.get("status"), 24) or "unknown"
+            repeat_count = normalized_repeat(item, status)
             note = self._single_line(item.get("note"), 160)
             if status == "blocked" and note == "朋友关系不接收敏感主动":
                 continue
@@ -11234,7 +11917,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ):
                 continue
             total_attempts += repeat_count
-            if status != "sent":
+            if pending_status(status):
                 pending_total += repeat_count
             user_meta = candidate_user_meta(user_id, user)
             user_bucket = user_counts.setdefault(
@@ -11250,7 +11933,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 },
             )
             user_bucket["total"] = self._int(user_bucket.get("total")) + repeat_count
-            if status != "sent":
+            if pending_status(status):
                 user_bucket["pending_total"] = self._int(user_bucket.get("pending_total")) + repeat_count
             bucket_counts = user_bucket.get("counts")
             if not isinstance(bucket_counts, dict):
@@ -11354,7 +12037,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     }
                 )
                 continue
-            merged["repeat_count"] = self._int(merged.get("repeat_count")) + repeat_count
+            previous_repeat = self._int(merged.get("repeat_count"))
+            merged_repeat_limit = repeat_limit(status)
+            merged["repeat_count"] = min(merged_repeat_limit, previous_repeat + repeat_count)
+            if previous_repeat + repeat_count > merged_repeat_limit:
+                merged["repeat_count_capped"] = True
             merged["last_seen_ts"] = max(self._float(merged.get("last_seen_ts")), last_seen, created)
             merged["scheduled_ts"] = max(self._float(merged.get("scheduled_ts")), scheduled)
             merged["score"] = max(self._int(merged.get("score")), self._int(item.get("score")))
@@ -11387,6 +12074,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return {
             "total": total_attempts,
             "pending_total": pending_total,
+            "record_total": len([item for item in raw if isinstance(item, dict)]),
             "visible_total": len(items),
             "counts": counts,
             "source_counts": source_counts,
@@ -12316,7 +13004,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if keyed:
             index = int(keyed.group(2))
             start = self.plugin._parse_hhmm_to_minutes(keyed.group(3))
-            items = plan.get("items") if isinstance(plan, dict) else []
+            items = []
+            if isinstance(plan, dict):
+                if isinstance(plan.get("items"), list):
+                    items = plan.get("items") or []
+                elif isinstance(plan.get("schedule"), list):
+                    items = plan.get("schedule") or []
             end = None
             if isinstance(items, list):
                 for next_item in items[index + 1:]:

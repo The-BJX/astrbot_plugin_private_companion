@@ -3467,7 +3467,12 @@ class EventDispatchMixin:
         if not compact:
             return False
         no_reply_markers = ("不回复", "无需回复", "不要回复", "不用回复", "别回复", "静默", "忽略")
+        empty_reply_markers = {"空字符串", "空内容", "留空", "null", "none", "nil", "n/a"}
         context_markers = ("群友之间", "群友互动", "群聊背景", "不是对你", "不需要接话", "无需接话", "不要接话")
+        if compact in empty_reply_markers:
+            return True
+        if "空字符串" in compact and len(compact) <= 16:
+            return True
         if any(marker in compact for marker in no_reply_markers) and any(marker in compact for marker in context_markers):
             return True
         if compact in {"不回复", "无需回复", "不要回复", "不用回复", "别回复", "静默", "忽略"}:

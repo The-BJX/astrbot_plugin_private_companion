@@ -263,7 +263,27 @@ class ProactiveEngineMixin:
     @staticmethod
     def _pending_candidate_status(status: str) -> bool:
         normalized = _single_line(status, 24).lower()
-        return normalized != "sent"
+        return normalized in {"accepted", "deferred", "queued", "pending", "unknown", ""}
+
+    @staticmethod
+    def _candidate_repeat_count_limit(status: str = "") -> int:
+        normalized = _single_line(status, 24).lower()
+        if normalized in {"accepted", "deferred", "queued", "pending", "unknown", ""}:
+            return 12
+        if normalized == "sent":
+            return 8
+        return 6
+
+    def _normalize_candidate_repeat_count(self, item: dict[str, Any]) -> int:
+        if not isinstance(item, dict):
+            return 1
+        limit = self._candidate_repeat_count_limit(str(item.get("status") or ""))
+        count = _safe_int(item.get("repeat_count"), 1, 1)
+        normalized = max(1, min(limit, count))
+        if count != normalized:
+            item["repeat_count"] = normalized
+            item["repeat_count_capped"] = True
+        return normalized
 
     def _planned_candidate_ids_by_user(self) -> dict[str, str]:
         users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
@@ -418,6 +438,7 @@ class ProactiveEngineMixin:
         for item in self._proactive_candidate_pool():
             if not isinstance(item, dict):
                 continue
+            self._normalize_candidate_repeat_count(item)
             created = _safe_float(item.get("created_ts"), 0)
             scheduled = _safe_float(item.get("scheduled_ts"), 0)
             status = str(item.get("status") or "")
@@ -1828,7 +1849,11 @@ class ProactiveEngineMixin:
                     continue
                 if now - _safe_float(existing.get("last_seen_ts") or existing.get("created_ts"), 0) > 18 * 3600:
                     continue
-                existing["repeat_count"] = _safe_int(existing.get("repeat_count"), 1, 1) + 1
+                repeat_limit = self._candidate_repeat_count_limit(status)
+                previous_repeat = _safe_int(existing.get("repeat_count"), 1, 1)
+                existing["repeat_count"] = min(repeat_limit, previous_repeat + 1)
+                if previous_repeat + 1 > repeat_limit:
+                    existing["repeat_count_capped"] = True
                 existing["last_seen_ts"] = now
                 existing["scheduled_ts"] = max(_safe_float(existing.get("scheduled_ts"), scheduled), scheduled)
                 existing["source"] = source or _single_line(existing.get("source"), 40)

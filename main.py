@@ -428,7 +428,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.6.10",
+    "5.7.0",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -711,9 +711,6 @@ class PrivateCompanionPlugin(
         self.enable_passive_state_delta_injection = self._cfg_bool(c, "enable_passive_state_delta_injection", True)
         self.passive_injection_position = self._normalize_passive_injection_position(
             self._cfg_str(c, "passive_injection_position", "prompt")
-        )
-        self.framework_session_lock_mode = self._normalize_framework_session_lock_mode(
-            self._cfg_str(c, "framework_session_lock_mode", "auto", "auto")
         )
         self.proactive_share_probability = self._cfg_int(c, "proactive_share_probability", 45, 0, 100) / 100
         self.enable_daily_greetings = self._cfg_bool(c, "enable_daily_greetings", True)
@@ -1261,7 +1258,6 @@ class PrivateCompanionPlugin(
         self._data_save_dirty = False
         self._maintenance_failure_cooldowns: dict[str, dict[str, Any]] = {}
         self._framework_captured_send_cache: dict[str, list[Any]] = {}
-        self._framework_session_locks: dict[str, asyncio.Lock] = {}
         self._segmented_reply_remainder_locks: dict[str, asyncio.Lock] = {}
         self._last_input_status_at: dict[str, float] = {}
         self._passive_input_status_tasks: dict[str, asyncio.Task] = {}
@@ -1668,12 +1664,11 @@ class PrivateCompanionPlugin(
 
     @filter.on_decorating_result()
     async def stop_passive_input_status_before_private_send(self, event: AstrMessageEvent):
-        """LLM 回复进入发送前阶段时释放会话锁；私聊额外停止持续输入状态。"""
+        """LLM 回复进入发送前阶段时停止私聊持续输入状态。"""
         if not self.enabled:
             return
         if bool(getattr(event, "is_private_chat", lambda: False)()):
             self._stop_passive_input_status_loop(event)
-        self._release_framework_session_lock_for_event(event, label="decorating_result")
 
     @filter.on_decorating_result()
     async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent):
@@ -3371,32 +3366,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @staticmethod
-    def _normalize_framework_session_lock_mode(value: Any) -> str:
-        text = str(value or "").strip().lower()
-        aliases = {
-            "auto": "auto",
-            "自动": "auto",
-            "compat": "auto",
-            "compatibility": "auto",
-            "兼容": "auto",
-            "legacy": "auto",
-            "旧版": "auto",
-            "always": "always",
-            "on": "always",
-            "true": "always",
-            "enable": "always",
-            "enabled": "always",
-            "开启": "always",
-            "始终": "always",
-            "off": "off",
-            "false": "off",
-            "disable": "off",
-            "disabled": "off",
-            "关闭": "off",
-        }
-        return aliases.get(text, text if text in {"auto", "always", "off"} else "auto")
-
-    @staticmethod
     def _normalize_provider_config_mode(value: Any, config: Any = None) -> str:
         text = str(value or "").strip().lower()
         aliases = {
@@ -3619,18 +3588,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             int(match.group(2)),
             int(match.group(3) or 0),
         )
-
-    def _framework_session_lock_enabled(self) -> bool:
-        mode = self._normalize_framework_session_lock_mode(getattr(self, "framework_session_lock_mode", "auto"))
-        if mode == "always":
-            return True
-        if mode == "off":
-            return False
-        version = self._parse_version_tuple(self._detect_astrbot_version())
-        if version is None:
-            return False
-        # AstrBot 4.25.x 曾出现主链/会话库并发锁问题；新版本默认不再额外串行化。
-        return (4, 25, 0) <= version <= (4, 25, 2)
 
     def _append_turn_prompt_fragment_by_position(
         self,
@@ -5428,14 +5385,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if not hasattr(req, "system_prompt"):
             log_bookshelf_secret_skip("llm_request_no_system_prompt")
-            self._release_framework_session_lock_for_event(event, label="llm_request_no_system_prompt")
             return
         self._sanitize_request_context_new_conversation_boundary(event, req)
         self._remember_external_llm_request_for_token_stats(event, req)
         proactive_only_limited = self._proactive_only_limited_passive_event(event)
         if self._proactive_only_blocks_passive_event(event, "llm_request"):
             log_bookshelf_secret_skip("proactive_only_mode")
-            self._release_framework_session_lock_for_event(event, label="proactive_only_mode")
             return
         if proactive_only_limited and not self._proactive_only_llm_request_needs_full_path():
             await self._append_proactive_only_unlocked_llm_request_fragments(event, req)
@@ -5466,7 +5421,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         rest_allowed, rest_reason = await self._should_reply_during_rest(event, is_private_chat=is_private_chat)
         if not rest_allowed:
             log_bookshelf_secret_skip(f"rest_reply_gate:{_single_line(rest_reason, 60)}")
-            self._release_framework_session_lock_for_event(event, label="rest_reply_gate")
             self._stop_reply_for_rest_gate(event, rest_reason)
             return
         if rest_reason not in {"disabled", "not_sleeping"}:
@@ -5481,15 +5435,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
         await self._enrich_request_context_image_placeholders(event, req)
-        group_id_for_lock = ""
-        if not is_private_chat and self._feature_enabled_or_temp_unlocked("enable_group_companion"):
-            group_id_for_lock = self._extract_group_id_from_event(event)
-            if group_id_for_lock and self._group_enabled_for_event(group_id_for_lock):
-                await self._acquire_framework_session_lock_for_event(
-                    event,
-                    label="group_llm_request",
-                    private_only=False,
-                )
         if (
             bool(getattr(event, "private_companion_deferred_private_image_only", False))
             and not bool(getattr(event, "private_companion_deferred_private_image_only_ready", False))
@@ -5715,19 +5660,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user_id = str(event.get_sender_id())
         except Exception:
             log_bookshelf_secret_skip("private_sender_missing")
-            self._release_framework_session_lock_for_event(event, label="private_sender_missing")
             return
         raw_users = self.data.get("users", {})
         current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
         if not isinstance(current_user, dict):
             log_bookshelf_secret_skip("private_user_missing")
-            self._release_framework_session_lock_for_event(event, label="private_user_missing")
             return
         if not self._is_target_private_user(user_id, current_user) or not current_user.get("enabled", True):
             log_bookshelf_secret_skip("private_user_disabled", current_user)
-            self._release_framework_session_lock_for_event(event, label="private_user_disabled")
             return
-        await self._acquire_framework_session_lock_for_event(event, label="private_llm_request")
         if not bool(getattr(event, "private_companion_skip_passive_input_status", False)):
             self._start_passive_input_status_loop(event, user_id)
 
@@ -6055,7 +5996,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     "image.vision",
                     "【本轮延迟图片】\n"
                     f"{image_context_intro}下面是这张图的视觉摘要；请按摘要理解当前图片，不要说没看到图。"
-                    "只回应本轮图片和用户文字，不要提模型、插件或路径。\n"
+                    "只回应本轮图片和用户文字，不要提模型、插件或路径。"
+                    "如果最近对话里用户明确规定了这张/下一张图片的回复方式（例如只回复某句话、不要回复其他内容）,必须优先照做。\n"
                     f"{self._private_image_identity_disambiguation_instruction()}\n"
                     f"{reply_objective}\n"
                     f"{buffered_image_vision}",
@@ -6090,7 +6032,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 prompt_surface.add(
                     "image.only.vision",
                     "【本轮延迟图片】\n"
-                    "用户只发了一张图片。下面是这张图的视觉摘要；请自然接住图片内容或表达意图，不要提处理过程。\n"
+                    "用户只发了一张图片。下面是这张图的视觉摘要；请自然接住图片内容或表达意图，不要提处理过程。"
+                    "如果最近对话里用户明确规定了这张/下一张图片的回复方式（例如只回复某句话、不要回复其他内容）,必须优先照做。\n"
                     f"{buffered_image_vision}",
                     priority=55,
                     source="private_image",
@@ -6647,8 +6590,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             release_now = True
             raise
         finally:
-            if release_now:
-                self._release_framework_session_lock_for_event(event, label="llm_response_finally")
+            pass
 
     async def _debug_prompt_text(self, kind: str, user: dict[str, Any], event: AstrMessageEvent | None = None) -> str:
         normalized = str(kind or "").strip().lower()
@@ -7362,7 +7304,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             except Exception:
                 component_types = []
             logger.info(
-                "[PrivateCompanion] 忽略空私聊事件,避免占用主链会话锁并阻止默认 LLM 空跑: user=%s components=%s",
+                "[PrivateCompanion] 忽略空私聊事件,避免阻止默认 LLM 空跑: user=%s components=%s",
                 user_id,
                 ",".join([item for item in component_types if item]) or "-",
             )
@@ -7500,7 +7442,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             ):
                 self._stop_private_reply_after_user_rest_signal(event, user_id, safe_text or text)
                 return
-            await self._acquire_framework_session_lock_for_event(event, label="private_event_pipeline")
             return
 
         rest_silence_early_block = False
@@ -7931,7 +7872,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             await self._reply(event, response)
             event.stop_event()
         elif is_target_user:
-            await self._acquire_framework_session_lock_for_event(event, label="private_event_pipeline")
+            pass
         if is_target_user:
             asyncio.create_task(self._refresh_persona_relationship(user_id, user_snapshot))
             asyncio.create_task(self._maybe_refresh_companion_memory(user_id, user_snapshot))
@@ -8453,12 +8394,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 current["last_bot_interjection"] = group_snapshot.get("last_bot_interjection", current.get("last_bot_interjection", {}))
                 current["repeat_follow_state"] = group_snapshot.get("repeat_follow_state", current.get("repeat_follow_state", {}))
                 self._save_data_sync()
-        if talking_to_bot:
-            await self._acquire_framework_session_lock_for_event(
-                event,
-                label="group_event_pipeline",
-                private_only=False,
-            )
 
     def _format_timestamp_elapsed(self, timestamp: Any) -> str:
         ts = _safe_float(timestamp, 0)

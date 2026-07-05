@@ -502,14 +502,47 @@ class CoreStoreMixin:
             return changed
         return 0
 
+    @staticmethod
+    def _proactive_candidate_repeat_limit_for_status(status: Any) -> int:
+        normalized = str(status or "").strip().lower()
+        if normalized in {"accepted", "deferred", "queued", "pending", "unknown", ""}:
+            return 12
+        if normalized == "sent":
+            return 8
+        return 6
+
+    def _sanitize_proactive_candidate_repeat_counts_inplace(self, data: Any) -> int:
+        if not isinstance(data, dict):
+            return 0
+        pool = data.get("proactive_candidate_pool")
+        if not isinstance(pool, list):
+            return 0
+        changed = 0
+        for item in pool:
+            if not isinstance(item, dict):
+                continue
+            limit = self._proactive_candidate_repeat_limit_for_status(item.get("status"))
+            current = _safe_int(item.get("repeat_count"), 1, 1)
+            normalized = max(1, min(limit, current))
+            if current != normalized:
+                item["repeat_count"] = normalized
+                item["repeat_count_capped"] = True
+                changed += 1
+        if changed:
+            data["proactive_candidate_repeat_sanitized_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return changed
+
     def _load_data_sync(self) -> dict[str, Any]:
         manager = getattr(self, "store_manager", None)
         if manager is not None:
             try:
                 data = manager.load_initial_store()
                 changed = self._sanitize_store_control_tags_inplace(data)
+                repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(data)
                 if changed:
                     logger.warning("[PrivateCompanion] 启动读取数据时清理非标准控制标签: fields=%s", changed)
+                if repeat_changed:
+                    logger.warning("[PrivateCompanion] 启动读取数据时压缩主动候选重复计数: items=%s", repeat_changed)
                 return data
             except Exception as exc:
                 logger.warning("[PrivateCompanion] StoreManager 读取失败,回退 JSON: %s", _single_line(exc, 160))
@@ -522,8 +555,11 @@ class CoreStoreMixin:
                 return self._new_store()
             data = self._ensure_store_defaults(data)
             changed = self._sanitize_store_control_tags_inplace(data)
+            repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(data)
             if changed:
                 logger.warning("[PrivateCompanion] 启动读取 JSON 时清理非标准控制标签: fields=%s", changed)
+            if repeat_changed:
+                logger.warning("[PrivateCompanion] 启动读取 JSON 时压缩主动候选重复计数: items=%s", repeat_changed)
             return data
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 读取数据失败,将使用空数据: {e}")
@@ -531,8 +567,11 @@ class CoreStoreMixin:
 
     def _save_data_sync(self):
         changed = self._sanitize_store_control_tags_inplace(self.data)
+        repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(self.data)
         if changed:
             logger.warning("[PrivateCompanion] 保存数据前清理非标准控制标签: fields=%s", changed)
+        if repeat_changed:
+            logger.warning("[PrivateCompanion] 保存数据前压缩主动候选重复计数: items=%s", repeat_changed)
         manager = getattr(self, "store_manager", None)
         if manager is not None:
             manager.save_store(self.data)

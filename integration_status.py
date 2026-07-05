@@ -594,10 +594,7 @@ class IntegrationStatusMixin:
                     provider = None
         if provider is None:
             return safe_id or "AstrBot 默认会话模型"
-        name = (
-            self._provider_config_value(provider, "name", "display_name", "provider")
-            or _single_line(getattr(provider, "name", ""), 80)
-        )
+        name = self._provider_display_name(provider, safe_id)
         model = self._provider_config_value(provider, "model", "model_name", "api_model", "model_id")
         provider_id = safe_id or self._provider_config_value(provider, "id", "provider_id") or _single_line(getattr(provider, "provider_id", ""), 120)
         pieces = []
@@ -608,6 +605,85 @@ class IntegrationStatusMixin:
         if provider_id and provider_id not in pieces:
             pieces.append(provider_id)
         return " / ".join(_single_line(piece, 120) for piece in pieces if piece) or "AstrBot 默认会话模型"
+
+    @classmethod
+    def _provider_display_name(cls, provider: Any, provider_id: str = "") -> str:
+        explicit_name = (
+            cls._provider_config_value(provider, "name", "display_name", "label", "title")
+            or _single_line(getattr(provider, "name", ""), 80)
+            or _single_line(getattr(provider, "display_name", ""), 80)
+        )
+        if explicit_name and not cls._provider_name_is_protocol(explicit_name):
+            return explicit_name
+        safe_id = _single_line(provider_id, 120)
+        if safe_id and not cls._provider_name_is_protocol(safe_id):
+            return safe_id
+        inferred = cls._provider_vendor_from_config(provider)
+        if inferred:
+            return inferred
+        protocol_name = cls._provider_config_value(provider, "provider", "type", "provider_type")
+        return explicit_name or protocol_name or safe_id
+
+    @staticmethod
+    def _provider_name_is_protocol(value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        normalized = re.sub(r"[\s_\-]+", "", text)
+        return normalized in {
+            "openai",
+            "openai兼容",
+            "openaicompatible",
+            "compatible",
+            "兼容",
+            "兼容模式",
+        }
+
+    @classmethod
+    def _provider_vendor_from_config(cls, provider: Any) -> str:
+        source = " ".join(
+            cls._provider_config_value(
+                provider,
+                "api_base",
+                "base_url",
+                "api_base_url",
+                "api_url",
+                "endpoint",
+                "url",
+                "model",
+                "model_name",
+                "api_model",
+                "model_id",
+            ).split()
+        ).lower()
+        if not source:
+            return ""
+        try:
+            parsed = urlparse(source if "://" in source else f"https://{source}")
+            host = parsed.netloc.lower()
+        except Exception:
+            host = ""
+        haystack = f"{source} {host}"
+        vendors = [
+            ("火山引擎", ("volces.com", "volcengine", "huoshan", "火山", "doubao", "ark.cn-beijing")),
+            ("DeepSeek", ("deepseek.com", "deepseek")),
+            ("阿里云百炼", ("dashscope", "aliyuncs.com", "bailian", "百炼", "qwen", "tongyi")),
+            ("OpenRouter", ("openrouter.ai", "openrouter")),
+            ("硅基流动", ("siliconflow.cn", "siliconflow")),
+            ("智谱", ("bigmodel.cn", "zhipu", "glm")),
+            ("月之暗面", ("moonshot.cn", "moonshot", "kimi")),
+            ("Google", ("generativelanguage.googleapis.com", "googleapis.com", "gemini")),
+            ("Anthropic", ("anthropic.com", "claude")),
+            ("OpenAI", ("api.openai.com", "openai.com", "gpt-")),
+        ]
+        for label, needles in vendors:
+            if any(needle in haystack for needle in needles):
+                return label
+        if host:
+            core = host.split(":")[0]
+            for prefix in ("api.", "ark.", "www."):
+                if core.startswith(prefix):
+                    core = core[len(prefix):]
+            return core.split(".")[0] or ""
+        return ""
 
     def _provider_model_label(self, provider_id: str = "", provider: Any | None = None) -> str:
         safe_id = _single_line(provider_id, 120)

@@ -2236,11 +2236,75 @@ class GroupObservationMixin:
         text = _single_line(value, 80)
         text = re.sub(r"^```(?:text)?|```$", "", text).strip()
         text = text.strip("\"'“”‘’` ")
-        if not text or text in {"空字符串", "不适合说话", "不说", "不回复", "无"}:
+        compact = re.sub(r"\s+", "", text)
+        unwrapped = re.sub(
+            r"^[\s\"'“”‘’`(\（\[\【<《「『]+|[\s\"'“”‘’`)\）\]\】>》」』。.!！?？~～…、，,;；:：]+$",
+            "",
+            compact,
+        )
+        silent_markers = {
+            "空",
+            "空字符串",
+            "空内容",
+            "留空",
+            "无",
+            "没有",
+            "null",
+            "none",
+            "nil",
+            "n/a",
+            "不适合说话",
+            "不说",
+            "不回复",
+            "无需回复",
+            "不用回复",
+            "不要回复",
+            "别回复",
+            "静默",
+            "忽略",
+        }
+        if not text or compact in silent_markers or unwrapped in silent_markers:
+            return ""
+        if "空字符串" in unwrapped and len(unwrapped) <= 12:
             return ""
         if re.fullmatch(r"[.。…~～\s\"'“”‘’`-]{1,12}", text):
             return ""
         return text
+
+    def _parse_group_interjection_decision(self, raw: Any) -> tuple[bool, str, str]:
+        payload = self._parse_json_object(raw)
+        if not isinstance(payload, dict):
+            reply = self._clean_group_interjection_reply(raw)
+            return (bool(reply), reply, "legacy_text")
+        raw_decision = str(
+            payload.get("decision")
+            or payload.get("action")
+            or payload.get("status")
+            or ""
+        ).strip().lower()
+        raw_should_reply = payload.get("should_reply", payload.get("reply", payload.get("speak")))
+        if isinstance(raw_should_reply, str):
+            should_text = raw_should_reply.strip().lower()
+            should_reply = should_text in {"true", "1", "yes", "y", "reply", "speak", "send", "说", "回复", "发言", "接话"}
+            explicit_no_reply = should_text in {"false", "0", "no", "n", "silent", "skip", "drop", "none", "不说", "不回复", "静默"}
+        elif raw_should_reply is None:
+            should_reply = raw_decision in {"reply", "speak", "send", "say", "接话", "回复", "发言"}
+            explicit_no_reply = raw_decision in {"silent", "skip", "drop", "none", "no_reply", "no-reply", "不说", "不回复", "静默"}
+        else:
+            should_reply = bool(raw_should_reply)
+            explicit_no_reply = not should_reply
+        if raw_decision in {"silent", "skip", "drop", "none", "no_reply", "no-reply", "不说", "不回复", "静默"}:
+            explicit_no_reply = True
+        if explicit_no_reply:
+            return (False, "", _single_line(payload.get("reason"), 80) or "model_skip")
+        reply = self._clean_group_interjection_reply(
+            payload.get("text")
+            or payload.get("reply_text")
+            or payload.get("message")
+            or payload.get("content")
+            or ""
+        )
+        return (bool(should_reply and reply), reply if should_reply else "", _single_line(payload.get("reason"), 80))
 
     def _group_interjection_allowed(self, group: dict[str, Any], text: str) -> tuple[bool, str]:
         if not self.enable_group_interjection:
@@ -2617,7 +2681,7 @@ class GroupObservationMixin:
                 logger.debug("[PrivateCompanion] 群聊插话 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你在一个群聊里,系统认为现在也许可以非常轻地接一句,但你必须先判断这句会不会显得硬插话。
-只输出要发到群里的正文,不要解释。
+只输出 JSON,不要解释,不要 Markdown。
 
 【主动插话判断上下文】
 {self._format_group_context_for_prompt(group)}
@@ -2630,23 +2694,34 @@ class GroupObservationMixin:
 {_single_line(text, 180)}
 
 要求：
-- 如果这像群友之间的一对一、已经有人在自然接话、你这句没有新增价值,输出空字符串
+- 如果这像群友之间的一对一、已经有人在自然接话、你这句没有新增价值,should_reply 必须为 false
 - 宁可不说,不要为了存在感插话
-- 1 句,最多 35 个中文字符
+- should_reply 为 true 时,text 才能填写要发到群里的正文；1 句,最多 35 个中文字符
+- should_reply 为 false 时,text 必须留空
 - 像群友自然接话,不要像助手
 - 只顺着当前话题轻轻补一句,不要开新话题,不要把自己变成中心
 - 不要主持群聊,不要总结,不要 @ 人
 - 不要提系统、观察、黑话学习、插件
-- 如果不适合说话,输出空字符串
+- 如果不适合说话,should_reply 必须为 false
+
+输出格式：
+{{"should_reply":false,"text":"","reason":"不超过12字"}}
 """.strip()
         generated = await self._llm_call(
             prompt,
-            max_tokens=80,
+            max_tokens=140,
             provider_id=self._task_provider(self.group_interject_provider_id, self.mai_style_provider_id),
             task="group_interject",
         )
-        reply = self._clean_group_interjection_reply(generated)
-        if not reply:
+        should_reply, reply, skip_reason = self._parse_group_interjection_decision(generated)
+        if not should_reply or not reply:
+            if skip_reason:
+                logger.debug(
+                    "[PrivateCompanion] 群聊主动插话模型决定不发言: group=%s reason=%s raw=%s",
+                    group.get("group_id") or "",
+                    _single_line(skip_reason, 80),
+                    _single_line(generated, 120),
+                )
             return
         reply = _normalize_outbound_punctuation_flow(reply)
         if self._response_review_flags(reply, {}):
