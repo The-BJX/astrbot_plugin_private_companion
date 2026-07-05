@@ -623,6 +623,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         atrelay_count = len(atrelay_cache) if isinstance(atrelay_cache, dict) else 0
         weather = data.get("daily_weather") if isinstance(data.get("daily_weather"), dict) else {}
         weather_age = self.plugin._format_timestamp_elapsed(weather.get("fetched_ts", 0)) if weather else ""
+        provider_runtime: dict[str, Any] = {}
+        runtime_getter = getattr(self.plugin, "_private_image_visual_provider_runtime_summary", None)
+        if callable(runtime_getter):
+            try:
+                provider_runtime = runtime_getter()
+            except Exception as exc:
+                provider_runtime = {"error": self._single_line(exc, 160)}
         return {
             "private_image_vision": {
                 "enabled": bool(getattr(self.plugin, "enable_private_image_vision_cache", False)),
@@ -630,6 +637,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "max_items": int(getattr(self.plugin, "private_image_vision_cache_max_items", 0) or 0),
                 "private": metric_row("image_vision:private_image"),
                 "forward": metric_row("image_vision:forward_image"),
+                "provider_runtime": provider_runtime,
             },
             "atrelay_member_cache": {
                 "items": atrelay_count,
@@ -3337,6 +3345,44 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             add("ok", "图片视觉缓存已开启", f"当前缓存 {image_cache.get('items', 0)}/{image_cache.get('max_items') or '不限'} 条。", "", "image-cache")
         else:
             add("info", "图片视觉缓存未开启", "重复表情包会重复调用视觉模型，但不影响首次识图。", "到模块配置开启重复图片缓存", "modules")
+        provider_runtime = image_cache.get("provider_runtime") if isinstance(image_cache.get("provider_runtime"), dict) else {}
+        provider_candidates = provider_runtime.get("candidates") if isinstance(provider_runtime.get("candidates"), list) else []
+        usable_vision = [
+            item for item in provider_candidates
+            if isinstance(item, dict) and item.get("available") and item.get("supports_image") and not item.get("cooldown")
+        ]
+        provider_cooldowns = provider_runtime.get("cooldowns") if isinstance(provider_runtime.get("cooldowns"), list) else []
+        last_success = provider_runtime.get("last_success") if isinstance(provider_runtime.get("last_success"), dict) else {}
+        if provider_runtime.get("error"):
+            add("warn", "私聊图片识别调度状态读取失败", provider_runtime.get("error") or "无法读取当前视觉模型状态。", "刷新排障页或查看日志", "troubleshooting")
+        elif not usable_vision:
+            add(
+                "warn",
+                "私聊图片识别暂无可用模型",
+                f"候选 {len(provider_candidates)} 个，但没有同时满足可用、支持图片且不在冷却的模型。",
+                "检查快速配置/精准配置里的插件识图模型，或等待临时降权结束",
+                "config",
+            )
+        elif last_success.get("provider_id"):
+            add(
+                "ok",
+                "私聊图片识别会尊重配置并记住视觉恢复候选",
+                f"AstrBot 图片转文字配置仍保留首位；最近成功视觉模型：{last_success.get('provider_id')}（{last_success.get('source') or '来源未知'}，{last_success.get('time') or '刚刚'}）；当前可用 {len(usable_vision)} 个。",
+                "",
+                "troubleshooting",
+            )
+        else:
+            first_provider = usable_vision[0].get("provider_id") if usable_vision and isinstance(usable_vision[0], dict) else "-"
+            add("info", "私聊图片识别候选模型可用", f"当前可用 {len(usable_vision)} 个，首选 {first_provider}；成功一次后会记录为视觉恢复候选。", "", "troubleshooting")
+        if provider_cooldowns:
+            first_cooldown = provider_cooldowns[0] if isinstance(provider_cooldowns[0], dict) else {}
+            add(
+                "warn",
+                "有识图模型被临时降权",
+                f"{first_cooldown.get('provider_id') or '-'}：{first_cooldown.get('error') or '最近调用失败'}；到期 {first_cooldown.get('until') or '-'}。",
+                "如果反复出现，换掉插件识图模型或调高单次超时",
+                "config",
+            )
 
         diag_warns = [item for item in diagnostics if item.get("level") in {"warn", "error"}]
         if diag_warns:

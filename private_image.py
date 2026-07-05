@@ -11,6 +11,7 @@ import re
 import shutil
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
@@ -22,11 +23,12 @@ try:
 except ImportError:
     from astrbot.api.message_components import Image, Plain
 from astrbot.api.provider import ProviderRequest
+from astrbot.core.agent.message import AssistantMessageSegment, UserMessageSegment
 from astrbot.core import file_token_service
 from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks
+from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
 from .segmented_message import split_plain_component_chain
 
 class PrivateImageMixin:
@@ -844,15 +846,29 @@ class PrivateImageMixin:
         return bool(removed or image_keys)
 
     def _astrbot_provider_settings_for_umo(self, umo: str = "") -> dict[str, Any]:
+        def provider_settings_from_config(cfg: Any) -> dict[str, Any]:
+            provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
+            return dict(provider_settings) if isinstance(provider_settings, dict) else {}
+
         try:
-            cfg = self.context.get_config(umo=umo) if umo else self.context.get_config()
+            global_cfg = self.context.get_config()
         except Exception:
-            try:
-                cfg = self.context.get_config()
-            except Exception:
-                cfg = {}
-        provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
-        return dict(provider_settings) if isinstance(provider_settings, dict) else {}
+            global_cfg = {}
+        merged = provider_settings_from_config(global_cfg)
+        if not umo:
+            return merged
+        try:
+            session_cfg = self.context.get_config(umo=umo)
+        except Exception:
+            session_cfg = {}
+        session_settings = provider_settings_from_config(session_cfg)
+        for key, value in session_settings.items():
+            if isinstance(value, str):
+                if value.strip() or key not in merged:
+                    merged[key] = value
+            elif value is not None:
+                merged[key] = value
+        return merged
 
     def _private_image_caption_provider_id(self, umo: str = "") -> tuple[str, str, str]:
         provider_settings = self._astrbot_provider_settings_for_umo(umo)
@@ -863,8 +879,7 @@ class PrivateImageMixin:
         fallback_provider_id = self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id)
         if fallback_provider_id:
             return fallback_provider_id, "plugin_vision", prompt
-        default_provider_id = self._default_chat_provider_id(umo)
-        return default_provider_id, "astrbot_default", prompt
+        return "", "", prompt
 
     def _private_image_provider_by_id(self, provider_id: str) -> Any:
         provider_id = _single_line(provider_id, 160)
@@ -878,15 +893,160 @@ class PrivateImageMixin:
         except Exception:
             return None
 
-    def _private_image_visual_provider_candidates(self, umo: str = "") -> list[tuple[str, str, str]]:
+    def _private_image_base_visual_provider_candidates(self, umo: str = "") -> list[tuple[str, str, str]]:
         provider_settings = self._astrbot_provider_settings_for_umo(umo)
         prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
         return [
             (_single_line(provider_settings.get("default_image_caption_provider_id"), 160), "astrbot_image_caption", prompt),
             (self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id), "plugin_vision", prompt),
-            (self._task_provider(self.llm_provider_id), "plugin_main", prompt),
-            (self._default_chat_provider_id(umo), "astrbot_default", prompt),
         ]
+
+    @staticmethod
+    def _private_image_visual_provider_source_allowed(provider_source: str) -> bool:
+        return _single_line(provider_source, 80) in {"astrbot_image_caption", "plugin_vision", "recent_success"}
+
+    def _private_image_visual_provider_state_store(self) -> dict[str, Any]:
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return {}
+        state = data.setdefault("private_image_visual_provider_state", {})
+        if not isinstance(state, dict):
+            state = {}
+            data["private_image_visual_provider_state"] = state
+        recent = state.get("recent_successes")
+        if not isinstance(recent, list):
+            state["recent_successes"] = []
+        else:
+            filtered = [
+                item for item in recent
+                if isinstance(item, dict)
+                and _single_line(item.get("provider_id"), 160)
+                and self._private_image_visual_provider_source_allowed(str(item.get("source") or ""))
+            ]
+            if len(filtered) != len(recent):
+                state["recent_successes"] = filtered
+        last_success = state.get("last_success")
+        if isinstance(last_success, dict) and not self._private_image_visual_provider_source_allowed(str(last_success.get("source") or "")):
+            next_last = state.get("recent_successes", [])
+            state["last_success"] = dict(next_last[0]) if isinstance(next_last, list) and next_last and isinstance(next_last[0], dict) else {}
+        return state
+
+    def _note_private_image_visual_provider_success(
+        self,
+        provider_id: str,
+        provider_source: str,
+        *,
+        umo: str = "",
+        scope: str = "private_image",
+        chars: int = 0,
+    ) -> None:
+        provider_id = _single_line(provider_id, 160)
+        if not provider_id:
+            return
+        provider_source = _single_line(provider_source, 80) or "unknown"
+        if not self._private_image_visual_provider_source_allowed(provider_source):
+            return
+        clean_umo = _single_line(umo, 160)
+        now = _now_ts()
+        state = self._private_image_visual_provider_state_store()
+        if not isinstance(state, dict):
+            return
+        recent = state.get("recent_successes")
+        if not isinstance(recent, list):
+            recent = []
+        kept: list[dict[str, Any]] = []
+        previous_successes = 0
+        cutoff = now - 7 * 86400
+        for item in recent:
+            if not isinstance(item, dict):
+                continue
+            item_provider = _single_line(item.get("provider_id"), 160)
+            item_source = _single_line(item.get("source"), 80)
+            item_umo = _single_line(item.get("umo"), 160)
+            item_ts = _safe_float(item.get("ts"), 0)
+            if not self._private_image_visual_provider_source_allowed(item_source):
+                continue
+            if item_provider == provider_id and item_source == provider_source and item_umo == clean_umo:
+                previous_successes = max(previous_successes, _safe_int(item.get("successes"), 0, 0))
+                continue
+            if item_provider and item_ts >= cutoff:
+                kept.append(item)
+        entry = {
+            "provider_id": provider_id,
+            "source": provider_source,
+            "umo": clean_umo,
+            "scope": _single_line(scope, 40) or "private_image",
+            "ts": now,
+            "successes": previous_successes + 1,
+            "chars": max(0, int(chars or 0)),
+        }
+        state["recent_successes"] = [entry, *kept][:8]
+        state["last_success"] = dict(entry)
+        scheduler = getattr(self, "_schedule_data_save", None)
+        try:
+            if callable(scheduler):
+                scheduler(delay=2.0)
+            else:
+                self._save_data_sync()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 私聊图片视觉成功 provider 状态保存失败: %s", exc)
+
+    def _private_image_visual_provider_candidates(self, umo: str = "") -> list[tuple[str, str, str]]:
+        base = self._private_image_base_visual_provider_candidates(umo)
+        by_provider: dict[str, tuple[str, str, str]] = {}
+        fallback_prompt = ""
+        for provider_id, provider_source, prompt in base:
+            clean_id = _single_line(provider_id, 160)
+            if not fallback_prompt and prompt:
+                fallback_prompt = prompt
+            if clean_id and clean_id not in by_provider:
+                by_provider[clean_id] = (clean_id, provider_source, prompt)
+        state = self._private_image_visual_provider_state_store()
+        recent = state.get("recent_successes") if isinstance(state, dict) else []
+        clean_umo = _single_line(umo, 160)
+        now = _now_ts()
+        ordered: list[tuple[str, str, str]] = []
+        used: set[str] = set()
+
+        for provider_id, provider_source, prompt in base:
+            clean_id = _single_line(provider_id, 160)
+            if clean_id and provider_source == "astrbot_image_caption" and clean_id not in used:
+                ordered.append((clean_id, provider_source, prompt))
+                used.add(clean_id)
+                break
+
+        if isinstance(recent, list):
+            rows: list[tuple[int, dict[str, Any]]] = [
+                (index, item) for index, item in enumerate(recent) if isinstance(item, dict)
+            ]
+
+            def recent_provider_sort_key(pair: tuple[int, dict[str, Any]]) -> tuple[int, float, int]:
+                item = pair[1]
+                same_session_rank = 0 if clean_umo and _single_line(item.get("umo"), 160) == clean_umo else 1
+                return same_session_rank, -_safe_float(item.get("ts"), 0), pair[0]
+
+            rows.sort(**{"key": recent_provider_sort_key})
+            for _index, item in rows:
+                provider_id = _single_line(item.get("provider_id"), 160)
+                item_source = _single_line(item.get("source"), 80)
+                if not provider_id or provider_id in used:
+                    continue
+                if not self._private_image_visual_provider_source_allowed(item_source):
+                    continue
+                if now - _safe_float(item.get("ts"), 0) > 7 * 86400:
+                    continue
+                candidate = by_provider.get(provider_id)
+                if candidate is None:
+                    candidate = (provider_id, "recent_success", fallback_prompt)
+                ordered.append(candidate)
+                used.add(provider_id)
+        for provider_id, provider_source, prompt in base:
+            clean_id = _single_line(provider_id, 160)
+            if not clean_id or clean_id in used:
+                continue
+            ordered.append((clean_id, provider_source, prompt))
+            used.add(clean_id)
+        return ordered
 
     def _select_private_image_visual_provider(self, umo: str = "") -> tuple[str, str, str, Any]:
         seen: set[str] = set()
@@ -954,6 +1114,66 @@ class PrivateImageMixin:
             self._private_image_provider_failure_key(provider_id, provider_source),
             None,
         )
+
+    def _private_image_vision_summary_unusable(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return True
+        failure_tokens = (
+            "无法查看图片", "无法看到图片", "无法识别图片", "无法读取图片", "无法打开图片",
+            "看不到图片", "看不见图片", "不能查看图片", "不能识别图片", "图片无法显示",
+            "没有收到图片", "未收到图片", "没有图片可供", "imagecannot", "cannotview",
+        )
+        if any(token in compact.lower() for token in failure_tokens):
+            visible = re.sub(r"\s+", "", self._private_image_visible_line(text))
+            return not visible or visible in {"可见内容：无法判断", "可见内容：无", "可见内容：无法识别"}
+        return False
+
+    def _private_image_visual_provider_runtime_summary(self, umo: str = "") -> dict[str, Any]:
+        state = self._private_image_visual_provider_state_store()
+        recent = state.get("recent_successes") if isinstance(state, dict) else []
+        candidates: list[dict[str, Any]] = []
+        for provider_id, provider_source, _prompt in self._private_image_visual_provider_candidates(umo):
+            clean_id = _single_line(provider_id, 160)
+            if not clean_id:
+                continue
+            provider = self._private_image_provider_by_id(clean_id)
+            candidates.append(
+                {
+                    "provider_id": clean_id,
+                    "source": _single_line(provider_source, 80),
+                    "available": provider is not None,
+                    "supports_image": bool(provider is not None and self._provider_supports_image(provider)),
+                    "cooldown": bool(self._private_image_provider_in_failure_cooldown(clean_id, provider_source)),
+                }
+            )
+        last_success = state.get("last_success") if isinstance(state.get("last_success"), dict) else {}
+        failures = list(self._private_image_provider_failure_cache().values())
+        failures = [item for item in failures if isinstance(item, dict)]
+        def failure_until_sort_key(item: dict[str, Any]) -> float:
+            return _safe_float(item.get("until"), 0)
+
+        failures.sort(**{"key": failure_until_sort_key, "reverse": True})
+        return {
+            "last_success": {
+                "provider_id": _single_line(last_success.get("provider_id"), 160),
+                "source": _single_line(last_success.get("source"), 80),
+                "time": self._format_timestamp_elapsed(last_success.get("ts", 0)) if hasattr(self, "_format_timestamp_elapsed") else "",
+                "scope": _single_line(last_success.get("scope"), 40),
+                "chars": _safe_int(last_success.get("chars"), 0, 0),
+            } if last_success else {},
+            "candidates": candidates[:8],
+            "cooldowns": [
+                {
+                    "provider_id": _single_line(item.get("provider_id"), 160),
+                    "source": _single_line(item.get("source"), 80),
+                    "error": _single_line(item.get("error"), 180),
+                    "until": self._format_timestamp_elapsed(item.get("until", 0)) if hasattr(self, "_format_timestamp_elapsed") else "",
+                }
+                for item in failures[:6]
+            ],
+            "recent_success_count": len(recent) if isinstance(recent, list) else 0,
+        }
 
     def _private_image_provider_timeout_seconds(self) -> float:
         configured = _safe_float(getattr(self, "private_image_provider_timeout_seconds", 12.0), 12.0, 3.0)
@@ -1770,6 +1990,28 @@ class PrivateImageMixin:
                 text = str(getattr(result, "completion_text", result) or "").strip()
                 cleaned_text = _single_line(_strip_internal_message_blocks(text), text_limit)
                 cleaned_text = self._private_image_downgrade_conflicting_ownership(cleaned_text)
+                if self._private_image_vision_summary_unusable(cleaned_text):
+                    empty_note = "识图模型返回空摘要" if not cleaned_text else "识图模型返回不可用摘要"
+                    self._record_llm_usage(
+                        provider_id=provider_id,
+                        task="private_image_vision",
+                        prompt=prompt,
+                        completion=text,
+                        resp=result,
+                        elapsed_ms=int((time.time() - start) * 1000),
+                        success=False,
+                        error=empty_note,
+                        budget_exempt=True,
+                    )
+                    self._mark_private_image_provider_failure(provider_id, provider_source, empty_note, task="private_image_vision")
+                    logger.info(
+                        "[PrivateCompanion] 私聊图片视觉转述返回不可用摘要,已尝试下一个 provider: provider=%s source=%s reason=%s preview=%s",
+                        provider_id,
+                        provider_source,
+                        empty_note,
+                        _single_line(cleaned_text or text, 180),
+                    )
+                    continue
                 intent_line = self._private_image_intent_line(cleaned_text)
                 ownership_line = self._private_image_ownership_line(cleaned_text)
                 self._record_llm_usage(
@@ -1793,6 +2035,13 @@ class PrivateImageMixin:
                     intent_line or "无",
                     ownership_line or "无",
                     _single_line(cleaned_text, 220),
+                )
+                self._note_private_image_visual_provider_success(
+                    provider_id,
+                    provider_source,
+                    umo=umo,
+                    scope=scope,
+                    chars=len(cleaned_text),
                 )
                 self._set_private_image_vision_cache(
                     cache_key,
@@ -2428,12 +2677,26 @@ class PrivateImageMixin:
         stale_markers = (
             "下午我会", "下午陪你", "五点放学", "放学就行", "放学之后",
             "到时候叫我", "到时候喊我", "ちゃんと付き合う", "午後",
+            "路上拍的吗", "路上拍的", "天色不错", "天色还不错", "天色好像还不错",
+            "你走到哪里", "你走到哪儿", "走到哪里啦", "走到哪儿啦",
+            "香草冰激凌", "冰激凌买到了没", "冰淇淋买到了没",
         )
         image_markers = (
             "图", "图片", "画面", "漫画", "这个", "这张", "大腿", "夹头",
             "好笑", "离谱", "表情", "梗", "幽灵", "月亮",
         )
         return any(marker in compact for marker in stale_markers) and any(marker in compact for marker in image_markers)
+
+    def _private_image_no_vision_fallback_reply(self, user_id: str = "") -> str:
+        variants = (
+            "这张我没看清，你要不要直接说想让我看哪里？",
+            "图这边没识出来……你指一下重点我再接着看。",
+            "这张没读出来，先别让我瞎猜。你想看哪块？",
+            "我这边没看清图，给我补一句重点嘛。",
+        )
+        seed = f"{_today_key()}|{user_id}|{int(_now_ts() // 300)}"
+        index = int(hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:8], 16) % len(variants)
+        return variants[index]
 
     def _record_user_recent_group_message_from_observation(
         self,
@@ -2561,34 +2824,36 @@ class PrivateImageMixin:
             answer += "。"
         return answer
 
-    async def _send_private_image_reply_text(self, event: AstrMessageEvent, reply: str) -> None:
+    async def _send_private_image_reply_text(self, event: AstrMessageEvent, reply: str) -> str:
         text = self._normalize_private_image_reply_text(reply)
         if not text:
-            return
+            return ""
         chain = await self._private_image_reply_chain(text, event)
         if not chain:
-            return
+            return ""
         should_segment = (
             bool(getattr(self, "enable_segmented_proactive_reply", False))
             and str(getattr(self, "segmented_proactive_scope", "") or "") == "all_llm"
         )
         outbound_chains = self._private_image_split_reply_chain(chain, should_segment=should_segment)
         if not outbound_chains:
-            return
+            return ""
         if len(outbound_chains) <= 1:
             await self._send_private_image_reply_chain(event, outbound_chains[0])
-            return
+            return self._private_image_chain_text(outbound_chains[0]) or self._private_image_context_assistant_message(text)
         logger.info("[PrivateCompanion] 私聊单图回复按手动链路分段发送: segments=%s", len(outbound_chains))
         remainder_started_at = _now_ts()
         await self._send_private_image_reply_chain(event, outbound_chains[0])
+        first_text = self._private_image_chain_text(outbound_chains[0])
         asyncio.create_task(
             self._send_private_image_reply_remainder_chains(
                 event,
                 outbound_chains[1:],
-                previous_text=self._private_image_chain_text(outbound_chains[0]),
+                previous_text=first_text,
                 started_at=remainder_started_at,
             )
         )
+        return first_text or self._private_image_context_assistant_message(text)
 
     async def _private_image_reply_chain(self, text: str, event: AstrMessageEvent) -> list[Any]:
         normalized = str(text or "").strip()
@@ -2656,10 +2921,11 @@ class PrivateImageMixin:
         *,
         previous_text: str = "",
         started_at: float | None = None,
-    ) -> None:
+    ) -> list[str]:
         prev = previous_text
         total = len([item for item in chains if item])
         sent_index = 0
+        sent_texts: list[str] = []
         scope_getter = getattr(self, "_event_scope_key", None)
         scope = ""
         if callable(scope_getter):
@@ -2692,10 +2958,13 @@ class PrivateImageMixin:
                                     max(0, sent_index - 1),
                                     total,
                                 )
-                                return
+                                return sent_texts
                         except Exception:
                             pass
                     await self._send_private_image_reply_chain(event, chain)
+                    sent_text = self._private_image_chain_text(chain)
+                    if sent_text:
+                        sent_texts.append(sent_text)
                     logger.info(
                         "[PrivateCompanion] 私聊单图剩余片段已发送: index=%s/%s preview=%s",
                         sent_index,
@@ -2711,7 +2980,8 @@ class PrivateImageMixin:
                         _single_line(exc, 160),
                         exc_info=True,
                     )
-                    return
+                    return sent_texts
+        return sent_texts
 
     def _take_buffered_private_image_context_for_event(self, event: AstrMessageEvent) -> dict[str, Any]:
         try:
@@ -2737,6 +3007,210 @@ class PrivateImageMixin:
             "vision_task": buffer.pop("vision_task", None),
             "vision_text": _single_line(buffer.pop("vision_text", ""), image_limit),
         }
+
+    def _private_image_context_user_message(self, *, vision_text: str, image_count: int = 1) -> str:
+        count = max(1, int(image_count or 1))
+        image_label = "一张图片" if count == 1 else f"{count} 张图片"
+        summary = _single_line(vision_text, self._private_image_vision_text_limit(count))
+        if summary:
+            return f"用户发送了{image_label}。图片摘要：{summary}"
+        return f"用户发送了{image_label}，但当前没有获得可靠视觉摘要。"
+
+    def _private_image_context_assistant_message(self, reply: str) -> str:
+        cleaner = getattr(self, "_visible_text_without_tts_reading", None)
+        if callable(cleaner):
+            try:
+                cleaned = str(cleaner(reply, limit=1200) or "").strip()
+            except Exception:
+                cleaned = ""
+        else:
+            cleaned = ""
+        if not cleaned:
+            cleaned = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", str(reply or ""), flags=re.IGNORECASE).strip()
+        return _single_line(cleaned or reply, 1200)
+
+    async def _archive_private_image_turn_to_conversation(
+        self,
+        event: AstrMessageEvent,
+        *,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        umo = _single_line(getattr(event, "unified_msg_origin", ""), 200)
+        if not umo or not user_message or not assistant_message:
+            return
+        conv_mgr = getattr(getattr(self, "context", None), "conversation_manager", None)
+        if conv_mgr is None:
+            return
+        ensure_conv = getattr(self, "_ensure_conversation_id_for_umo", None)
+        db_operation = getattr(self, "_conversation_db_operation", None)
+        for attempt in range(4):
+            try:
+                user_msg_obj = UserMessageSegment(content=str(user_message or ""))
+                assistant_msg_obj = AssistantMessageSegment(content=str(assistant_message or ""))
+
+                async def _write() -> bool:
+                    if callable(ensure_conv):
+                        conv_id = await ensure_conv(umo, title="Private Companion 图片对话")
+                    else:
+                        conv_id = await conv_mgr.get_curr_conversation_id(umo)
+                        if not conv_id:
+                            try:
+                                conv_id = await conv_mgr.new_conversation(umo, title="Private Companion 图片对话")
+                            except TypeError:
+                                conv_id = await conv_mgr.new_conversation(umo)
+                    if not conv_id:
+                        return False
+                    await conv_mgr.add_message_pair(
+                        cid=conv_id,
+                        user_message=user_msg_obj,
+                        assistant_message=assistant_msg_obj,
+                    )
+                    return True
+
+                written = await db_operation("archive_private_image_turn", _write) if callable(db_operation) else await _write()
+                if written:
+                    logger.info("[PrivateCompanion] 已将私聊图片回复写入 AstrBot 会话历史: %s", umo)
+                else:
+                    logger.warning("[PrivateCompanion] 私聊图片回复写入会话历史失败: 无法获取或创建 AstrBot 会话 history umo=%s", umo)
+                return
+            except Exception as exc:
+                text = str(exc or "").lower()
+                if ("database is locked" in text or "sqlite3.operationalerror" in text) and attempt < 3:
+                    await asyncio.sleep(0.25 * (attempt + 1))
+                    continue
+                logger.warning("[PrivateCompanion] 私聊图片回复写入会话历史失败: %s", _single_line(exc, 160))
+                return
+
+    async def _memory_companion_record_private_image_visible_turn(
+        self,
+        event: AstrMessageEvent,
+        *,
+        user_id: str,
+        user_message: str,
+        assistant_message: str,
+        vision_text: str = "",
+        image_count: int = 1,
+    ) -> None:
+        bridge_getter = getattr(self, "_memory_companion_bridge", None)
+        try:
+            bridge = bridge_getter() if callable(bridge_getter) else None
+        except Exception as exc:
+            optional_failed = getattr(self, "_memory_companion_optional_dependency_failed", None)
+            if callable(optional_failed) and optional_failed(exc, where="private_image_visible_turn_bridge"):
+                return
+            logger.debug("[PrivateCompanion] MemoryCompanion 桥接读取失败，跳过私聊图片可见上下文写入: %s", _single_line(exc, 120))
+            return
+        recorder = getattr(bridge, "record_visible_turn", None) if bridge is not None else None
+        if not callable(recorder) or not user_message or not assistant_message:
+            return
+        session_id = _single_line(getattr(event, "unified_msg_origin", ""), 200)
+        if not session_id:
+            return
+        platform = session_id.split(":", 1)[0] if ":" in session_id else ""
+        user_name = ""
+        try:
+            user_name = _single_line(self._sender_display_name(event), 80)
+        except Exception:
+            user_name = _single_line(user_id, 80)
+        turn_id = uuid.uuid4().hex
+        summary = _single_line(vision_text, self._private_image_vision_text_limit(image_count))
+        base_metadata = {
+            "source": "private_companion_private_image_turn",
+            "image_count": max(1, int(image_count or 1)),
+            "summary": summary,
+            "conversation_turn": "private_image",
+        }
+        try:
+            await recorder(
+                role="user",
+                content=user_message,
+                scope="private",
+                session_id=session_id,
+                platform=platform,
+                user_id=str(user_id or ""),
+                user_name=user_name,
+                message_id=f"private_companion_image_turn_{turn_id}_user",
+                source="private_companion_private_image_turn",
+                metadata={**base_metadata, "turn_role": "user"},
+            )
+            await recorder(
+                role="assistant",
+                content=assistant_message,
+                scope="private",
+                session_id=session_id,
+                platform=platform,
+                user_id=str(user_id or ""),
+                user_name=user_name,
+                message_id=f"private_companion_image_turn_{turn_id}_assistant",
+                source="private_companion_private_image_turn",
+                metadata={**base_metadata, "turn_role": "assistant"},
+            )
+            logger.info("[PrivateCompanion] 已将私聊图片回复同步为 MemoryCompanion 可见上下文: session=%s", session_id)
+        except Exception as exc:
+            optional_failed = getattr(self, "_memory_companion_optional_dependency_failed", None)
+            if callable(optional_failed) and optional_failed(exc, where="record_private_image_visible_turn"):
+                return
+            logger.debug("[PrivateCompanion] MemoryCompanion 私聊图片可见上下文写入失败: %s", _single_line(exc, 120))
+
+    async def _archive_private_image_turn_context(
+        self,
+        event: AstrMessageEvent,
+        *,
+        user_id: str,
+        vision_text: str,
+        reply: str,
+        image_count: int = 1,
+    ) -> None:
+        assistant_message = self._private_image_context_assistant_message(reply)
+        if not assistant_message:
+            return
+        user_message = self._private_image_context_user_message(vision_text=vision_text, image_count=image_count)
+        await self._archive_private_image_turn_to_conversation(
+            event,
+            user_message=user_message,
+            assistant_message=assistant_message,
+        )
+        await self._memory_companion_record_private_image_visible_turn(
+            event,
+            user_id=user_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            vision_text=vision_text,
+            image_count=image_count,
+        )
+
+    async def _record_private_image_vision_feedback_target(
+        self,
+        *,
+        user_id: str,
+        image_sources: list[str],
+        vision_text: str,
+        reply: str,
+        ownership: str = "",
+        intent: str = "",
+    ) -> None:
+        raw_sources = [str(item) for item in image_sources[:5] if str(item or "").strip()]
+        image_keys = self._private_image_cache_image_keys(raw_sources)
+        if not image_keys:
+            return
+        image_aliases = self._private_image_cache_aliases_for_sources(raw_sources)
+        image_limit = self._private_image_vision_text_limit(len(raw_sources))
+        try:
+            async with self._data_lock:
+                user = self._get_user(user_id)
+                user["last_private_image_vision_feedback_target"] = {
+                    "ts": _now_ts(),
+                    "image_keys": image_keys,
+                    "image_aliases": image_aliases,
+                    "vision_text": _single_line(vision_text, image_limit),
+                    "reply": _single_line(reply, 300),
+                    "ownership": _single_line(ownership, 120),
+                    "intent": _single_line(intent, 160),
+                }
+                self._save_data_sync()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 私聊图片视觉反馈目标记录失败: %s", exc)
 
     async def _send_delayed_private_image_only_event(
         self,
@@ -2779,7 +3253,11 @@ class PrivateImageMixin:
                 "图片内容已在系统提示的【本轮延迟图片】视觉摘要中给出；请直接回应那张图,不要说没看到图片。"
                 "本轮只回应当前图片和用户发图可能表达的态度/梗/疑问；聊天历史只作语气背景,不要续写、答应或安排旧话题。"
                 if vision_text
-                else "用户刚刚只发了一张图片,没有补充文字。"
+                else (
+                    "用户刚刚只发了一张图片,没有补充文字；但当前没有可靠视觉摘要。"
+                    "不要描述图片内容、场景、天气、人物、表情或文字，也不要根据聊天历史猜图。"
+                    "请只用一句自然短回复说明这边没看清/没识别出来，并请用户补一句想让你看哪里。"
+                )
             )
         logger.info(
             "[PrivateCompanion] 私聊单图准备进入主链: user=%s images=%s has_vision=%s intent=%s ownership=%s objective=%s vision_preview=%s",
@@ -2875,6 +3353,39 @@ class PrivateImageMixin:
                     ownership_line = self._private_image_ownership_line(vision_text)
                     intent_line = self._private_image_intent_line(vision_text)
                     reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
+            if not vision_text and not direct_image_mode:
+                reply = self._private_image_no_vision_fallback_reply(user_id)
+                logger.info(
+                    "[PrivateCompanion] 私聊单图无可靠视觉摘要,跳过主链防止旧上下文猜图: user=%s images=%s reply_preview=%s",
+                    user_id,
+                    len(images),
+                    _single_line(reply, 180),
+                )
+                self._record_llm_usage(
+                    provider_id="framework",
+                    task="private_image_only_framework",
+                    prompt=prompt,
+                    completion=reply,
+                    elapsed_ms=0,
+                    success=True,
+                    budget_exempt=True,
+                )
+                await self._record_private_image_vision_feedback_target(
+                    user_id=user_id,
+                    image_sources=raw_image_sources,
+                    vision_text="",
+                    reply=reply,
+                )
+                sent_reply = await self._send_private_image_reply_text(event, reply)
+                if sent_reply:
+                    await self._archive_private_image_turn_context(
+                        event,
+                        user_id=user_id,
+                        vision_text="",
+                        reply=sent_reply,
+                        image_count=len(images),
+                    )
+                return
             if has_dynamic_gif_sources and request_image_refs:
                 logger.info(
                     "[PrivateCompanion] 私聊单图检测到动态 GIF,已改用抽帧视觉摘要链路: user=%s has_vision=%s",
@@ -2907,9 +3418,16 @@ class PrivateImageMixin:
             if direct_image_mode:
                 req.image_urls = list(request_image_refs)
             await self.inject_humanized_state(framework_event, req)
+            boundary_intro = (
+                "用户当前只发了一张图片,没有文字补充；但当前没有可靠视觉摘要,本轮也没有把图片直接交给主模型。"
+                "你不能看见图片内容,不要猜测画面、天气、地点、人物、表情、截图文字或图片类型。"
+                "只允许短句请用户补一句想让你看哪里。\n"
+                if not vision_text and not direct_image_mode
+                else "用户当前只发了一张图片,没有文字补充。你的当前任务是回应这张图片本身和用户借图表达的态度/梗/疑问。\n"
+            )
             boundary_prompt = (
                 "【本轮图片回复边界】\n"
-                "用户当前只发了一张图片,没有文字补充。你的当前任务是回应这张图片本身和用户借图表达的态度/梗/疑问。\n"
+                f"{boundary_intro}"
                 "不要把聊天历史、长期记忆、主动消息、旧 TTS 文本或压缩摘要里的邀约当成当前输入；"
                 "不要顺便提下午、五点、放学、出去走走、陪你、到时候叫我等旧约定。"
             )
@@ -3077,6 +3595,14 @@ class PrivateImageMixin:
                         _single_line(reply, 180),
                     )
                     reply = ""
+            if reply and not vision_text and not direct_image_mode:
+                logger.info(
+                    "[PrivateCompanion] 私聊单图无可靠视觉摘要,已丢弃主链看图式回复以避免猜图: user=%s reply_preview=%s",
+                    user_id,
+                    _single_line(reply, 180),
+                )
+                reply = ""
+                reply_source = "no_vision_guard_fallback"
             if reply:
                 logger.info(
                     "[PrivateCompanion] 私聊单图主链回复生成: user=%s chars=%s intent=%s ownership=%s reply_preview=%s",
@@ -3103,37 +3629,44 @@ class PrivateImageMixin:
                     ownership_line = self._private_image_ownership_line(vision_text)
                     intent_line = self._private_image_intent_line(vision_text)
                     reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
-                fallback_prompt = (
-                    "用户只发了一张图片。请用当前私聊人格短句回应，不要提模型、插件、视觉转述或路径。\n"
-                    f"{self._private_image_identity_disambiguation_instruction()}\n"
-                    f"{reply_objective}\n"
-                    f"图片内容摘要：{vision_text}"
-                    if vision_text
-                    else "用户只发了一张图片，但当前没有可靠图片内容。请自然回复一句，不要编造画面，可以让用户补一句想看哪里。"
-                )
-                fallback_reply = await self._llm_call(
-                    fallback_prompt,
-                    max_tokens=160,
-                    task="private_image_only_fallback",
-                )
-                reply = _single_line(_strip_internal_message_blocks(fallback_reply or ""), 500)
-                if reply and self._private_image_reply_is_internal_error(reply):
-                    logger.warning(
-                        "[PrivateCompanion] 私聊单图兜底 LLM 返回内部错误文本,已丢弃: user=%s preview=%s",
+                if not vision_text:
+                    reply = self._private_image_no_vision_fallback_reply(user_id)
+                    reply_source = "no_vision_guard_fallback"
+                    logger.info(
+                        "[PrivateCompanion] 私聊单图无可靠视觉摘要,已使用不猜图兜底回复: user=%s reply_preview=%s",
                         user_id,
                         _single_line(reply, 180),
                     )
-                    reply = ""
-                reply_source = "fallback_llm"
-                logger.info(
-                    "[PrivateCompanion] 私聊单图兜底回复生成: user=%s chars=%s intent=%s ownership=%s objective=%s reply_preview=%s",
-                    user_id,
-                    len(reply),
-                    intent_line or "无",
-                    ownership_line or "无",
-                    _single_line(reply_objective, 120),
-                    _single_line(reply, 180),
-                )
+                else:
+                    fallback_prompt = (
+                        "用户只发了一张图片。请用当前私聊人格短句回应，不要提模型、插件、视觉转述或路径。\n"
+                        f"{self._private_image_identity_disambiguation_instruction()}\n"
+                        f"{reply_objective}\n"
+                        f"图片内容摘要：{vision_text}"
+                    )
+                    fallback_reply = await self._llm_call(
+                        fallback_prompt,
+                        max_tokens=160,
+                        task="private_image_only_fallback",
+                    )
+                    reply = _single_line(_strip_internal_message_blocks(fallback_reply or ""), 500)
+                    if reply and self._private_image_reply_is_internal_error(reply):
+                        logger.warning(
+                            "[PrivateCompanion] 私聊单图兜底 LLM 返回内部错误文本,已丢弃: user=%s preview=%s",
+                            user_id,
+                            _single_line(reply, 180),
+                        )
+                        reply = ""
+                    reply_source = "fallback_llm"
+                    logger.info(
+                        "[PrivateCompanion] 私聊单图兜底回复生成: user=%s chars=%s intent=%s ownership=%s objective=%s reply_preview=%s",
+                        user_id,
+                        len(reply),
+                        intent_line or "无",
+                        ownership_line or "无",
+                        _single_line(reply_objective, 120),
+                        _single_line(reply, 180),
+                    )
                 if not reply:
                     logger.warning(
                         "[PrivateCompanion] 私聊单图原生链路与兜底 LLM 均未生成有效回复,不启用本地静态兜底: user=%s images=%s has_vision=%s",
@@ -3152,7 +3685,7 @@ class PrivateImageMixin:
                         budget_exempt=True,
                     )
                     return
-                logger.warning("[PrivateCompanion] 私聊单图原生链路回复为空,已使用兜底 LLM 回复: user=%s images=%s", user_id, len(images))
+                logger.info("[PrivateCompanion] 私聊单图原生链路回复为空,已使用兜底 LLM 回复: user=%s images=%s", user_id, len(images))
             self._record_llm_usage(
                 provider_id="framework",
                 task="private_image_only_framework",
@@ -3163,25 +3696,23 @@ class PrivateImageMixin:
                 resp=llm_resp,
                 budget_exempt=True,
             )
-            await self._send_private_image_reply_text(event, reply)
-            image_keys = self._private_image_cache_image_keys([str(item) for item in images[:5] if str(item or "").strip()])
-            image_aliases = self._private_image_cache_aliases_for_sources([str(item) for item in images[:5] if str(item or "").strip()])
-            if image_keys:
-                try:
-                    async with self._data_lock:
-                        user = self._get_user(user_id)
-                        user["last_private_image_vision_feedback_target"] = {
-                            "ts": _now_ts(),
-                            "image_keys": image_keys,
-                            "image_aliases": image_aliases,
-                            "vision_text": _single_line(vision_text, image_limit),
-                            "reply": _single_line(reply, 300),
-                            "ownership": ownership_line,
-                            "intent": intent_line,
-                        }
-                        self._save_data_sync()
-                except Exception as exc:
-                    logger.debug("[PrivateCompanion] 私聊图片视觉反馈目标记录失败: %s", exc)
+            await self._record_private_image_vision_feedback_target(
+                user_id=user_id,
+                image_sources=raw_image_sources,
+                vision_text=vision_text,
+                reply=reply,
+                ownership=ownership_line,
+                intent=intent_line,
+            )
+            sent_reply = await self._send_private_image_reply_text(event, reply)
+            if sent_reply:
+                await self._archive_private_image_turn_context(
+                    event,
+                    user_id=user_id,
+                    vision_text=vision_text,
+                    reply=sent_reply,
+                    image_count=len(images),
+                )
             if reply_source == "main_chain":
                 logger.info("[PrivateCompanion] 私聊单图无补充说明,已由原生 LLM 链路回复: user=%s images=%s", user_id, len(images))
             else:

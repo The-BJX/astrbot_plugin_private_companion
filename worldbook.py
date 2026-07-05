@@ -1277,6 +1277,8 @@ class WorldbookMixin:
                 break
             if recent_id in selected:
                 continue
+            if self._is_target_private_user(recent_id, profiles.get(recent_id) if isinstance(profiles.get(recent_id), dict) else None):
+                continue
             profile = profiles.get(recent_id)
             if isinstance(profile, dict) and profile.get("enabled", True):
                 selected[recent_id] = self._worldbook_profile_view(
