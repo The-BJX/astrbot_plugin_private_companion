@@ -2255,7 +2255,11 @@ class GroupObservationMixin:
         if group.get("interject_day") != today:
             group["interject_day"] = today
             group["interject_today"] = 0
-        if _safe_int(group.get("interject_today"), 0, 0) >= max_daily:
+        limit_unlimited = getattr(self, "_proactive_daily_limit_is_unlimited", None)
+        if (
+            not (callable(limit_unlimited) and limit_unlimited(max_daily))
+            and _safe_int(group.get("interject_today"), 0, 0) >= max_daily
+        ):
             return False, "今日群聊插话已达上限"
         if _now_ts() - _safe_float(group.get("last_interject_at"), 0) < min_interval * 60:
             return False, "群聊插话间隔太近"
@@ -2542,7 +2546,11 @@ class GroupObservationMixin:
         max_daily = max_daily_getter() if callable(max_daily_getter) else self.group_interject_max_daily
         if max_daily <= 0:
             return {}
-        if _safe_int(group.get("interject_today"), 0, 0) >= max_daily:
+        limit_unlimited = getattr(self, "_proactive_daily_limit_is_unlimited", None)
+        if (
+            not (callable(limit_unlimited) and limit_unlimited(max_daily))
+            and _safe_int(group.get("interject_today"), 0, 0) >= max_daily
+        ):
             return {}
         follow_probability = min(0.85, _safe_float(state.get("follow_probability"), self.group_repeat_follow_probability))
         interrupt_probability = min(0.85, _safe_float(state.get("interrupt_probability"), self.group_repeat_interrupt_probability))
