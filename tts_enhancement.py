@@ -24,7 +24,7 @@ except ImportError:
 from astrbot.core import file_token_service
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .helpers import _normalize_outbound_punctuation_flow, _safe_int, _single_line
+from .helpers import _normalize_outbound_punctuation_flow, _safe_int, _single_line, _strip_nonstandard_chat_control_tags
 
 
 TTS_BLOCK_PATTERN = re.compile(r"<t{2,}s\b[^>]*>.*?</t{2,}s>", re.IGNORECASE | re.DOTALL)
@@ -426,6 +426,7 @@ class TtsEnhancementMixin:
         source = str(text or "")
         if not source:
             return ""
+        source = _strip_nonstandard_chat_control_tags(source)
         source = PRIVATE_TTS_BLOCK_TOKEN_PATTERN.sub("", source)
         source = TTS_BLOCK_TOKEN_PATTERN.sub("", source)
         source = re.sub(r"(?:^|[\s\r\n])([。！？!?，,、；;：:~～…]+)(?=\s|$)", " ", source)
@@ -1334,11 +1335,16 @@ TTS 朗读文本：
                 cleaned_chain.append(comp)
                 continue
             original = str(getattr(comp, "text", "") or "")
-            if not re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", original, flags=re.IGNORECASE):
-                cleaned_chain.append(comp)
+            cleaned_control = _strip_nonstandard_chat_control_tags(original)
+            has_tts_markup = re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", cleaned_control, flags=re.IGNORECASE)
+            if not has_tts_markup:
+                if cleaned_control != original:
+                    changed = True
+                if cleaned_control:
+                    cleaned_chain.append(Plain(cleaned_control) if cleaned_control != original else comp)
                 continue
             changed = True
-            normalized = self._normalize_tts_tags(original)
+            normalized = self._normalize_tts_tags(cleaned_control)
             fallback_text = self._tts_visible_fallback_text(normalized) or self._strip_any_tts_markup(normalized)
             fallback_text = self._sanitize_tts_visible_text(fallback_text)
             if fallback_text:

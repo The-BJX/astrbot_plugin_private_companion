@@ -104,7 +104,16 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import (
+    _date_key,
+    _now_ts,
+    _safe_float,
+    _safe_int,
+    _single_line,
+    _strip_internal_message_blocks,
+    _strip_nonstandard_chat_control_tags,
+    _today_key,
+)
 from .config_migration import _ensure_config_parent_dir
 from .storage.store_manager import StoreManager
 from .planning import (
@@ -468,11 +477,40 @@ class CoreStoreMixin:
         if detail:
             item["last_hit_detail" if hit else "last_miss_detail"] = _single_line(detail, 160)
 
+    def _sanitize_store_control_tags_inplace(self, value: Any) -> int:
+        """Remove leaked pseudo-control tags from persisted companion data."""
+        changed = 0
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                if isinstance(item, str):
+                    cleaned = _strip_nonstandard_chat_control_tags(item)
+                    if cleaned != item:
+                        value[key] = cleaned
+                        changed += 1
+                elif isinstance(item, (dict, list)):
+                    changed += self._sanitize_store_control_tags_inplace(item)
+            return changed
+        if isinstance(value, list):
+            for idx, item in enumerate(list(value)):
+                if isinstance(item, str):
+                    cleaned = _strip_nonstandard_chat_control_tags(item)
+                    if cleaned != item:
+                        value[idx] = cleaned
+                        changed += 1
+                elif isinstance(item, (dict, list)):
+                    changed += self._sanitize_store_control_tags_inplace(item)
+            return changed
+        return 0
+
     def _load_data_sync(self) -> dict[str, Any]:
         manager = getattr(self, "store_manager", None)
         if manager is not None:
             try:
-                return manager.load_initial_store()
+                data = manager.load_initial_store()
+                changed = self._sanitize_store_control_tags_inplace(data)
+                if changed:
+                    logger.warning("[PrivateCompanion] 启动读取数据时清理非标准控制标签: fields=%s", changed)
+                return data
             except Exception as exc:
                 logger.warning("[PrivateCompanion] StoreManager 读取失败,回退 JSON: %s", _single_line(exc, 160))
         if not os.path.exists(self.data_file):
@@ -482,12 +520,19 @@ class CoreStoreMixin:
                 data = json.load(f)
             if not isinstance(data, dict):
                 return self._new_store()
-            return self._ensure_store_defaults(data)
+            data = self._ensure_store_defaults(data)
+            changed = self._sanitize_store_control_tags_inplace(data)
+            if changed:
+                logger.warning("[PrivateCompanion] 启动读取 JSON 时清理非标准控制标签: fields=%s", changed)
+            return data
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 读取数据失败,将使用空数据: {e}")
             return self._new_store()
 
     def _save_data_sync(self):
+        changed = self._sanitize_store_control_tags_inplace(self.data)
+        if changed:
+            logger.warning("[PrivateCompanion] 保存数据前清理非标准控制标签: fields=%s", changed)
         manager = getattr(self, "store_manager", None)
         if manager is not None:
             manager.save_store(self.data)
@@ -514,6 +559,9 @@ class CoreStoreMixin:
         self._atomic_write_data_file_sync(self.data)
 
     def _write_data_snapshot_sync(self, data: dict[str, Any]) -> None:
+        changed = self._sanitize_store_control_tags_inplace(data)
+        if changed:
+            logger.warning("[PrivateCompanion] 保存快照前清理非标准控制标签: fields=%s", changed)
         manager = getattr(self, "store_manager", None)
         if manager is not None:
             manager.save_snapshot(data)

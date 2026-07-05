@@ -3334,6 +3334,40 @@ class NewsExplorationMixin:
     def _custom_web_exploration_search_configured(self) -> bool:
         return bool(self._normalize_web_exploration_api_base_url(getattr(self, "web_exploration_api_base_url", "")))
 
+    def _custom_web_exploration_get_url(self, base_url: str, query: str, *, topic: str = "general", model: str = "") -> str:
+        cleaned_query = _single_line(query, 240)
+        if not base_url or not cleaned_query:
+            return ""
+        max_results = str(max(1, min(20, self.web_exploration_max_results)))
+        values = {
+            "query": cleaned_query,
+            "q": cleaned_query,
+            "keyword": cleaned_query,
+            "keywords": cleaned_query,
+            "wd": cleaned_query,
+            "text": cleaned_query,
+            "topic": "news" if topic == "news" else "general",
+            "max_results": max_results,
+            "limit": max_results,
+            "count": max_results,
+            "model": str(model or "").strip(),
+        }
+        formatted = base_url
+        replaced = False
+        for key, value in values.items():
+            encoded = quote(str(value), safe="")
+            for token in (f"{{{{{key}}}}}", f"{{{key}}}", f"${{{key}}}"):
+                if token in formatted:
+                    formatted = formatted.replace(token, encoded)
+                    replaced = True
+        if replaced:
+            return formatted
+        if formatted.endswith(("?", "&")):
+            return f"{formatted}query={quote(cleaned_query, safe='')}"
+        if re.search(r"[?&][^=&?#]+=$", formatted):
+            return f"{formatted}{quote(cleaned_query, safe='')}"
+        return ""
+
     def _web_exploration_search_available(self) -> bool:
         return self._custom_web_exploration_search_configured() or self._astrbot_any_web_search_available()
 
@@ -3560,13 +3594,15 @@ class NewsExplorationMixin:
 
         headers = {
             "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
             "User-Agent": f"{PLUGIN_NAME}/web-exploration",
         }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         lower_url = base_url.lower()
-        if "/chat/completions" in lower_url:
+        get_url = self._custom_web_exploration_get_url(base_url, cleaned_query, topic=topic, model=model)
+        if get_url:
+            payload = None
+        elif "/chat/completions" in lower_url:
             payload: dict[str, Any] = {
                 "messages": [
                     {
@@ -3595,7 +3631,12 @@ class NewsExplorationMixin:
 
             timeout = aiohttp.ClientTimeout(total=20)
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.post(base_url, json=payload) as resp:
+                if get_url:
+                    resp_ctx = session.get(get_url)
+                else:
+                    post_headers = {"Content-Type": "application/json"}
+                    resp_ctx = session.post(base_url, headers=post_headers, json=payload)
+                async with resp_ctx as resp:
                     body_text = await resp.text()
                     if resp.status >= 400:
                         raise RuntimeError(f"HTTP {resp.status}: {_single_line(body_text, 180)}")
@@ -3603,8 +3644,15 @@ class NewsExplorationMixin:
                         raw_payload: Any = json.loads(body_text)
                     except Exception:
                         raw_payload = body_text
+        except asyncio.TimeoutError as exc:
+            detail = "请求超时"
+            self._last_web_search_error = f"custom_web_exploration:{detail}"
+            self._mark_web_search_cooldown("custom_web_exploration", detail)
+            logger.warning("[PrivateCompanion] 自定义主动搜索失败: query=%s err=%s", cleaned_query, detail)
+            return []
         except Exception as exc:
-            self._last_web_search_error = f"custom_web_exploration:{_single_line(exc, 220)}"
+            detail = _single_line(exc, 220) or exc.__class__.__name__
+            self._last_web_search_error = f"custom_web_exploration:{detail}"
             self._mark_web_search_cooldown("custom_web_exploration", exc)
             logger.warning("[PrivateCompanion] 自定义主动搜索失败: query=%s err=%s", cleaned_query, exc)
             return []

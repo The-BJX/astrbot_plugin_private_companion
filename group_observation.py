@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 GroupObservationMixin — 从 main.py 重新拆分出的群聊观察
 """
@@ -2606,7 +2606,7 @@ class GroupObservationMixin:
                     timeout_seconds=1.2,
                 )
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 群聊插话 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                logger.debug("[PrivateCompanion] 群聊插话 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你在一个群聊里,系统认为现在也许可以非常轻地接一句,但你必须先判断这句会不会显得硬插话。
 只输出要发到群里的正文,不要解释。
@@ -2614,7 +2614,7 @@ class GroupObservationMixin:
 【主动插话判断上下文】
 {self._format_group_context_for_prompt(group)}
 
-【RememberYou 群聊场合参考】
+【我会牢牢记住你 群聊场合参考】
 {memory_context or '暂无可用长期参考。'}
 使用方式：只用于判断这个群、这些人和这个话题是否适合接话；不要在回复里提到记忆来源。
 

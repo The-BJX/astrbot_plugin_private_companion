@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import base64
@@ -822,6 +822,7 @@ class PrivateCompanionPlugin(
         self.external_image_api_model = self._cfg_str(c, "EXTERNAL_IMAGE_API_MODEL", "")
         self.external_image_api_size = self._cfg_str(c, "external_image_api_size", "1024x1024", "1024x1024")
         self.external_image_api_timeout_seconds = self._cfg_int(c, "external_image_api_timeout_seconds", 180, 20, 600)
+        self.external_image_api_custom_headers = self._cfg_str(c, "external_image_api_custom_headers", "")
         self.enable_backup_external_image_api = self._cfg_bool(c, "enable_backup_external_image_api", False)
         self.backup_external_image_api_platform = self._normalize_external_image_api_platform(
             self._cfg_str(c, "backup_external_image_api_platform", "auto", "auto")
@@ -831,6 +832,7 @@ class PrivateCompanionPlugin(
         self.backup_external_image_api_model = self._cfg_str(c, "BACKUP_EXTERNAL_IMAGE_API_MODEL", "")
         self.backup_external_image_api_size = self._cfg_str(c, "backup_external_image_api_size", "1024x1024", "1024x1024")
         self.backup_external_image_api_timeout_seconds = self._cfg_int(c, "backup_external_image_api_timeout_seconds", 180, 20, 600)
+        self.backup_external_image_api_custom_headers = self._cfg_str(c, "backup_external_image_api_custom_headers", "")
         self.photo_generation_style = self._cfg_str(c, "photo_generation_style", "真实", "真实")
         self.photo_generation_style_custom_prompt = self._cfg_str(c, "photo_generation_style_custom_prompt", "")
         self.photo_generation_fixed_prompt = self._cfg_str(c, "photo_generation_fixed_prompt", "")
@@ -6027,6 +6029,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         short_reaction_context = self._format_short_reaction_context_for_prompt(current_user, inbound_text)
         if short_reaction_context:
             prompt_surface.add("turn.short_reaction", short_reaction_context, priority=48, source="conversation")
+        reply_chain_context_getter = getattr(self, "_format_reply_chain_context_for_prompt", None)
+        if callable(reply_chain_context_getter) and not bool(getattr(event, "private_companion_reply_chain_context_injected", False)):
+            try:
+                reply_chain_context = await reply_chain_context_getter(event)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 引用链上下文读取失败: %s", _single_line(exc, 120))
+                reply_chain_context = ""
+            if reply_chain_context:
+                prompt_surface.add("reply.chain", reply_chain_context, priority=54, source="forward_message")
         private_image_enhancement_enabled_for_request = self._feature_enabled_or_temp_unlocked(
             "enable_private_image_self_recognition"
         )
@@ -6150,11 +6161,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                 except Exception as exc:
                     current_state_memory = ""
-                    logger.debug("[PrivateCompanion] 当前状态 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                    logger.debug("[PrivateCompanion] 当前状态 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
                 if current_state_memory:
                     prompt_surface.add(
                         "memory.current_state",
-                        "【RememberYou 当前状态参考】\n"
+                        "【我会牢牢记住你 当前状态参考】\n"
                         f"{current_state_memory}\n"
                         "使用方式：只把它当作回答当前状态、穿搭、吃饭、日程连续性的辅助证据；"
                         "优先服从本轮状态注入和明确时间线。不要说“我查到/记忆里”。",

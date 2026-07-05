@@ -279,6 +279,7 @@ _PROMPT_MODULE_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "group.context": ("群聊上下文", "群聊回复时补充群氛围、当前发言者、最近话题和连续补充内容。"),
     "identity.non_target": ("非目标私聊防串", "私聊对象不是主陪伴用户时防止套用专属关系和记忆。"),
     "forward.message": ("合并转发上下文", "合并转发、聊天记录或引用卡片进入回复时注入的阅读内容或转述。"),
+    "reply.chain": ("引用链上下文", "用户引用的消息本身继续引用更早消息时，按层级提供原始被引用内容。"),
 }
 
 _PROMPT_MODULE_PREFIX_DESCRIPTIONS: tuple[tuple[str, tuple[str, str]], ...] = (
@@ -1231,6 +1232,7 @@ class EventDispatchMixin:
         if not text:
             return
         raw_message = str(raw.get("raw_message") or raw.get("message") or "")
+        reply_message_ids = self._event_reply_message_ids(event)
         has_image = "[图片]" in text or "[CQ:image" in raw_message
         if not has_image:
             for comp in self._event_components(event):
@@ -1258,6 +1260,8 @@ class EventDispatchMixin:
             "sender_id": self._event_sender_id(event),
             "sender_name": _single_line(self._sender_display_name(event), 60),
             "text": text,
+            "raw_message": raw.get("message") if raw.get("message") is not None else raw.get("raw_message"),
+            "reply_message_ids": reply_message_ids,
             "images": image_sources,
             "image_items": image_items,
             "image_count": len(image_items),
@@ -1361,6 +1365,18 @@ class EventDispatchMixin:
                 continue
             seen.add(message_id)
             unique.append(message_id)
+        cache = getattr(self, "_recall_message_cache", None)
+        if isinstance(cache, dict):
+            for message_id in list(unique):
+                snapshot = cache.get(message_id)
+                nested_ids = snapshot.get("reply_message_ids") if isinstance(snapshot, dict) else None
+                if not isinstance(nested_ids, list):
+                    continue
+                for nested_id in nested_ids:
+                    nested = _single_line(nested_id, 120)
+                    if nested and nested not in seen:
+                        seen.add(nested)
+                        unique.append(nested)
         return unique
 
     def _event_reply_message_ids(self, event: AstrMessageEvent) -> list[str]:

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 CreativeMixin — 从 main.py 重新拆分出的创作系统
 """
@@ -539,14 +539,14 @@ class CreativeMixin:
                     max_chars=900,
                 )
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 创作立项 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                logger.debug("[PrivateCompanion] 创作立项 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你是一个拟人化 Bot 的私人创作状态生成器。她因为一个生活小事、日记碎片或梦境灵感,突然想开一个自己的创作项目。
 
 【人格与身份】
 {persona_context}
 
-【RememberYou 创作连续性参考】
+【我会牢牢记住你 创作连续性参考】
 {memory_context or '暂无外部长期创作记忆。'}
 使用方式：优先尊重用户长期偏好、已有项目、人工修订和避雷；不要说自己“查了记忆”。
 
@@ -664,7 +664,7 @@ class CreativeMixin:
                     max_chars=850,
                 )
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 创作大纲 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                logger.debug("[PrivateCompanion] 创作大纲 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你在为一个私人创作项目安排本次要写的一小段,先给出简短大纲。
 
@@ -685,7 +685,7 @@ class CreativeMixin:
 {recent_outlines or '暂无'}
 相关记忆：
 {memory_ctx or '暂无相关记忆。'}
-RememberYou 项目参考：
+我会牢牢记住你 项目参考：
 {companion_memory_ctx or '暂无外部项目参考。'}
 
 要求：
@@ -737,7 +737,7 @@ RememberYou 项目参考：
                     max_chars=850,
                 )
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 创作审稿 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                logger.debug("[PrivateCompanion] 创作审稿 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你是一个严格但懂文风的审稿人。检查这段私人创作片段是否满足：贴合人格、推进作品、避免重复。
 
@@ -756,7 +756,7 @@ RememberYou 项目参考：
 {outline or '暂无大纲'}
 最近片段摘要：
 {recent_digest}
-RememberYou 项目参考：
+我会牢牢记住你 项目参考：
 {companion_memory_ctx or '暂无外部项目参考。'}
 
 待审片段：
@@ -812,7 +812,7 @@ RememberYou 项目参考：
                     max_chars=700,
                 )
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 创作抽取 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                logger.debug("[PrivateCompanion] 创作抽取 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 整理一个长期创作项目刚写出的新片段,提取对后续续写最有用的结构化信息。
 
@@ -825,7 +825,7 @@ RememberYou 项目参考：
 {character_ctx or '暂无角色表。'}
 人工修订约束：
 {revision_ctx or '暂无人工修订。'}
-RememberYou 项目参考：
+我会牢牢记住你 项目参考：
 {companion_memory_ctx or '暂无外部项目参考。'}
 新片段：{_single_line(new_chunk_text, 420)}
 
@@ -1108,7 +1108,7 @@ RememberYou 项目参考：
                     max_chars=1000,
                 )
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 创作续写 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                logger.debug("[PrivateCompanion] 创作续写 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
 
         async def _do_generate(extra_notice: str = "") -> str:
             prompt = f"""
@@ -1132,7 +1132,7 @@ RememberYou 项目参考：
 {revision_ctx or '暂无人工修订。'}
 相关记忆：
 {memory_ctx or '暂无。'}
-RememberYou 项目参考：
+我会牢牢记住你 项目参考：
 {companion_memory_ctx or '暂无外部项目参考。'}
 最近片段摘要：
 {recent_digest}

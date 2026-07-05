@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 ProactiveMessageMixin — 主动消息生成、动作执行和发送链路
 """
@@ -1285,7 +1285,7 @@ class ProactiveMessageMixin:
                 prompt = (
                     f"{prompt.rstrip()}\n\n"
                     "<!-- private_companion_memory_generation_context_v1 -->\n"
-                    "【RememberYou 可用记忆】\n"
+                    "【我会牢牢记住你 可用记忆】\n"
                     f"{memory_context}\n"
                     "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
                 )
@@ -4724,7 +4724,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                     max_chars=900,
                 )
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 每日穿搭 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                logger.debug("[PrivateCompanion] 每日穿搭 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt_text = self._build_daily_outfit_photo_prompt(
             diary if isinstance(diary, dict) else {},
             memory_context=memory_context,
@@ -4831,7 +4831,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "穿搭决策：优先服从日程里明确出现的衣服、外套、校服、睡衣、发夹、饰品、出门、上课、运动、雨天或居家线索；如果一天有多段活动,选最能代表白天主要生活/外出安排的一套,不要只按深夜睡前状态生成睡衣。",
             f"补充生活余味：{diary_hint or '暂无额外余味,主要服从今日日程、天气和状态来决定当天搭配。'}",
             (
-                "RememberYou 穿搭连续性参考："
+                "我会牢牢记住你 穿搭连续性参考："
                 f"{_single_line(memory_context, 700)}。使用方式：优先保持今日穿搭、近期自拍、用户常问衣服颜色和当前地点的一致性；不要在最终图片中出现文字说明。"
                 if memory_context
                 else ""
@@ -6014,6 +6014,47 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         prefix = "参考图接口" if reference else ""
         return f"{prefix}HTTP {status}: {_single_line(text, 180)}"
 
+    def _url_same_origin(self, left: str, right: str) -> bool:
+        try:
+            l_parsed = urlparse(str(left or ""))
+            r_parsed = urlparse(str(right or ""))
+        except Exception:
+            return False
+        return bool(
+            l_parsed.scheme
+            and r_parsed.scheme
+            and l_parsed.scheme.lower() == r_parsed.scheme.lower()
+            and l_parsed.netloc.lower() == r_parsed.netloc.lower()
+        )
+
+    def _external_image_download_headers(self, target_url: str) -> tuple[dict[str, str], str]:
+        headers: dict[str, str] = {
+            "User-Agent": "Mozilla/5.0 AstrBot PrivateCompanion/5.0.0",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        api_endpoint = self._external_image_endpoint("generations")
+        api_base = str(getattr(self, "external_image_api_base_url", "") or "").strip()
+        same_origin = self._url_same_origin(target_url, api_endpoint) or self._url_same_origin(target_url, api_base)
+        custom_count = 0
+        auth_sent = False
+        if same_origin:
+            if getattr(self, "external_image_api_key", ""):
+                headers["Authorization"] = f"Bearer {self.external_image_api_key}"
+                auth_sent = True
+            for key, value in self._external_image_custom_headers().items():
+                normalized = str(key or "").strip()
+                if normalized.lower() in {"content-length", "content-type", "host", "connection", "transfer-encoding"}:
+                    continue
+                headers[normalized] = str(value)
+                custom_count += 1
+            if not any(key.lower() == "referer" for key in headers):
+                referer = api_endpoint or api_base
+                if referer:
+                    headers["Referer"] = referer
+        note = f"same_origin={same_origin},auth={auth_sent},custom={custom_count},referer={any(key.lower() == 'referer' for key in headers)}"
+        return headers, note
+
     def _external_image_timeout_note(self, *, reference: bool = False, download: bool = False, label: str = "") -> str:
         timeout_seconds = _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1)
         if label:
@@ -6058,13 +6099,15 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         try:
             import aiohttp
 
+            headers, header_note = self._external_image_download_headers(target)
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(target) as response:
+                async with session.get(target, headers=headers) as response:
                     if response.status >= 400:
                         logger.info(
-                            "[PrivateCompanion] 下载在线生图结果失败: status=%s url=%s",
+                            "[PrivateCompanion] 下载在线生图结果失败: status=%s headers=%s url=%s",
                             response.status,
+                            header_note,
                             _single_line(target, 180),
                         )
                         return "", f"下载图片失败：HTTP {response.status}"

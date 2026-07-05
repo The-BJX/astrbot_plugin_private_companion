@@ -5296,7 +5296,7 @@
         "description": "主动搜索自定义接口地址",
         "type": "string",
         "default": "",
-        "hint": "仅主动搜索联网检索使用；留空则继续使用 AstrBot 全局网页搜索。普通搜索接口应接受 POST JSON：query、topic、max_results、model，并返回 results/items/data/search_results 等列表；OpenAI 兼容 /chat/completions 也可返回 JSON 搜索结果。",
+        "hint": "仅主动搜索联网检索使用；留空则继续使用 AstrBot 全局网页搜索。普通搜索接口可接受 POST JSON：query、topic、max_results、model，并返回 results/items/data/search_results 等列表；也支持 GET 占位或尾插，例如 https://example.com/search?q={query} 或 https://example.com/search?q=。OpenAI 兼容 /chat/completions 也可返回 JSON 搜索结果。",
         "condition": {
           "enable_web_exploration": true
         }

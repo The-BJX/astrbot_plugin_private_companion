@@ -382,7 +382,7 @@ class UserMemoryMixin:
     def _update_expression_profile_from_message(self, user: dict[str, Any], text: str) -> None:
         if not self.enable_expression_learning:
             return
-        cleaned = _single_line(text, self._expression_sample_max_chars())
+        cleaned = _single_line(_strip_internal_message_blocks(text), self._expression_sample_max_chars())
         if not cleaned:
             return
         if self._should_skip_expression_sample(cleaned):
@@ -1876,6 +1876,8 @@ class UserMemoryMixin:
         item = candidates[0][2]
         category = _single_line(item.get("category"), 20)
         topic = _single_line(item.get("topic"), 70)
+        if self._habit_topic_is_greeting_like(topic or category) and self._recent_activity_suppresses_habit_greeting(user, now=now):
+            return None
         bucket = _single_line(item.get("bucket"), 12)
         delay_minutes = random.randint(4, 28)
         return {
@@ -1892,6 +1894,26 @@ class UserMemoryMixin:
             "_scheduled_ts": now + delay_minutes * 60,
             "_habit_awareness": True,
         }
+
+    def _habit_topic_is_greeting_like(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", _single_line(text, 80))
+        if not compact:
+            return False
+        return bool(re.fullmatch(r"(?:早|早安|早上好|上午好|午安|中午好|晚上好|晚安)", compact))
+
+    def _recent_activity_suppresses_habit_greeting(self, user: dict[str, Any], *, now: float) -> bool:
+        recent_at = self._latest_private_user_activity_ts(user)
+        if recent_at <= 0:
+            return False
+        if now - recent_at < max(0, self._effective_user_greeting_idle_minutes(user)) * 60:
+            return True
+        suppressed = user.get("greetings_suppressed_by_inbound", [])
+        if not isinstance(suppressed, list):
+            return False
+        return any(
+            reason in suppressed and self._inbound_satisfies_greeting(reason, now=now)
+            for reason in ("morning_greeting", "noon_greeting", "evening_greeting")
+        )
 
     def _is_structured_or_diagnostic_text(self, text: str) -> bool:
         cleaned = _single_line(text, 260)

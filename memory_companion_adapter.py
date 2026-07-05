@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class MemoryCompanionAdapterMixin:
             module_vars = getattr(module, "__dict__", {}) if module is not None else {}
             if not isinstance(module_vars, dict):
                 continue
-            if module_vars.get("PLUGIN_NAME", "") not in {"astrbot_plugin_memory_companion", "astrbot_plugin_remember_you", "RememberYou"}:
+            if module_vars.get("PLUGIN_NAME", "") not in {"astrbot_plugin_memory_companion", "astrbot_plugin_remember_you", "我会牢牢记住你", "RememberYou"}:
                 continue
             bridge = self._memory_companion_bridge_from_module(module)
             if bridge is not None:

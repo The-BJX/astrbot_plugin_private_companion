@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -1397,7 +1397,7 @@ class QzoneMixin(QzoneMediaMixin):
 
 {author_context}
 
-【RememberYou 公开边界参考】
+【我会牢牢记住你 公开边界参考】
 {memory_context or "暂无"}
 使用方式：只帮助判断公开回复边界和最近生活连续性；不要泄露私聊、记忆来源或内部记录。
 
@@ -1935,7 +1935,7 @@ class QzoneMixin(QzoneMediaMixin):
 【近日私密日记余味】
 {diary_context or "暂无"}
 
-【RememberYou 公开可写生活参考】
+【我会牢牢记住你 公开可写生活参考】
 {memory_context or "暂无"}
 使用方式：只选公开可写、不会泄露私聊或内部记忆来源的生活连续性。
 
@@ -2609,7 +2609,7 @@ class QzoneMixin(QzoneMediaMixin):
 【近日私密日记余味】
 {diary_context or "暂无"}
 
-【RememberYou 公开可写生活参考】
+【我会牢牢记住你 公开可写生活参考】
 {memory_context or "暂无"}
 使用方式：只选公开可写、不会泄露私聊或内部记忆来源的生活连续性。
 

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -631,7 +631,7 @@ class CommandHandlersMixin:
             tags.add("style")
         if any(word in compact for word in ("模型", "provider", "llm", "超时", "timeout", "降级", "无有效json", "无效json")):
             tags.add("model")
-        if any(word in compact for word in ("rememberyou", "rememberyou", "我会牢牢记住你", "记忆插件", "知识图谱", "专属记忆", "未安装")):
+        if any(word in compact for word in ("rememberyou", "remember you", "我会牢牢记住你", "记忆插件", "知识图谱", "专属记忆", "未安装")):
             tags.add("memory")
         if any(word in compact for word in ("在哪", "哪里", "位置", "设置", "配置项", "怎么改", "如何改", "调参")):
             tags.add("location")
@@ -2180,14 +2180,14 @@ class CommandHandlersMixin:
                 ],
             },
             {
-                "title": "RememberYou 联动和未安装兼容",
+                "title": "“我会牢牢记住你”联动和未安装兼容",
                 "keywords": ["rememberyou", "remember you", "我会牢牢记住你", "记忆插件", "专属记忆", "知识图谱", "未安装", "联动", "记忆查询"],
-                "summary": "RememberYou 是可选深度联动，不是陪伴插件硬依赖。安装后，陪伴插件会把日程、穿搭、创作、主动消息、用户习惯等结构化反馈给记忆插件；未安装时，本地关系网、状态和短期上下文仍照常工作。",
+                "summary": "“我会牢牢记住你”是可选深度联动，不是陪伴插件硬依赖。安装后，陪伴插件会把日程、穿搭、创作、主动消息、用户习惯等结构化反馈给记忆插件；未安装时，本地关系网、状态和短期上下文仍照常工作。",
                 "checks": [
-                    "未安装 RememberYou 时，答疑、群聊、主动、状态模拟不会因此直接失效，只是少了长期结构化检索和图谱补充。",
+                    "未安装“我会牢牢记住你”时，答疑、群聊、主动、状态模拟不会因此直接失效，只是少了长期结构化检索和图谱补充。",
                     "安装后，答疑会尝试读取近期排障/配置记忆，但本地运行状态、截图和日志仍优先。",
                     "私聊和群聊记忆边界仍由陪伴插件控制，不会把私聊隐私直接带进群聊。",
-                    "如果联动导致超时，应该看到 RememberYou 读取失败或超时日志；陪伴插件会回退本地上下文。",
+                    "如果联动导致超时，应该看到“我会牢牢记住你”读取失败或超时日志；陪伴插件会回退本地上下文。",
                 ],
                 "settings": [
                     "enable_companion_memory",
@@ -2195,8 +2195,8 @@ class CommandHandlersMixin:
                     "enable_group_privacy_guard",
                 ],
                 "suggestions": [
-                    "想验证联动：先问穿搭、进食、最近主动消息这类明确事实，再看 RememberYou 是否有对应个人记忆。",
-                    "担心 CPU 或超时：保持 RememberYou 为软依赖，不要把它放进每轮必须成功的阻塞链路。",
+                    "想验证联动：先问穿搭、进食、最近主动消息这类明确事实，再看“我会牢牢记住你”是否有对应个人记忆。",
+                    "担心 CPU 或超时：保持“我会牢牢记住你”为软依赖，不要把它放进每轮必须成功的阻塞链路。",
                 ],
             },
             {
@@ -2231,7 +2231,7 @@ class CommandHandlersMixin:
                     "饥饿/胃口：enable_hunger_state。",
                     "生理期：enable_cycle_state，开启就认为适用模拟。",
                     "状态强度：humanized_state_intensity，越高越容易把状态写进提示词和主动候选。",
-                    "如果接入 RememberYou，进食、穿搭、习惯等会尽量以可检索的个人记忆补充，但未安装时插件仍能用本地状态运行。",
+                    "如果接入“我会牢牢记住你”，进食、穿搭、习惯等会尽量以可检索的个人记忆补充，但未安装时插件仍能用本地状态运行。",
                 ],
                 "settings": [
                     "enable_health_state",
@@ -2559,7 +2559,7 @@ class CommandHandlersMixin:
                     timeout_seconds=2.0,
                 )
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 答疑 RememberYou 上下文读取失败: %s", _single_line(exc, 120))
+                logger.debug("[PrivateCompanion] 答疑 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
 你是 AstrBot 陪伴插件当前人格下的答疑助手。用户不是在闲聊,是在问插件功能为什么这样运行。
 
@@ -2592,7 +2592,7 @@ class CommandHandlersMixin:
 【本轮图片/引用图片上下文】
 {media_context or '本轮没有检测到随消息携带或引用的图片。'}
 
-【RememberYou 最近排障/配置记忆】
+【我会牢牢记住你 最近排障/配置记忆】
 {memory_context or '暂无可用的近期记忆。'}
 使用方式：只辅助理解这台实例最近发生过什么；本地运行状态、截图和日志证据优先。不要说“我查记忆发现”。
 
@@ -3199,7 +3199,7 @@ class CommandHandlersMixin:
                 part
                 for part in [
                     base,
-                    f"RememberYou 相关记忆：{_single_line(memory_context, 760)}；使用方式：优先保持今日穿搭、当前地点、最近自拍和用户偏好的一致性。" if memory_context else "",
+                    f"我会牢牢记住你 相关记忆：{_single_line(memory_context, 760)}；使用方式：优先保持今日穿搭、当前地点、最近自拍和用户偏好的一致性。" if memory_context else "",
                     extra_prompt,
                     f"风格：{style_name}；{style_instruction}",
                 ]

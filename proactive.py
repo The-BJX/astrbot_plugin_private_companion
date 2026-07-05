@@ -717,6 +717,10 @@ class ProactiveMixin:
                 "topic": normalized_topic,
                 "motive": normalized_motive,
             }
+        normalized_reason = str(reason or "check_in")
+        unanswered_level = self._friend_unanswered_downgrade_level(user)
+        if unanswered_level >= 1 and self._friend_unanswered_should_remove_action(normalized_action):
+            normalized_action = "message"
         if self._friend_sensitive_proactive_action(normalized_action):
             normalized_action = "message"
         sensitive_markers = (
@@ -726,9 +730,25 @@ class ProactiveMixin:
         combined = f"{normalized_topic} {normalized_motive}"
         has_sensitive_action_text = any(token in combined for token in sensitive_markers)
         has_friend_interaction_text = self._friend_plan_has_private_interaction_text(combined)
+        unanswered_patch = self._friend_unanswered_plan_patch(
+            user,
+            level=unanswered_level,
+            reason=normalized_reason,
+            action=normalized_action,
+            topic=normalized_topic,
+            motive=normalized_motive,
+        )
+        if unanswered_patch:
+            normalized_reason = unanswered_patch["reason"]
+            normalized_action = unanswered_patch["action"]
+            normalized_topic = unanswered_patch["topic"]
+            normalized_motive = unanswered_patch["motive"]
+            combined = f"{normalized_topic} {normalized_motive}"
+            has_sensitive_action_text = any(token in combined for token in sensitive_markers)
+            has_friend_interaction_text = self._friend_plan_has_private_interaction_text(combined)
         if not has_sensitive_action_text and not has_friend_interaction_text:
             return {
-                "reason": str(reason or "check_in"),
+                "reason": normalized_reason,
                 "action": normalized_action,
                 "topic": normalized_topic,
                 "motive": normalized_motive,
@@ -742,7 +762,7 @@ class ProactiveMixin:
                 else "按朋友关系做一次克制的普通文字分享,不写成和朋友用户聊天或约见"
             )
             return {
-                "reason": str(reason or "check_in"),
+                "reason": normalized_reason,
                 "action": normalized_action,
                 "topic": normalized_topic,
                 "motive": normalized_motive,
@@ -758,14 +778,91 @@ class ProactiveMixin:
             normalized_topic = "问一句近况"
         normalized_motive = (
             "作为朋友想起对方可能正忙,只轻轻问一句,不要求立刻回复"
-            if str(reason or "") in {"", "check_in", "quiet_care", "state_share"}
+            if normalized_reason in {"", "check_in", "quiet_care", "state_share"}
             else "按朋友关系顺手补一句,只做普通文字关心,不涉及屏幕观察"
         )
         return {
-            "reason": str(reason or "check_in"),
+            "reason": normalized_reason,
             "action": normalized_action,
             "topic": normalized_topic,
             "motive": normalized_motive,
+        }
+
+    def _friend_unanswered_downgrade_level(self, user: dict[str, Any] | None, *, now: float | None = None) -> int:
+        if not isinstance(user, dict) or self._private_user_role(user) != "friend":
+            return 0
+        level = 0
+        ignored = _safe_int(user.get("ignored_streak"), 0, 0, 20)
+        if ignored >= 3:
+            level = 3
+        elif ignored >= 2:
+            level = 2
+        elif ignored >= 1:
+            level = 1
+        check_now = _now_ts() if now is None else now
+        awaiting_since = _safe_float(user.get("awaiting_reply_since"), 0)
+        if awaiting_since > 0:
+            hours = max(0.0, (check_now - awaiting_since) / 3600.0)
+            if hours >= 24:
+                level = max(level, 3)
+            elif hours >= 10:
+                level = max(level, 2)
+            elif hours >= 4:
+                level = max(level, 1)
+        return level
+
+    @staticmethod
+    def _friend_unanswered_should_remove_action(action: str) -> bool:
+        parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
+        return bool(parts & {"poke", "voice", "photo_text", "screen_peek", "jm_cosmos_read"})
+
+    def _friend_unanswered_plan_patch(
+        self,
+        user: dict[str, Any],
+        *,
+        level: int,
+        reason: str,
+        action: str,
+        topic: str,
+        motive: str,
+    ) -> dict[str, str]:
+        if level <= 0:
+            return {}
+        high_pressure_reasons = {
+            "check_in",
+            "quiet_care",
+            "state_share",
+            "activity_share",
+            "background_schedule",
+            "diary_share",
+            "morning_greeting",
+            "noon_greeting",
+            "evening_greeting",
+            "habit_awareness",
+        }
+        normalized_reason = str(reason or "check_in")
+        normalized_action = "message" if self._friend_unanswered_should_remove_action(action) else (str(action or "message") or "message")
+        if level == 1:
+            if normalized_reason in high_pressure_reasons:
+                normalized_reason = "quiet_care" if normalized_reason in {"check_in", "state_share", "habit_awareness"} else normalized_reason
+            return {
+                "reason": normalized_reason,
+                "action": normalized_action,
+                "topic": _single_line(topic, 80) or "轻一点的近况",
+                "motive": "对方前面还没接话,作为朋友把主动放轻一点；只顺手留一句,不催、不追问、不要求立刻回复",
+            }
+        if level == 2:
+            return {
+                "reason": "quiet_care",
+                "action": "message",
+                "topic": "低压近况",
+                "motive": "对方已经有一阵没有回应,这次只保留一条很短的低压关心；不贴近、不连问、不要求回复",
+            }
+        return {
+            "reason": "quiet_care",
+            "action": "message",
+            "topic": "留出空间",
+            "motive": "连续没有回应时,朋友关系要主动退一步；如果还要发,只放一小句很轻的话,说完就把空间留给对方",
         }
 
     @staticmethod
@@ -2115,4 +2212,3 @@ class ProactiveMixin:
         if nearest_due_in <= 6 * 60:
             return max(20.0, min(base * 0.5, nearest_due_in * random.uniform(0.18, 0.42)))
         return max(35.0, min(base, random.uniform(base * 0.55, base * 0.95)))
-

@@ -115,7 +115,34 @@ def _strip_internal_message_blocks(text: Any) -> str:
     normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = re.sub(r"<tts\b[^>]*>.*?</tts>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
+    normalized = _strip_nonstandard_chat_control_tags(normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+_NONSTANDARD_SELF_CLOSING_TAG_PATTERN = re.compile(
+    r"<\s*(?!(?:br|image|video|audio|tts|pc[_-]?tts|timer)\b)"
+    r"[A-Za-z][A-Za-z0-9_-]{0,31}(?:\s+[^<>\r\n]{0,160})?/\s*>",
+    re.IGNORECASE,
+)
+_ESCAPED_NONSTANDARD_SELF_CLOSING_TAG_PATTERN = re.compile(
+    r"&lt;\s*(?!(?:br|image|video|audio|tts|pc[_-]?tts|timer)\b)"
+    r"[A-Za-z][A-Za-z0-9_-]{0,31}(?:\s+[^&\r\n]{0,160})?/\s*&gt;",
+    re.IGNORECASE,
+)
+
+
+def _strip_nonstandard_chat_control_tags(text: Any) -> str:
+    """Remove leaked pseudo-control tags such as <bubble/> without touching media blocks."""
+    normalized = str(text or "")
+    if not normalized:
+        return ""
+    normalized = _NONSTANDARD_SELF_CLOSING_TAG_PATTERN.sub("", normalized)
+    normalized = _ESCAPED_NONSTANDARD_SELF_CLOSING_TAG_PATTERN.sub("", normalized)
+    normalized = re.sub(r"\s+([，,。！？!?；;：:、~～…])", r"\1", normalized)
+    normalized = re.sub(r"([（(【\[])\s+", r"\1", normalized)
+    normalized = re.sub(r"\s+([）)】\]])", r"\1", normalized)
+    normalized = re.sub(r"[ \t]{2,}", " ", normalized)
     return normalized
 
 
@@ -138,6 +165,7 @@ def _strip_outbound_control_blocks(
     elif not preserve_private_tts_tokens:
         normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
+    normalized = _strip_nonstandard_chat_control_tags(normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
     return normalized
 

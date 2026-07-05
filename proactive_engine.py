@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 ProactiveEngineMixin — 主动行为候选、决策、计划事件与动作选择
 """
@@ -1473,7 +1473,7 @@ class ProactiveEngineMixin:
                 prompt = (
                     f"{prompt.rstrip()}\n\n"
                     "<!-- private_companion_memory_review_context_v1 -->\n"
-                    "【RememberYou 相关记忆】\n"
+                    "【我会牢牢记住你 相关记忆】\n"
                     f"{memory_context}\n"
                     "使用方式：只辅助判断是否适合主动、是否需要改写或延后；不要在理由里暴露检索过程。"
                 )
@@ -2449,6 +2449,12 @@ class ProactiveEngineMixin:
                 if _safe_float(user.get("next_proactive_at"), 0) > now + 1:
                     return False, emotion_note
         if not is_troubleshooting and self._private_user_role(user) == "friend":
+            before_friend_sanitize = (
+                planned_reason,
+                planned_action,
+                _single_line(user.get("planned_proactive_topic"), 80),
+                _single_line(user.get("planned_proactive_motive"), 180),
+            )
             sanitized = self._sanitize_friend_proactive_plan_fields(
                 user,
                 reason=planned_reason,
@@ -2462,6 +2468,22 @@ class ProactiveEngineMixin:
             user["planned_proactive_motive"] = sanitized["motive"]
             planned_reason = sanitized["reason"]
             planned_action = sanitized["action"]
+            after_friend_sanitize = (
+                planned_reason,
+                planned_action,
+                sanitized["topic"],
+                sanitized["motive"],
+            )
+            if after_friend_sanitize != before_friend_sanitize:
+                user["planned_proactive_impulse_id"] = ""
+                user["planned_proactive_semantic_kind"] = ""
+                user["planned_proactive_anchor_type"] = ""
+                user["planned_proactive_semantic_score"] = 0
+                user["planned_proactive_semantic_note"] = ""
+                user["planned_proactive_model_judge_signature"] = ""
+                user["planned_proactive_model_judge_result"] = {}
+                user["planned_proactive_model_judge_at"] = 0
+                self._mark_planned_candidate_status(user, "accepted", "朋友未回应状态下已降级为低压主动")
         if not is_troubleshooting and not self._friend_can_receive_proactive_reason(user, planned_reason, planned_action):
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
@@ -4846,13 +4868,25 @@ class ProactiveEngineMixin:
         if not cleaned:
             return ""
         compact = re.sub(r"\s+", "", cleaned)
+        # Allow a short address before the greeting, e.g. "比折，早……" or "主人早".
+        compact = re.sub(r"^[\u4e00-\u9fffA-Za-z0-9_\-]{1,12}[,，、:：]+", "", compact, count=1)
+        for marker in ("早", "午安", "中午", "晚上", "晚好"):
+            index = compact.find(marker)
+            if 0 < index <= 6:
+                compact = compact[index:]
+                break
         now_dt = self._environment_fromtimestamp(now or _now_ts())
         minute = now_dt.hour * 60 + now_dt.minute
-        if re.match(r"^(?:早呀|早啊|早安|早上好|早哇|早哦|早欸|早诶|早[，,。.!！~～])", compact):
+        if compact == "早" or (
+            compact.startswith("早")
+            and (
+                compact[1:2] in {"", ".", "。", "…", "·", "~", "～", "!", "！", ",", "，", "、", "呀", "啊", "安", "上", "哇", "哦", "欸", "诶"}
+            )
+        ):
             return "morning_greeting"
-        if re.match(r"^(?:午安|中午好|午好|中午[，,。.!！~～])", compact):
+        if compact.startswith(("午安", "中午好", "午好")) or (compact.startswith("中午") and compact[2:3] in {"，", ",", "。", ".", "!", "！", "~", "～"}):
             return "noon_greeting"
-        if re.match(r"^(?:晚上好|晚好|晚上[，,。.!！~～])", compact):
+        if compact.startswith(("晚上好", "晚好")) or (compact.startswith("晚上") and compact[2:3] in {"，", ",", "。", ".", "!", "！", "~", "～"}):
             return "evening_greeting"
         if re.search(r"(?:早晨|早上).{0,12}(?:安静|洗漱|刚醒|醒来|开机|早安|问候)", compact) and minute < 11 * 60:
             return "morning_greeting"
