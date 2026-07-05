@@ -548,6 +548,16 @@ class TtsEnhancementMixin:
         cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
         return _single_line(cleaned, 2000)
 
+    @staticmethod
+    def _has_meaningful_tts_content(text: str) -> bool:
+        content = str(text or "").strip()
+        if not content:
+            return False
+        content = re.sub(r"[（(][^（()]*[）)]", "", content)
+        simplified = re.sub(r"\[[^\[\]\n]{1,24}\]", "", content)
+        simplified = re.sub(r"[\s\.,，。!！?？~～…:：;；、\-—_()（）\[\]{}<>《》'\"“”‘’`|｜/\\]+", "", simplified)
+        return bool(simplified)
+
     def _sanitize_tts_spoken_text(self, text: str, *, provider_kind: str) -> str:
         """Clean text immediately before get_audio, scoped to TTS强化 only."""
         if not text:
@@ -584,11 +594,10 @@ class TtsEnhancementMixin:
         source = re.sub(r"^\s*[,，、;；]\s*", "", source)
         source = re.sub(r"\s+", " ", source).strip()
 
-        for token, original in protected.items():
-            source = source.replace(token, original)
         source = source.strip()
-        compact = re.sub(r"[\s\W_]+", "", source, flags=re.UNICODE)
-        return source if compact else ""
+        if not self._has_meaningful_tts_content(source):
+            return ""
+        return source
 
     def _tts_session_key(self, event: Any) -> str:
         return _single_line(getattr(event, "unified_msg_origin", ""), 160) if event is not None else ""
