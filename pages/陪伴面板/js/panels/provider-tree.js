@@ -1,12 +1,4 @@
 window.PrivateCompanionProviderTree = (() => {
-  function stateForTree(context) {
-    const { state } = context;
-    if (!state.providerTreeState) {
-      state.providerTreeState = { pinnedGroups: {}, pinnedCards: {} };
-    }
-    return state.providerTreeState;
-  }
-
   function providerValuesForRender(context) {
     const { state } = context;
     return {
@@ -280,26 +272,17 @@ window.PrivateCompanionProviderTree = (() => {
     `;
   }
 
-  function shouldExpandGroup(context, groupEntries, groupId) {
-    const treeState = stateForTree(context);
-    if (Object.prototype.hasOwnProperty.call(treeState.pinnedGroups, groupId)) return treeState.pinnedGroups[groupId];
-    const query = (context.state.providerFilter || "").trim();
-    if (query) return true;
-    return groupEntries.some(([key]) => Boolean(context.state.providerDraft?.[key] || context.state.overview?.providers?.[key]));
-  }
-
   function providerGroupMarkup(context, group, groupEntries, providers) {
     const { escapeHtml } = context;
-    const expanded = shouldExpandGroup(context, groupEntries, group.id);
     return `
-      <section class="provider-group provider-tree-group ${expanded ? "is-expanded" : ""}" data-provider-group="${escapeHtml(group.id)}">
-        <button type="button" class="provider-group-head provider-group-toggle" data-provider-group-toggle="${escapeHtml(group.id)}" aria-expanded="${expanded ? "true" : "false"}">
+      <section class="provider-group provider-tree-group" data-provider-group="${escapeHtml(group.id)}">
+        <div class="provider-group-head">
           <div>
             <h3>${escapeHtml(group.title)}</h3>
             <p>${escapeHtml(group.desc)}</p>
           </div>
           <span>${groupEntries.length} 项</span>
-        </button>
+        </div>
         <div class="provider-group-body">
           <div class="provider-grid provider-tree-grid">
             ${groupEntries.map(([key, label]) => providerCardMarkup(context, key, label, providers)).join("")}
@@ -307,28 +290,6 @@ window.PrivateCompanionProviderTree = (() => {
         </div>
       </section>
     `;
-  }
-
-  function applyTreeInteractions(context) {
-    const { document } = context;
-    const treeState = stateForTree(context);
-    document.querySelectorAll("[data-provider-group-toggle]").forEach((button) => {
-      const groupId = button.dataset.providerGroupToggle;
-      const section = button.closest(".provider-tree-group");
-      if (!section) return;
-      const setExpanded = (expanded, pinned) => {
-        section.classList.toggle("is-expanded", expanded);
-        button.setAttribute("aria-expanded", expanded ? "true" : "false");
-        if (pinned) treeState.pinnedGroups[groupId] = expanded;
-      };
-      button.addEventListener("click", () => setExpanded(!section.classList.contains("is-expanded"), true));
-      button.addEventListener("mouseenter", () => {
-        if (!Object.prototype.hasOwnProperty.call(treeState.pinnedGroups, groupId)) setExpanded(true, false);
-      });
-      section.addEventListener("mouseleave", () => {
-        if (!Object.prototype.hasOwnProperty.call(treeState.pinnedGroups, groupId) && !(context.state.providerFilter || "").trim()) setExpanded(false, false);
-      });
-    });
   }
 
   function bindProviderTests(context) {
@@ -349,7 +310,6 @@ window.PrivateCompanionProviderTree = (() => {
         await testProvider(context, button.dataset.providerTest);
       });
     });
-    applyTreeInteractions(context);
   }
 
   function renderProviders(context) {

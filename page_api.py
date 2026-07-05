@@ -9137,7 +9137,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             parser = getattr(self.plugin, "_parse_text_list_config", None)
             if callable(parser):
                 limit = 300 if key == "recall_forbidden_words" else 120
-                return parser(value, limit=limit)
+                try:
+                    return parser(value, limit=limit)
+                except TypeError:
+                    return parser(value)
             if isinstance(value, list):
                 limit = 300 if key == "recall_forbidden_words" else 120
                 return [str(item).strip() for item in value if str(item or "").strip()][:limit]

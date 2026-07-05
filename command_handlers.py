@@ -3180,6 +3180,7 @@ class CommandHandlersMixin:
             getattr(self, "natural_language_photo_extra_prompt", DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT)
             or ""
         ).strip()
+        visual_memory = self._visual_photo_memory_context(memory_context)
         if kind == "edit" and has_reference:
             base = (
                 "基于用户提供或引用的参考图进行改图。"
@@ -3199,7 +3200,7 @@ class CommandHandlersMixin:
                 part
                 for part in [
                     base,
-                    f"我会牢牢记住你 相关记忆：{_single_line(memory_context, 760)}；使用方式：优先保持今日穿搭、当前地点、最近自拍和用户偏好的一致性。" if memory_context else "",
+                    f"视觉连续性参考：{visual_memory}；只作为衣着、地点、角色外观或画面风格参考，不要生成任何文字、标签、说明栏或提示词内容。" if visual_memory else "",
                     extra_prompt,
                     f"风格：{style_name}；{style_instruction}",
                 ]
@@ -3207,6 +3208,91 @@ class CommandHandlersMixin:
             ),
             6500,
         )
+
+    def _visual_photo_memory_context(self, memory_context: str, *, limit: int = 520) -> str:
+        raw = str(memory_context or "").strip()
+        if not raw:
+            return ""
+        raw = re.sub(r"<instruction\b[^>]*>.*?(?:</instruction>|$)", " ", raw, flags=re.I | re.S)
+        raw = re.sub(r"</?(?:MemoryCompanion-Context|memory_companion_context)\b[^>]*>", " ", raw, flags=re.I)
+        raw = re.sub(r"<[^>\n]{0,120}>", " ", raw)
+        raw = raw.replace("RememberYou", "我会牢牢记住你")
+        reject_tokens = (
+            "MemoryCompanion",
+            "memory_companion",
+            "instruction",
+            "固定分工",
+            "persona_memory",
+            "open_loops",
+            "promise",
+            "relationship",
+            "emotional",
+            "facts",
+            "不是用户新发言",
+            "不是新的回复任务",
+            "先回应",
+            "不要让旧话题",
+            "按 ",
+            "分区理解",
+            "只影响语气",
+            "不确定内容",
+            "必须带不确定",
+        )
+        visual_tokens = (
+            "穿搭",
+            "衣",
+            "裙",
+            "外套",
+            "上衣",
+            "裤",
+            "鞋",
+            "袜",
+            "配饰",
+            "发夹",
+            "发型",
+            "发色",
+            "头发",
+            "瞳色",
+            "眼睛",
+            "表情",
+            "脸",
+            "自拍",
+            "照片",
+            "参考图",
+            "颜色",
+            "色调",
+            "风格",
+            "背景",
+            "地点",
+            "位置",
+            "室内",
+            "室外",
+            "家里",
+            "学校",
+            "咖啡",
+            "房间",
+            "街",
+            "公园",
+            "天气",
+        )
+        parts = re.split(r"[\n\r。；;|｜]+", raw)
+        kept: list[str] = []
+        for part in parts:
+            item = _single_line(part, 120)
+            if not item:
+                continue
+            if any(token in item for token in reject_tokens):
+                continue
+            if not any(token in item for token in visual_tokens):
+                continue
+            item = re.sub(r"^(?:[-*·•]\s*|\d+[.、]\s*)", "", item).strip()
+            item = re.sub(r"^(?:我会牢牢记住你|RememberYou|MemoryCompanion)\s*(?:相关)?(?:记忆|参考)?[：:]\s*", "", item, flags=re.I).strip()
+            item = re.sub(r"^(?:记忆|相关记忆|参考|内容|摘要)[：:]\s*", "", item).strip()
+            if item and item not in kept:
+                kept.append(_single_line(item, 90))
+            if len(kept) >= 5:
+                break
+        return _single_line("；".join(kept), limit)
 
     def _natural_language_photo_ack_text(self, *, kind: str, has_reference: bool) -> str:
         return "等我一下。"

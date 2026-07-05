@@ -12171,10 +12171,15 @@ function syncFeatureProviderInput(select) {
 }
 
 function collectFeatureDetailPayload(featureKey, root = document) {
-  const features = { [featureKey]: toBool(state.featureDraft[featureKey]) };
+  const overviewSettings = state.overview?.settings || {};
+  const features = {};
   const settings = {};
   const providers = {};
-  const overviewSettings = state.overview?.settings || {};
+  if (Object.prototype.hasOwnProperty.call(overviewSettings, featureKey)) {
+    settings[featureKey] = toBool(state.featureDraft[featureKey]);
+  } else {
+    features[featureKey] = toBool(state.featureDraft[featureKey]);
+  }
   root.querySelectorAll("[data-feature-param]").forEach((input) => {
     const key = input.dataset.featureParam;
     if (!key) return;

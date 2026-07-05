@@ -1962,21 +1962,7 @@ input[type="search"] {
   font-size: 12px;
 }
 
-.provider-group-toggle {
-  width: 100%;
-  border: 0;
-  padding: 0 0 8px;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
 .provider-group-body {
-  display: none;
-}
-
-.provider-tree-group.is-expanded .provider-group-body {
   display: block;
 }
 

@@ -2857,6 +2857,22 @@ class PrivateImageMixin:
 
     async def _private_image_reply_chain(self, text: str, event: AstrMessageEvent) -> list[Any]:
         normalized = str(text or "").strip()
+        restorer = getattr(self, "_restore_protected_tts_blocks", None)
+        if callable(restorer) and "[[PCTTS:" in normalized:
+            try:
+                normalized = str(restorer(normalized, event) or normalized).strip()
+            except Exception:
+                pass
+        placeholder_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)
+        if callable(placeholder_cleaner) and "[[PCTTS:" in normalized:
+            cleaned = placeholder_cleaner(normalized)
+            if cleaned != normalized:
+                logger.warning(
+                    "[PrivateCompanion] 私聊单图发送前清理孤儿 TTS 占位符: before=%s after=%s",
+                    _single_line(normalized, 120),
+                    _single_line(cleaned, 120),
+                )
+                normalized = cleaned
         normalizer = getattr(self, "_normalize_tts_tags", None)
         if callable(normalizer) and re.search(r"</?t{2,}s\b", normalized, flags=re.IGNORECASE):
             try:
@@ -2891,6 +2907,7 @@ class PrivateImageMixin:
         for comp in chain or []:
             if isinstance(comp, Plain):
                 text = str(getattr(comp, "text", "") or "").strip()
+                text = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", text).strip()
                 if text:
                     cleaned.append(Plain(text))
                 continue
@@ -3306,7 +3323,6 @@ class PrivateImageMixin:
             setattr(framework_event, "private_companion_deferred_private_image_only_ready", True)
             setattr(framework_event, "private_companion_deferred_private_image_only", False)
             setattr(framework_event, "private_companion_skip_external_token_stats", True)
-            setattr(framework_event, "private_companion_force_sanitize_tools", True)
             setattr(framework_event, "private_companion_delayed_image_vision_text", vision_text)
             setattr(framework_event, "private_companion_delayed_image_sources", list(request_image_refs))
             buffered_image_mode = _single_line(buffer.get("image_mode"), 20)
@@ -3463,17 +3479,6 @@ class PrivateImageMixin:
                         config=build_cfg,
                         req=req,
                     )
-                    built_req = getattr(built, "provider_request", None)
-                    if built_req is not None:
-                        sanitizer = getattr(self, "_sanitize_passive_private_agent_tools", None)
-                        if callable(sanitizer):
-                            sanitizer(framework_event, built_req)
-                        runner_obj = getattr(built, "agent_runner", None)
-                        if runner_obj is not None:
-                            try:
-                                runner_obj.req = built_req
-                            except Exception:
-                                pass
                     return built
 
                 capture_runner = getattr(self, "_capture_framework_send_message_calls", None)
@@ -3604,13 +3609,20 @@ class PrivateImageMixin:
                 reply = ""
                 reply_source = "no_vision_guard_fallback"
             if reply:
+                reply_preview = reply
+                preview_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)
+                if callable(preview_cleaner):
+                    try:
+                        reply_preview = preview_cleaner(reply_preview)
+                    except Exception:
+                        reply_preview = reply
                 logger.info(
                     "[PrivateCompanion] 私聊单图主链回复生成: user=%s chars=%s intent=%s ownership=%s reply_preview=%s",
                     user_id,
                     len(reply),
                     intent_line or "无",
                     ownership_line or "无",
-                    _single_line(reply, 180),
+                    _single_line(reply_preview, 180),
                 )
             if not reply:
                 if not vision_text and images and has_visual_provider:

@@ -4835,6 +4835,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         state = self.data.get("daily_state", {}) if isinstance(getattr(self, "data", {}), dict) else {}
         weather = self._format_weather_for_prompt() if callable(getattr(self, "_format_weather_for_prompt", None)) else ""
         schedule_hint = self._daily_outfit_schedule_text()
+        visual_memory = ""
+        visual_memory_getter = getattr(self, "_visual_photo_memory_context", None)
+        if callable(visual_memory_getter):
+            try:
+                visual_memory = visual_memory_getter(memory_context, limit=520)
+            except Exception:
+                visual_memory = ""
         diary_hint = _single_line(
             (diary or {}).get("summary")
             or (diary or {}).get("share_seed")
@@ -4851,9 +4858,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "穿搭决策：优先服从日程里明确出现的衣服、外套、校服、睡衣、发夹、饰品、出门、上课、运动、雨天或居家线索；如果一天有多段活动,选最能代表白天主要生活/外出安排的一套,不要只按深夜睡前状态生成睡衣。",
             f"补充生活余味：{diary_hint or '暂无额外余味,主要服从今日日程、天气和状态来决定当天搭配。'}",
             (
-                "我会牢牢记住你 穿搭连续性参考："
-                f"{_single_line(memory_context, 700)}。使用方式：优先保持今日穿搭、近期自拍、用户常问衣服颜色和当前地点的一致性；不要在最终图片中出现文字说明。"
-                if memory_context
+                "视觉连续性参考："
+                f"{visual_memory}。只作为衣着、地点、角色外观或画面风格参考；不要在最终图片中出现任何文字、标签或说明栏。"
+                if visual_memory
                 else ""
             ),
             "画面要求：角色本人必须露脸,头部、脸、发型和表情完整入镜；可以是半身、七分身或全身,但绝不能裁掉头、遮住脸或只拍衣服。衣服搭配要清楚,姿态自然,像今天顺手拍下来的 selfie outfit photo。",

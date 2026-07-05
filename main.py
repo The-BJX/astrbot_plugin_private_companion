@@ -1266,6 +1266,7 @@ class PrivateCompanionPlugin(
         self._last_input_status_at: dict[str, float] = {}
         self._passive_input_status_tasks: dict[str, asyncio.Task] = {}
         self._recent_inbound_activity_by_scope: dict[str, dict[str, Any]] = {}
+        self._recent_outfit_command_sends: dict[str, float] = {}
         self._startup_maintenance_task: asyncio.Task | None = None
         self._qzone_last_bot = None
         startup_load_started = time.perf_counter()
@@ -1852,7 +1853,6 @@ class PrivateCompanionPlugin(
                 return
             companion_receipt = bool(
                 getattr(event, "private_companion_proactive_framework", False)
-                or getattr(event, "private_companion_force_sanitize_tools", False)
             )
             if not companion_receipt:
                 logger.debug(
@@ -4772,206 +4772,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             boundary_index,
         )
 
-    def _tool_name_for_private_passive_guard(self, tool: Any) -> str:
-        if tool is None:
-            return ""
-        if isinstance(tool, dict):
-            for key in ("name", "tool_name"):
-                value = tool.get(key)
-                if value:
-                    return str(value).strip()
-            func = tool.get("function")
-            if isinstance(func, dict) and func.get("name"):
-                return str(func.get("name")).strip()
-        for attr in ("name", "tool_name", "__name__"):
-            value = getattr(tool, attr, None)
-            if value:
-                return str(value).strip()
-        return ""
-
-    @staticmethod
-    def _private_passive_tool_blocklist() -> set[str]:
-        return {
-            "send_message_to_user",
-            "future_task",
-            "astrbot_file_read_tool",
-            "astrbot_file_write_tool",
-            "astrbot_file_edit_tool",
-            "astrbot_grep_tool",
-            "astrbot_execute_shell",
-            "astrbot_execute_python",
-            "launch_application",
-            "screenshot",
-            "move_mouse",
-            "click_mouse",
-            "type_text",
-            "press_key",
-        }
-
-    @staticmethod
-    def _private_passive_tool_leak_text(text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.lower()
-        hard_markers = (
-            "permission denied. send message to another session",
-            "platform_id:message_type:session_id",
-            "you must use the `send_message_to_user` tool",
-            "use `send_message_to_user` to deliver",
-            "image_generation_task_result",
-            "agent 使用工具",
-            "tool `send_message_to_user` result",
-            "all chat models failed",
-            "badrequesterror",
-            "provider api error",
-            "functiondeclaration",
-            "schema didn't specify",
-        )
-        if any(marker in lowered for marker in hard_markers):
-            return True
-        tool_markers = (
-            "send_message_to_user",
-            "future_task",
-            "web_search_tavily",
-            "astrbot_file_read_tool",
-            "astrbot_file_write_tool",
-        )
-        if sum(1 for marker in tool_markers if marker in lowered) >= 2:
-            return True
-        return False
-
-    def _sanitize_passive_private_agent_context(self, event: AstrMessageEvent, req: ProviderRequest) -> int:
-        contexts = getattr(req, "contexts", None)
-        if not isinstance(contexts, list) or not contexts:
-            return 0
-        cleaned: list[Any] = []
-        removed = 0
-        reasoning_cleaned = 0
-        for item in contexts:
-            role = ""
-            content: Any = item
-            if isinstance(item, dict):
-                role = str(item.get("role") or "").strip().lower()
-                if role in {"assistant", "ai", "bot"}:
-                    item, stripped_reasoning, drop_item = self._strip_assistant_reasoning_context(item)
-                    if drop_item:
-                        removed += 1
-                        continue
-                    if stripped_reasoning:
-                        reasoning_cleaned += 1
-                content = item.get("content")
-            text = self._plain_context_content_for_fast_reply(content)
-            proactive_archive_checker = getattr(self, "_proactive_archive_context_text", None)
-            if callable(proactive_archive_checker):
-                try:
-                    if proactive_archive_checker(text):
-                        removed += 1
-                        continue
-                except Exception:
-                    pass
-            if role in {"assistant", "system", "tool"} and self._private_passive_tool_leak_text(text):
-                removed += 1
-                continue
-            cleaned.append(item)
-        if removed or reasoning_cleaned:
-            try:
-                req.contexts = cleaned
-            except Exception:
-                return 0
-            logger.info(
-                "[PrivateCompanion] 私聊被动主链已清理工具代理/主动占位/推理片段污染历史: session=%s removed=%s reasoning_cleaned=%s",
-                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
-                removed,
-                reasoning_cleaned,
-            )
-        return removed + reasoning_cleaned
-
-    @staticmethod
-    def _strip_assistant_reasoning_context(item: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
-        content = item.get("content")
-        if isinstance(content, list):
-            kept: list[Any] = []
-            changed = False
-            for part in content:
-                if isinstance(part, dict):
-                    part_type = str(part.get("type") or part.get("kind") or "").strip().lower()
-                    if part_type in {"think", "thinking", "reasoning", "reasoning_content"}:
-                        changed = True
-                        continue
-                kept.append(part)
-            if not changed:
-                return item, False, False
-            if not kept:
-                return item, True, True
-            updated = dict(item)
-            updated["content"] = kept
-            return updated, True, False
-        if isinstance(content, dict):
-            part_type = str(content.get("type") or content.get("kind") or "").strip().lower()
-            if part_type in {"think", "thinking", "reasoning", "reasoning_content"}:
-                return item, True, True
-        return item, False, False
-
-    def _sanitize_passive_private_agent_tools(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
-        force_sanitize = bool(getattr(event, "private_companion_force_sanitize_tools", False))
-        if bool(getattr(event, "is_wake", False)) and not force_sanitize:
-            return
-        if "cron" in event.__class__.__name__.lower():
-            return
-        prompt_surface = "\n".join(
-            [
-                str(getattr(req, "system_prompt", "") or ""),
-                str(getattr(req, "prompt", "") or ""),
-            ]
-        )
-        if "image_generation_task_result" in prompt_surface or "send_message_to_user` to deliver" in prompt_surface:
-            return
-        blocklist = self._private_passive_tool_blocklist()
-        toolset = getattr(req, "func_tool", None)
-        removed: list[str] = []
-        if toolset is not None:
-            tools = getattr(toolset, "tools", None)
-            if isinstance(tools, list):
-                kept = []
-                for tool in tools:
-                    name = self._tool_name_for_private_passive_guard(tool)
-                    if name in blocklist:
-                        removed.append(name)
-                        continue
-                    kept.append(tool)
-                if len(kept) != len(tools):
-                    try:
-                        toolset.tools = kept
-                    except Exception:
-                        pass
-            elif isinstance(tools, dict):
-                for name in list(tools.keys()):
-                    clean_name = str(name or "").strip()
-                    if clean_name in blocklist:
-                        removed.append(clean_name)
-                        tools.pop(name, None)
-            elif isinstance(toolset, list):
-                kept = []
-                for tool in toolset:
-                    name = self._tool_name_for_private_passive_guard(tool)
-                    if name in blocklist:
-                        removed.append(name)
-                        continue
-                    kept.append(tool)
-                if len(kept) != len(toolset):
-                    try:
-                        req.func_tool = kept
-                    except Exception:
-                        pass
-        context_removed = self._sanitize_passive_private_agent_context(event, req)
-        if removed:
-            logger.info(
-                "[PrivateCompanion] 私聊被动主链已裁剪高风险工具: session=%s tools=%s context_removed=%s",
-                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
-                ",".join(sorted(set(removed))),
-                context_removed,
-            )
-
     def _rest_reply_window_active(self) -> bool:
         raw = str(getattr(self, "rest_reply_active_windows", "") or "").strip()
         if not raw:
@@ -5680,8 +5480,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 _single_line(rest_reason, 120),
             )
         self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
-        if is_private_chat:
-            self._sanitize_passive_private_agent_tools(event, req)
         await self._enrich_request_context_image_placeholders(event, req)
         group_id_for_lock = ""
         if not is_private_chat and self._feature_enabled_or_temp_unlocked("enable_group_companion"):
@@ -6939,6 +6737,42 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return "\n\n".join(parts)
         return "可查看的提示词类型：日程 / 细化 / 主动 / 回复注入"
 
+    def _should_skip_recent_outfit_command_send(
+        self,
+        event: AstrMessageEvent,
+        *,
+        text: str,
+        image_path: str,
+        ttl_seconds: float = 30.0,
+    ) -> bool:
+        cache = getattr(self, "_recent_outfit_command_sends", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._recent_outfit_command_sends = cache
+        now = _now_ts()
+        ttl = max(1.0, float(ttl_seconds or 30.0))
+        for key, ts in list(cache.items()):
+            if now - _safe_float(ts, 0.0) > ttl:
+                cache.pop(key, None)
+        try:
+            scope = self._event_scope_key(event)
+        except Exception:
+            scope = _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown"
+        signature = hashlib.sha1(
+            f"{scope}|daily_outfit_photo|{text}|{image_path}".encode("utf-8", errors="ignore")
+        ).hexdigest()[:20]
+        last_at = _safe_float(cache.get(signature), 0.0)
+        if last_at and now - last_at <= ttl:
+            logger.info(
+                "[PrivateCompanion] 已跳过重复的每日穿搭命令发图: scope=%s image=%s age=%.1fs",
+                _single_line(scope, 120),
+                _single_line(image_path, 160),
+                now - last_at,
+            )
+            return True
+        cache[signature] = now
+        return False
+
     @filter.command("陪伴", alias={"私聊陪伴", "主动陪伴"})
     async def companion_command(self, event: AstrMessageEvent):
         """管理私聊陪伴状态、日程、记忆、风格、重要日期和可选外部动作。"""
@@ -7340,11 +7174,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     await self._reply(event, f"每日穿搭照片未生成：图片文件不存在 {image_path}")
                     event.stop_event()
                     return
-                try:
-                    await event.send(self._build_outbound_result("换好啦，你看", image_path))
-                except Exception:
-                    chain = self._build_outbound_chain("换好啦，你看", image_path)
-                    await event.send(event.chain_result(chain))
+                caption = "换好啦，你看"
+                if not self._should_skip_recent_outfit_command_send(event, text=caption, image_path=image_path):
+                    try:
+                        await self._reply_with_optional_media(event, caption, image_path)
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 每日穿搭命令发图异常,为避免重复发送已不再兜底补发: image=%s err=%s",
+                            _single_line(image_path, 160),
+                            _single_line(exc, 180),
+                        )
             else:
                 error = _single_line((outfit or {}).get("error") if isinstance(outfit, dict) else "", 180)
                 note = _single_line((outfit or {}).get("note") if isinstance(outfit, dict) else "", 180)
