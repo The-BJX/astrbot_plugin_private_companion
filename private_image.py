@@ -3472,6 +3472,7 @@ class PrivateImageMixin:
             if not direct_image_mode and raw_image_sources:
                 file_ref_lines = "\n".join(f"- {p}" for p in raw_image_sources if p)
                 prompt = f"{prompt}\n\n【图片文件路径】\n{file_ref_lines}"
+                logger.info("[PrivateCompanion|DBG][CurrentFullPrompt当前应注入上下文----------------------]"+prompt)
             req = ProviderRequest(
                 prompt=prompt,
                 conversation=conv,
