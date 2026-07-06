@@ -6009,6 +6009,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     priority=55,
                     source="private_image",
                 )
+                image_path_lines = "\n".join(
+                    f"- {p}" for p in buffered_images[:5] if str(p or "").strip()
+                )
+                if image_path_lines:
+                    prompt_surface.add(
+                        "image.file_paths",
+                        f"【图片文件路径】\n{image_path_lines}",
+                        priority=54,
+                        source="private_image",
+                    )
                 await self._memory_companion_record_image_observation(
                     event,
                     content=buffered_image_vision,

@@ -3469,6 +3469,9 @@ class PrivateImageMixin:
                 llm_safety_mode=False,
                 streaming_response=False,
             )
+            if not direct_image_mode and raw_image_sources:
+                file_ref_lines = "\n".join(f"- {p}" for p in raw_image_sources if p)
+                prompt = f"{prompt}\n\n【图片文件路径】\n{file_ref_lines}"
             req = ProviderRequest(
                 prompt=prompt,
                 conversation=conv,
