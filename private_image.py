@@ -3489,8 +3489,8 @@ class PrivateImageMixin:
                 )
             await self.inject_humanized_state(framework_event, req)
             
-            logger.info("[PrivateCompanion|DBG][req完成人化时extra_user_content_parts 将登太行雪满山]"+getattr(req,"extra_user_content_parts"))
-            logger.info("[PrivateCompanion|DBG][req完成人化时context最后2元素 闲来垂钓碧溪上]"+getattr(req,"context")[-2:]+getattr(req,"context")[-1:])
+            logger.info("[PrivateCompanion|DBG][req完成人化时extra_user_content_parts 将登太行雪满山]"+str(getattr(req,"extra_user_content_parts")))
+            logger.info("[PrivateCompanion|DBG][req完成人化时context最后2元素 闲来垂钓碧溪上]"+str(getattr(req,"context")[-2:])+str(getattr(req,"context")[-1:]))
             
             
             boundary_intro = (
