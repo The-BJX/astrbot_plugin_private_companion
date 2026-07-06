@@ -3491,7 +3491,6 @@ class PrivateImageMixin:
             
             logger.info("[PrivateCompanion|DBG][req完成人化时extra_user_content_parts 将登太行雪满山]"+str(getattr(req,"extra_user_content_parts")))
             logger.info("[PrivateCompanion|DBG][req完成人化时contexts最后2元素 闲来垂钓碧溪上][1]"+str(getattr(req,"contexts")[-2:])+"[2]"+str(getattr(req,"contexts")[-1:]))
-            logger.info("[PrivateCompanion|DBG][req完成人化时prompt最后2元素 忽复乘舟梦日边]"+str(getattr(req,"prompt")[-2:])+"[2]"+str(getattr(req,"prompt")[-1:]))
             
             
             boundary_intro = (
@@ -3513,9 +3512,6 @@ class PrivateImageMixin:
                 boundary_prompt = f"{boundary_prompt}\n\n{recent_group_context}"
             current_prompt = str(getattr(req, "system_prompt", "") or "")
             req.system_prompt = f"{current_prompt}\n\n{boundary_prompt}".strip() if current_prompt else boundary_prompt
-            logger.info("[PrivateCompanion|DBG][req的system_prompt 行路难 行路难]"+req.system_prompt)
-            
-
             if direct_image_mode:
                 existing = getattr(req, "image_urls", None)
                 if not isinstance(existing, list):
