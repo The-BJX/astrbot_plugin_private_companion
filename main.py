@@ -43,7 +43,7 @@ except ImportError:
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core import file_token_service
-from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
+from astrbot.core.astr_main_agent import MainAgentBuildConfig, __agent
 from astrbot.core.agent.message import AssistantMessageSegment, TextPart, UserMessageSegment
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_session import MessageSession
