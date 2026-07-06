@@ -1361,8 +1361,9 @@ class PrivateImageMixin:
             image_caption_provider_id = ""
         if selected and image_caption_provider_id and selected == image_caption_provider_id:
             logger.info(
-                "[PrivateCompanion] 私聊图片 selected_provider 是图片转述模型,不按主视觉模型直挂: provider=%s",
+                "[PrivateCompanion|DBG] _event_main_provider_supports_image: selected 匹配 caption_provider, 判定不直挂: selected=%s caption=%s",
                 selected,
+                image_caption_provider_id,
             )
             selected = ""
         getter = getattr(self.context, "get_provider_by_id", None)
@@ -1383,7 +1384,14 @@ class PrivateImageMixin:
                         provider = None
                 except Exception:
                     provider = None
-        return self._provider_supports_image(provider)
+        result = self._provider_supports_image(provider)
+        logger.info(
+            "[PrivateCompanion|DBG] _event_main_provider_supports_image: selected=%s provider_type=%s supports=%s",
+            selected,
+            type(provider).__name__ if provider is not None else "None",
+            result,
+        )
+        return result
 
     @staticmethod
     def _exception_indicates_image_input_unsupported(exc: Exception) -> bool:
@@ -3336,6 +3344,13 @@ class PrivateImageMixin:
             buffered_image_mode = _single_line(buffer.get("image_mode"), 20)
             main_provider_supports_image = self._event_main_provider_supports_image(framework_event)
             has_visual_provider = self._has_private_image_visual_provider(umo)
+            logger.info(
+                "[PrivateCompanion|DBG] 私聊单图 provider 能力: main_supports_image=%s has_visual_provider=%s umo=%s selected_provider=%s",
+                main_provider_supports_image,
+                has_visual_provider,
+                umo,
+                _single_line(str(getattr(framework_event, "get_extra", lambda k: "")( "selected_provider") or ""), 60),
+            )
             has_dynamic_gif_sources = (
                 bool(getattr(self, "enable_private_image_gif_enhancement", True))
                 and self._private_image_sources_include_gif(raw_image_sources)
@@ -3367,6 +3382,13 @@ class PrivateImageMixin:
             elif request_image_refs:
                 setattr(framework_event, "private_companion_delayed_image_mode", "caption" if has_visual_provider else "no_vision")
             if not direct_image_mode and has_visual_provider and not vision_text and images:
+                logger.info(
+                    "[PrivateCompanion|DBG] 私聊单图 进入caption路径: has_visual=%s has_vision_text=%s images=%s vision_task=%s",
+                    has_visual_provider,
+                    bool(vision_text),
+                    len(images),
+                    vision_task is not None,
+                )
                 completed_vision = self._completed_private_image_vision_task_text(vision_task)
                 if completed_vision:
                     vision_text = _single_line(completed_vision, self._private_image_vision_text_limit(len(images)))
@@ -3387,6 +3409,13 @@ class PrivateImageMixin:
                     reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
             if not vision_text and not direct_image_mode:
                 reply = self._private_image_no_vision_fallback_reply(user_id)
+                logger.info(
+                    "[PrivateCompanion|DBG] 私聊单图 无可视摘要，走兜底回复: user=%s vision_text=%s direct=%s reply=%s",
+                    user_id,
+                    bool(vision_text),
+                    direct_image_mode,
+                    _single_line(reply, 120),
+                )
                 logger.info(
                     "[PrivateCompanion] 私聊单图无可靠视觉摘要,跳过主链防止旧上下文猜图: user=%s images=%s reply_preview=%s",
                     user_id,
