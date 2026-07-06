@@ -5936,6 +5936,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     for request_ref in self._private_image_sources_for_astrbot_request([image_ref]):
                         if request_ref not in image_refs:
                             image_refs.append(request_ref)
+                logger.info(
+                    "[PrivateCompanion|DBG] 通用请求构造 buffered→refs: buffered=%s refs=%s",
+                    [str(b)[:80] for b in buffered_images[:5]],
+                    [str(r)[:80] for r in image_refs],
+                )
                 if not image_refs:
                     logger.info(
                         "[PrivateCompanion] 私聊延迟图片无模型可读源,跳过直接挂图: user=%s images=%s",
@@ -7470,16 +7475,38 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     text=text,
                     now=received_ts,
                 )
+            # ──────────────────────────────────────────────────────
+            # 【图片处理前置条件】检查图片增强功能是否可用
+            # ──────────────────────────────────────────────────────
             private_image_enhancement_enabled = (
                 self._feature_enabled_or_temp_unlocked("enable_private_image_self_recognition")
                 and bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True)))
                 and self._message_debounce_seconds("image") > 0
             )
+            # ──────────────────────────────────────────────────────
+            # 【分支判断】是不是"仅图片"消息？
+            # _is_private_image_only_message 的逻辑：
+            #   1. 文字部分为空或只有 "[图片]"/"【图片】"/"图片" 这类占位符
+            #   2. 消息组件中存在至少一个 Image 组件
+            #   3. 不存在其他有效文字组件（At/Reply 除外）
+            # → 满足以上条件：走「仅图片」分支（下方 private_image_only 块）
+            # → 不满足：有文字 + 图片 → 走「图文混合」分支
+            # ──────────────────────────────────────────────────────
             private_image_only = (
                 is_target_user
                 and private_image_enhancement_enabled
                 and self._is_private_image_only_message(event, text)
             )
+            # ══════════════════════════════════════════════════════
+            # 【分支 1】图片 + 文字混合消息处理
+            # 条件：有文字 + 不是纯合并消息 + 图片增强已启用 + 不是仅图片 + 事件中包含图片
+            # 流程：
+            #   1. 将消息中的图片持久化到本地
+            #   2. 检查当前 LLM provider 是否支持原生图片输入 → direct 模式
+            #   3. 不支持原生图片但有视觉模型 → caption 模式（调用视觉模型转述图片内容为文字）
+            #   4. 都不支持 → no_vision 模式（跳过识图，当纯文本处理）
+            #   5. 将图片源和模式信息附加到 event 对象上，后续 LLM 请求时带上
+            # ══════════════════════════════════════════════════════
             if (
                 is_target_user
                 and text
@@ -7529,6 +7556,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                     image_mode = "direct" if direct_image_mode else "caption" if has_visual_provider else "no_vision"
                     setattr(event, "private_companion_delayed_image_mode", image_mode)
+                    logger.info(
+                        "[PrivateCompanion|DBG] 私聊图文混合 event 已附加: usable=%s mode=%s direct=%s",
+                        [str(u)[:80] for u in usable_images[:5]],
+                        image_mode,
+                        direct_image_mode,
+                    )
                     if image_mode == "caption":
                         try:
                             vision_text = _single_line(
@@ -7582,9 +7615,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     self._schedule_data_save()
                     event.stop_event()
                     return
+            # ══════════════════════════════════════════════════════
+            # 【分支 2】仅图片消息处理（无文字，或文字仅为 "[图片]" 占位）
+            # 核心思路：不是立即回复，而是进入一个"防抖等待"缓冲区
+            # 流程：
+            #   1. 将事件标记为已延迟（标记 deferred flag）
+            #   2. 在语义缓冲中放置一条占位消息，等待 window_seconds 秒
+            #   3. 将图片持久化并存入 buffer，同时启动后台视觉转述任务（caption 模式时）
+            #   4. 启动一个异步定时器 _finalize_private_image_buffer_after_wait
+            #
+            #   【等待期间有两种情况】：
+            #   a) 用户在窗口内又发了文字消息 → 后续消息到达时会检测到 buffer
+            #      中的现有图片，自动合并为"图文混合"消息（见上方 elif 分支的
+            #      buffered_images 检测），本分支不再执行
+            #   b) 窗口超时用户未补充文字 → _finalize_private_image_buffer_after_wait
+            #      取出缓存的图片和视觉转述结果，构造一个特殊 prompt（告诉 LLM
+            #      "用户只发了一张图没说话，请根据图片内容回应"），重新送入主链
+            # ══════════════════════════════════════════════════════
             if private_image_only:
+                # 标记该事件已被延迟处理
                 setattr(event, "private_companion_deferred_private_image_only", True)
                 key = self._semantic_buffer_key(f"private:{user_id}", user_id)
+                # 在语义缓冲区写入占位消息，等待用户可能补充的文字
                 self._note_semantic_message_buffer(
                     key,
                     "用户刚刚先单独发送了一张图片,可能马上会补充说明。",
@@ -7594,9 +7646,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 )
                 buffers = getattr(self, "_semantic_message_buffers", None)
                 if isinstance(buffers, dict) and isinstance(buffers.get(key), dict):
+                    # 将消息中的图片持久化保存到本地
                     persisted_images = await self._persist_private_inbound_images(event, user_id)
+                    # 检查图片是否可以被 LLM provider 直接用作模型输入 URL
                     has_model_usable_image = any(self._private_image_source_to_model_url(source) for source in persisted_images)
                     if not persisted_images:
+                        # 未能解析到任何可用图片源，放弃处理，放行原始事件
                         buffers.pop(key, None)
                         setattr(event, "private_companion_deferred_private_image_only", False)
                         logger.info(
@@ -7612,14 +7667,27 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                             user_id,
                             len(persisted_images),
                         )
+                    # 将图片源、原始事件存入 buffer，以便超时后构造回复
                     buffers[key]["images"] = persisted_images
                     buffers[key]["original_event"] = event
+                    logger.info(
+                        "[PrivateCompanion|DBG] 私聊单图 buffer 已存: user=%s persisted=%s",
+                        user_id,
+                        [str(p)[:80] for p in persisted_images],
+                    )
+                    # GIF 动态图需要特殊处理（不支持直接送入模型）
                     has_dynamic_gif_sources = (
                         bool(getattr(self, "enable_private_image_gif_enhancement", True))
                         and self._private_image_sources_include_gif(persisted_images)
                     )
                     umo = str(getattr(event, "unified_msg_origin", "") or "")
+                    # 判断消息来源是否有可用的视觉模型（用于 caption 模式）
                     has_visual_provider = self._has_private_image_visual_provider(umo)
+                    # 决定图片处理模式：
+                    #   direct:  主 LLM 直接支持图片输入 → 图片随消息一起发给 LLM
+                    #   caption: 主 LLM 不支持图片但有视觉模型 → 先用视觉模型转述图
+                    #            片内容为文字，再把文字描述发给 LLM
+                    #   no_vision: 没有视觉能力 → 告诉 LLM 看不清，请用户补充说明
                     direct_image_mode = (
                         bool(persisted_images)
                         and self._event_main_provider_supports_image(event)
@@ -7627,6 +7695,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                     image_mode = "direct" if direct_image_mode else "caption" if has_visual_provider else "no_vision"
                     buffers[key]["image_mode"] = image_mode
+                    # caption 模式：提前启动异步视觉转述任务，在等待期间并行执行
                     if persisted_images and image_mode == "caption":
                         buffers[key]["vision_task"] = asyncio.create_task(
                             self._transcribe_private_inbound_images(
@@ -7641,14 +7710,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         image_mode,
                         bool(persisted_images) and image_mode == "caption",
                     )
+                    # 启动超时等待器：窗口过后若用户未补充文字，取 buffer 中的图片和转述
+                    # 结果，构造特殊 prompt 送入主链（见 _finalize_private_image_buffer_after_wait）
                     asyncio.create_task(self._finalize_private_image_buffer_after_wait(key, user_id, received_ts))
                 self._schedule_data_save()
+                # 阻止事件继续在本轮被处理，等待防抖结果
                 event.stop_event()
                 return
             elif is_target_user and not forward_only_prompt and not reference_media_with_text:
                 key = self._semantic_buffer_key(f"private:{user_id}", user_id)
                 buffers = getattr(self, "_semantic_message_buffers", None)
                 existing_buffer = buffers.get(key) if isinstance(buffers, dict) else None
+                # ──────────────────────────────────────────────────────────
+                # 【图文合并】检测到之前的"仅图片"防抖 buffer 中有待处理的图片
+                # 当用户先发了一张图片，然后在防抖窗口内又发了文字 → 走这里
+                # 将新文字追加到 buffer 的 messages 列表中，最终 buffer 超时后
+                # 会合并图片 + 文字作为"图文混合消息"统一处理
+                # ──────────────────────────────────────────────────────────
                 buffered_images = (
                     isinstance(existing_buffer, dict)
                     and isinstance(existing_buffer.get("images"), list)

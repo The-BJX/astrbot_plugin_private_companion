@@ -3292,6 +3292,12 @@ class PrivateImageMixin:
         image_items = self._private_image_model_image_items(raw_image_sources)
         model_image_urls = [url for _, url in image_items]
         request_image_refs = self._private_image_sources_for_astrbot_request(raw_image_sources)
+        logger.info(
+            "[PrivateCompanion|DBG] 私聊单图 _send_delayed: raw_sources=%s model_urls=%s request_refs=%s",
+            [str(s)[:80] for s in raw_image_sources],
+            [str(u)[:80] for u in model_image_urls],
+            [str(r)[:80] for r in request_image_refs],
+        )
         try:
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             framework_event = event
@@ -3339,6 +3345,14 @@ class PrivateImageMixin:
                 and buffered_image_mode == "direct"
                 and main_provider_supports_image
                 and not has_dynamic_gif_sources
+            )
+            logger.info(
+                "[PrivateCompanion|DBG] 私聊单图 direct_image_mode 判定: buffer_mode=%s main_supports=%s has_gif=%s request_refs=%s → direct=%s",
+                buffered_image_mode,
+                main_provider_supports_image,
+                has_dynamic_gif_sources,
+                len(request_image_refs),
+                direct_image_mode,
             )
             direct_provider_id = ""
             direct_provider_source = "current_main_provider"
@@ -3435,6 +3449,10 @@ class PrivateImageMixin:
             selected_provider_changed = False
             if direct_image_mode:
                 req.image_urls = list(request_image_refs)
+                logger.info(
+                    "[PrivateCompanion|DBG] 私聊单图 req.image_urls 已赋值(第一次): urls=%s",
+                    [str(u)[:80] for u in req.image_urls],
+                )
             await self.inject_humanized_state(framework_event, req)
             boundary_intro = (
                 "用户当前只发了一张图片,没有文字补充；但当前没有可靠视觉摘要,本轮也没有把图片直接交给主模型。"
@@ -3463,6 +3481,10 @@ class PrivateImageMixin:
                     if image_ref not in existing:
                         existing.append(image_ref)
                 req.image_urls = existing
+                logger.info(
+                    "[PrivateCompanion|DBG] 私聊单图 req.image_urls 终值(第二次): urls=%s",
+                    [str(u)[:80] for u in req.image_urls],
+                )
                 logger.info(
                     "[PrivateCompanion] 私聊单图主链已挂载图片: user=%s provider=%s source=%s images=%s has_vision=%s",
                     user_id,
@@ -3759,11 +3781,12 @@ class PrivateImageMixin:
             for item in messages
         )
         if has_followup:
-            logger.info("[PrivateCompanion] 私聊单图已由补充消息接管: user=%s", user_id)
+            logger.info("[PrivateCompanion|DBG] 私聊单图 _finalize 检测到补充消息, 跳过自行处理: user=%s", user_id)
             return
         buffers.pop(key, None)
         original_event = buffer.get("original_event")
         if isinstance(original_event, AstrMessageEvent):
+            logger.info("[PrivateCompanion|DBG] 私聊单图 _finalize 准备调用 _send_delayed: user=%s images=%s", user_id, buffer.get("images"))
             await self._send_delayed_private_image_only_event(original_event, user_id, buffer)
             return
         vision_task = buffer.get("vision_task")
