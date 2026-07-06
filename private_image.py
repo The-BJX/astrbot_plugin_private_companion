@@ -3472,12 +3472,13 @@ class PrivateImageMixin:
             if not direct_image_mode and raw_image_sources:
                 file_ref_lines = "\n".join(f"- {p}" for p in raw_image_sources if p)
                 prompt = f"{prompt}\n\n【图片文件路径】\n{file_ref_lines}"
-                logger.info("[PrivateCompanion|DBG][CurrentFullPrompt当前应注入上下文----------------------]"+prompt)
+                logger.info("[PrivateCompanion|DBG][图片地址进入上下文 欲渡黄河冰塞川]"+prompt)
             req = ProviderRequest(
                 prompt=prompt,
                 conversation=conv,
                 session_id=getattr(framework_event, "session_id", None) or umo,
             )
+
             previous_selected_provider = ""
             selected_provider_changed = False
             if direct_image_mode:
@@ -3487,6 +3488,11 @@ class PrivateImageMixin:
                     [str(u)[:80] for u in req.image_urls],
                 )
             await self.inject_humanized_state(framework_event, req)
+            
+            logger.info("[PrivateCompanion|DBG][req完成人化时extra_user_content_parts 将登太行雪满山]"+req.getattr("extra_user_content_parts"))
+            logger.info("[PrivateCompanion|DBG][req完成人化时context最后2元素 闲来垂钓碧溪上]"+req.getattr("context")[-2:]+req.getattr("context")[-1:])
+            
+            
             boundary_intro = (
                 "用户当前只发了一张图片,没有文字补充；但当前没有可靠视觉摘要,本轮也没有把图片直接交给主模型。"
                 "你不能看见图片内容,不要猜测画面、天气、地点、人物、表情、截图文字或图片类型。"
