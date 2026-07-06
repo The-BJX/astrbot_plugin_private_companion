@@ -3491,6 +3491,7 @@ class PrivateImageMixin:
             
             logger.info("[PrivateCompanion|DBG][req完成人化时extra_user_content_parts 将登太行雪满山]"+str(getattr(req,"extra_user_content_parts")))
             logger.info("[PrivateCompanion|DBG][req完成人化时contexts最后2元素 闲来垂钓碧溪上][1]"+str(getattr(req,"contexts")[-2:])+"[2]"+str(getattr(req,"contexts")[-1:]))
+            logger.info("[PrivateCompanion|DBG][req完成人化时prompt元素 忽复乘舟梦日边]"+str(getattr(req,"prompt")))
             
             
             boundary_intro = (
